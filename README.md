@@ -1,49 +1,205 @@
 # QQNT Toolbox
 
-A toolbox plugin for LiteLoaderQQNT. Press right Ctrl to open the draggable settings panel.
+适用于 LiteLoaderQQNT 的 QQNT 工具箱插件，集成图片发送修复、消息复读、语音消息与语音库、阻止撤回、界面调整和功能精简。
 
-## Features
+按键盘右侧的 `Ctrl`（RCtrl）可以打开或关闭工具箱面板。面板第一次打开时位于 QQ 窗口中央，可拖动标题栏调整位置。
 
-- Image retry: repairs failed image-only NoSeq messages by changing one visually indistinguishable pixel and resending to the original chat.
-- Message repeat: adds a `+1` beside a message or `复读` to QQ's context menu, including native PTT voice repeat and real group mentions.
-- Voice messages: drops audio/video files onto QQ's voice panel and sends the extracted audio as native PTT.
-- Voice library: saves, previews, renames, organizes, and sends local voice items and folders.
-- Voice saving: adds `保存` to the native context menu for QQ voice messages.
-- Prevent recall: preserves recalled messages across navigation and restarts, marks them in chat, and provides a conversation-based viewer.
-- Interface tools: configurable sidebar, toolbar, image viewer, navigation, message drag, bubble skin, and account-menu adjustments.
+> 原 `QQNT-Voice-File-Sender` 的功能已经合并到本插件，不需要同时安装旧插件。
 
-The former `QQNT-Voice-File-Sender` project has been merged into this plugin and is superseded by QQNT Toolbox.
+## 使用要求
 
-## Installation
+- 使用 QQNT 客户端，并已正确安装支持 Manifest V4 插件的 LiteLoaderQQNT。
+- 语音发送、音视频转换和部分语音预览需要 [FFmpeg](https://ffmpeg.org/)。
+- Release 压缩包已经包含 `silk-wasm`，普通用户不需要安装 Node.js，也不需要执行 `npm install`。
+- 当前主要在 Windows QQNT 上开发和测试。插件清单同时声明支持 Linux 和 macOS，但不同系统、QQ 版本之间可能存在兼容性差异。
+- 插件依赖 QQNT 内部接口和页面结构。QQ 大版本更新后如果功能失效，请先确认是否已有新版插件。
 
-1. Download `QQNT-Toolbox-v0.6.2.zip` from Releases.
-2. Extract the `QQNT-Toolbox` folder into `LiteLoaderQQNT/plugins`.
-3. Install `ffmpeg` and make it available through `PATH`, or set `FFMPEG_PATH` to the full path of `ffmpeg.exe`.
-4. Restart QQ.
+### 检查 FFmpeg
 
-The release archive already includes the required `silk-wasm` runtime.
+在终端执行：
 
-## Data
+```powershell
+ffmpeg -version
+```
 
-Plugin settings, recall data, and the voice library are stored under:
+能够显示版本信息即表示配置成功。也可以设置环境变量 `FFMPEG_PATH`，其值为 `ffmpeg.exe` 的完整路径，例如：
+
+```text
+C:\ffmpeg\bin\ffmpeg.exe
+```
+
+设置环境变量后需要完全退出并重新启动 QQ。
+
+## 安装
+
+1. 完全退出 QQ。
+2. 从 [Releases](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) 下载最新的 `QQNT-Toolbox-v*.zip`。
+3. 解压后，将其中的 `QQNT-Toolbox` 文件夹放到 `LiteLoaderQQNT/plugins`。
+4. 确认最终路径中直接存在 `manifest.json`：
+
+   ```text
+   LiteLoaderQQNT\plugins\QQNT-Toolbox\manifest.json
+   ```
+
+5. 删除或停用旧的语音发送插件，然后重新启动 QQ。
+
+更新插件时同样建议先退出 QQ，再覆盖 `QQNT-Toolbox` 插件目录。用户配置和语音库位于 LiteLoaderQQNT 的 `data` 目录中，正常覆盖插件目录不会删除这些数据。
+
+## 工具箱面板
+
+- 按右侧 `Ctrl` 打开或关闭面板。
+- 拖动标题栏可以在当前 QQ 窗口内移动面板。
+- 点击右上角关闭按钮只会隐藏面板，不会退出插件。
+- 分组标题可以展开或折叠，面板内容区域支持滚动。
+- 大多数开关会立即生效；依赖消息重新渲染的选项可能需要切换一次会话或重启 QQ。
+
+## 功能说明
+
+### 图片发送修复
+
+开启“消息相关 > 图片发送修复”后，插件会监听仅包含图片且发送状态为 Failed / NoSeq 的消息。检测到失败时，会修改图片中一个视觉上几乎无法分辨的像素，并向原会话重试一次。
+
+- 整个过程自动完成，不需要手动重新发送。
+- 只处理符合条件的图片消息，不处理普通文件或文字消息。
+- 每条失败消息只重试一次，避免循环发送。
+
+### 消息复读
+
+开启“消息相关 > 复读”后，可选择以下一种入口：
+
+- 关闭“右键菜单”：鼠标悬停消息时，在消息旁显示 `+1`。
+- 开启“右键菜单”：隐藏消息旁的 `+1`，在消息的 QQ 原生右键菜单中显示“复读”。
+
+“双击复读”只作用于消息旁的 `+1`，用于减少误触。右键菜单模式仍然是单击“复读”后发送。
+
+复读会尽量保留原始消息元素，包括群聊中的真实 `@` 信息。语音消息会作为原生 PTT 复读。插件不会在消息元素不完整时偷偷发送残缺内容；无法完整复读时会终止本次操作。
+
+### 移除回复 @
+
+开启“消息相关 > 移除回复 @”后，回复消息时会移除 QQ 自动附带的 `@` 标记。
+
+### 发送音频或视频中的声音
+
+1. 在目标聊天中打开 QQ 原版“语音消息”输入面板。
+2. 将音频或视频文件拖入这个语音面板。
+3. 插件提取音频、转换为 QQ PTT 格式，并发送到当前会话。
+
+支持的常见音频格式包括 `aac`、`amr`、`flac`、`m4a`、`mp3`、`ogg`、`opus`、`wav`、`weba`、`webm`；常见视频格式包括 `avi`、`flv`、`mkv`、`mov`、`mp4`、`mpeg`、`ts`、`webm`、`wmv` 等。
+
+注意：
+
+- 文件必须拖到已经打开的 QQ 原版语音面板，而不是聊天空白处或普通文件发送区域。
+- 拖放成功后会直接发送，不需要再点击 QQ 的发送按钮。
+- 视频只提取音轨，不会发送视频画面。
+- 不要手动把 `.silk` 文件再次拖入 QQ。
+
+### 语音库
+
+在聊天输入区右键 QQ 原版“语音消息”图标，可以打开语音库窗口。
+
+- “选择发送”：选择本地音频或视频，转换后直接发送到当前会话，不加入语音库。
+- “添加到语音库”：选择文件并保存到当前语音库文件夹。
+- 每条语音支持发送、播放、重命名和删除；删除前会二次确认。
+- 语音库支持文件夹，可以进入文件夹并返回上级。
+- 手动放入 `voices` 目录的文件或文件夹会在刷新后被识别。
+- 手动放入的原格式音视频显示为“待转换”，发送或预览时按需转换，不会在刷新时一次性处理全部文件。
+
+### 保存 QQ 语音消息
+
+同时开启“语音消息”和“右键保存语音”后，右键聊天中的语音消息，QQ 原生菜单中会出现“保存”。保存后的文件会进入语音库。
+
+如果 QQ 本地缓存中还没有这条语音，请先播放一次，再重新右键保存。
+
+### 阻止撤回
+
+开启“阻止撤回 > 启用”后，QQ 收到撤回事件时会尽量保留原消息，并在消息附近显示撤回标记。
+
+可选项包括：
+
+- 拦截自己的撤回操作。
+- 持久化保存撤回记录，使其在切换会话或重启后仍可查看。
+- 将被撤回图片复制到插件数据目录。
+- 分别设置浅色和深色主题下的撤回提示颜色。
+- 打开撤回消息查看器，按会话查看、复制、播放、预览图片或定位原消息。
+- 清理全部本地撤回缓存。
+
+阻止撤回只能处理插件启用后捕获到的消息和撤回事件，无法恢复插件安装前已经撤回的内容。自定义颜色修改后，可能需要切换会话或重新加载消息才能看到变化。
+
+### 界面调整
+
+“界面调整”中目前包含：
+
+- 图片查看器优化：点击空白关闭，支持拖动图片窗口。
+- 鼠标侧键返回会话主列表。
+- 阻止消息窗口中的误选和误拖。
+- 删除消息气泡装扮。
+- 隐藏天气、经典模式、锁定、退出账号、检查更新及更新通知等入口。
+- 隐藏 VIP 彩色昵称。
+
+### 功能精简
+
+“精简”分为侧边栏、顶部功能栏和聊天功能栏三个区域。这里的开关表示“隐藏对应项目”：
+
+- 开启某个项目的开关：隐藏它。
+- 关闭某个项目的开关：恢复显示。
+
+可精简项目会根据当前 QQ 页面动态识别，因此打开菜单时可能需要等待页面元素加载完成。
+
+### 调试日志
+
+默认不输出调试日志。只有开启“其他 > 调试功能 > 调试日志”后，插件才会输出诊断信息。日常使用建议保持关闭，仅在排查问题时临时开启。
+
+## 数据目录
+
+插件数据统一存放在：
 
 ```text
 LiteLoaderQQNT\data\qqnt_toolbox
 ```
 
-Voice library files are stored under:
+主要内容：
 
 ```text
-LiteLoaderQQNT\data\qqnt_toolbox\voice\library\voices
+qqnt_toolbox
+├─ config.json                 # 工具箱设置
+├─ image-retry                 # 图片修复产生的临时文件
+├─ prevent-recall              # 撤回记录和被撤回图片
+└─ voice\library\voices       # 语音库文件和文件夹
 ```
 
-## Credits
+可以直接在 `voices` 目录中手动整理音频、视频和子文件夹，完成后重新打开语音库或刷新列表。
 
-- [QAuxiliary](https://github.com/cinit/QAuxiliary): NoSeq image retry and repeat-message behavior references.
-- [lite-tools](https://github.com/xiyuesaves/lite-tools): prevent-recall persistence, interface tools, and recall-viewer references.
-- [LiteLoaderQQNT-Audio-Sender](https://github.com/xtaw/LiteLoaderQQNT-Audio-Sender): original voice-file sender concept and early implementation reference.
-- [silk-wasm](https://www.npmjs.com/package/silk-wasm): Silk codec runtime included in release archives under its own license.
+## 常见问题
 
-## License
+### 按 RCtrl 没有打开工具箱
 
-QQNT Toolbox is distributed under the [GNU Affero General Public License v3.0](LICENSE).
+- 确认按的是键盘右侧的 `Ctrl`，不是左侧 `Ctrl`。
+- 完全退出 QQ 后重新启动。
+- 检查插件目录是否多嵌套了一层文件夹。
+- 检查 LiteLoaderQQNT 的插件管理页面是否已经加载 `QQNT Toolbox`。
+
+### 音视频无法发送
+
+- 先执行 `ffmpeg -version`，确认 FFmpeg 可用。
+- 确认已经进入目标聊天并打开 QQ 原版语音面板。
+- 确认拖入的是受支持的本地音频或视频文件。
+- 若刚修改 `PATH` 或 `FFMPEG_PATH`，需要完全退出并重新启动 QQ。
+
+### 右键菜单出现重复项目或界面异常
+
+不要同时启用多个插件中的同类功能。特别是 `lite-tools` 的复读、阻止撤回、界面精简，以及旧语音发送插件，可能与 QQNT Toolbox 重复注入相同位置。保留一个插件负责对应功能即可。
+
+### QQ 更新后部分功能失效
+
+本插件使用 QQNT 内部接口和 DOM 结构，QQ 更新可能改变这些实现。请查看 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 或最新 Release；反馈问题时可以临时开启调试日志，并提供 QQ、LiteLoaderQQNT 和插件版本。
+
+## 致谢
+
+- [QAuxiliary](https://github.com/cinit/QAuxiliary)：参考 NoSeq 图片修复与消息复读的行为设计。
+- [lite-tools](https://github.com/xiyuesaves/lite-tools)：参考阻止撤回持久化、界面调整和撤回查看器设计。
+- [LiteLoaderQQNT-Audio-Sender](https://github.com/xtaw/LiteLoaderQQNT-Audio-Sender)：原始语音文件发送思路及早期实现参考。
+- [silk-wasm](https://www.npmjs.com/package/silk-wasm)：Release 中包含的 Silk 编解码运行库，遵循其自身许可证。
+
+## 许可证
+
+QQNT Toolbox 使用 [GNU Affero General Public License v3.0](LICENSE) 发布。

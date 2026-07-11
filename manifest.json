@@ -3,7 +3,7 @@
   "type": "extension",
   "name": "QQNT Toolbox",
   "slug": "qqnt_toolbox",
-  "description": "Image retry, message repeat, voice library, prevent recall, and interface tools for LiteLoaderQQNT.",
+  "description": "LiteLoaderQQNT 工具箱，包含图片发送修复、消息复读、语音库、阻止撤回和界面调整。",
   "version": "0.6.2",
   "authors": [
     {
