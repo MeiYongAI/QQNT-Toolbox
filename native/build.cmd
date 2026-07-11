@@ -10,5 +10,5 @@ if not exist "%VCVARS%" (
 call "%VCVARS%" >nul
 set "BUILD=%TEMP%\qqnt-toolbox-native"
 if not exist "%BUILD%" mkdir "%BUILD%"
-cl /nologo /std:c++20 /O2 /GL /MT /EHsc- /GR- /DNDEBUG /LD "%~dp0poke-bridge.cpp" /Fo"%BUILD%\poke-bridge.obj" /link /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /IMPLIB:"%BUILD%\poke-bridge.lib" /PDB:"%BUILD%\poke-bridge.pdb" /OUT:"%~dp0poke-bridge-42905.win32-x64.node"
+cl /nologo /std:c++20 /O2 /GL /MT /EHsc- /GR- /DNDEBUG /LD "%~dp0poke-bridge.cpp" /Fo"%BUILD%\poke-bridge.obj" /link /LTCG /OPT:REF /OPT:ICF /INCREMENTAL:NO /IMPLIB:"%BUILD%\poke-bridge.lib" /PDB:"%BUILD%\poke-bridge.pdb" /OUT:"%~dp0poke-bridge.win32-x64.node"
 exit /b %errorlevel%

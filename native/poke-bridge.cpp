@@ -20,10 +20,8 @@ namespace {
 
 constexpr napi_status NAPI_OK = 0;
 constexpr std::size_t PATCH_SIZE = 15;
+constexpr std::size_t SIGNATURE_SIZE = 48;
 
-using NapiGetCbInfo = napi_status(__cdecl*)(
-    napi_env, napi_callback_info, std::size_t*, napi_value*, napi_value*, void**);
-using NapiGetValueUint32 = napi_status(__cdecl*)(napi_env, napi_value, std::uint32_t*);
 using NapiCreateFunction = napi_status(__cdecl*)(
     napi_env, const char*, std::size_t, napi_callback, void*, napi_value*);
 using NapiSetNamedProperty = napi_status(__cdecl*)(napi_env, napi_value, const char*, napi_value);
@@ -34,8 +32,6 @@ using NapiCreateStringLatin1 = napi_status(__cdecl*)(
     napi_env, const char*, std::size_t, napi_value*);
 
 struct NapiApi {
-    NapiGetCbInfo getCbInfo = nullptr;
-    NapiGetValueUint32 getValueUint32 = nullptr;
     NapiCreateFunction createFunction = nullptr;
     NapiSetNamedProperty setNamedProperty = nullptr;
     NapiCreateInt32 createInt32 = nullptr;
@@ -55,7 +51,6 @@ using ConvertValue = InternalString*(__fastcall*)(InternalString*, napi_env, nap
 NapiApi g_napi;
 ConvertValue g_originalConvert = nullptr;
 std::uint8_t* g_target = nullptr;
-void* g_trampoline = nullptr;
 volatile LONG g_conversionArmed = 0;
 
 constexpr std::size_t MAX_INTERCEPTED_BUFFER_SIZE = 4096;
@@ -64,9 +59,13 @@ struct SuspendedThread {
     HANDLE handle;
 };
 
-constexpr std::uint8_t EXPECTED_PROLOGUE[PATCH_SIZE] = {
+constexpr std::uint8_t EXPECTED_SIGNATURE[SIGNATURE_SIZE] = {
     0x55, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48, 0x83,
-    0xEC, 0x60, 0x48, 0x8D, 0x6C, 0x24, 0x60
+    0xEC, 0x60, 0x48, 0x8D, 0x6C, 0x24, 0x60, 0x48,
+    0xC7, 0x45, 0xF8, 0xFE, 0xFF, 0xFF, 0xFF, 0x4C,
+    0x89, 0xC7, 0x48, 0x89, 0xD6, 0x49, 0x89, 0xCE,
+    0x48, 0x8D, 0x5D, 0xCC, 0x83, 0x23, 0x00, 0x48,
+    0x89, 0xD1, 0x4C, 0x89, 0xC2, 0x49, 0x89, 0xD8
 };
 
 template <typename T>
@@ -76,8 +75,6 @@ T resolveNapi(const char* name) {
 }
 
 bool resolveNapiApi() {
-    g_napi.getCbInfo = resolveNapi<NapiGetCbInfo>("napi_get_cb_info");
-    g_napi.getValueUint32 = resolveNapi<NapiGetValueUint32>("napi_get_value_uint32");
     g_napi.createFunction = resolveNapi<NapiCreateFunction>("napi_create_function");
     g_napi.setNamedProperty = resolveNapi<NapiSetNamedProperty>("napi_set_named_property");
     g_napi.createInt32 = resolveNapi<NapiCreateInt32>("napi_create_int32");
@@ -85,8 +82,7 @@ bool resolveNapiApi() {
     g_napi.getBufferInfo = resolveNapi<NapiGetBufferInfo>("napi_get_buffer_info");
     g_napi.createStringLatin1 =
         resolveNapi<NapiCreateStringLatin1>("napi_create_string_latin1");
-    return g_napi.getCbInfo && g_napi.getValueUint32 && g_napi.createFunction &&
-        g_napi.setNamedProperty && g_napi.createInt32 && g_napi.isBuffer &&
+    return g_napi.createFunction && g_napi.setNamedProperty && g_napi.createInt32 && g_napi.isBuffer &&
         g_napi.getBufferInfo && g_napi.createStringLatin1;
 }
 
@@ -106,6 +102,38 @@ bool getModuleSize(HMODULE module, std::uint32_t& size) {
     }
     size = nt->OptionalHeader.SizeOfImage;
     return size > 0;
+}
+
+std::uint8_t* findUniqueConvertTarget(HMODULE module, std::uint32_t imageSize) {
+    const auto* base = reinterpret_cast<const std::uint8_t*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+    if (directory.VirtualAddress == 0 || directory.Size < sizeof(RUNTIME_FUNCTION) ||
+        directory.VirtualAddress > imageSize || directory.Size > imageSize - directory.VirtualAddress) {
+        return nullptr;
+    }
+
+    const auto* functions = reinterpret_cast<const RUNTIME_FUNCTION*>(base + directory.VirtualAddress);
+    const std::size_t count = directory.Size / sizeof(RUNTIME_FUNCTION);
+    std::uint8_t* found = nullptr;
+    for (std::size_t index = 0; index < count; index += 1) {
+        const auto& function = functions[index];
+        if (function.EndAddress <= function.BeginAddress || function.EndAddress > imageSize ||
+            function.BeginAddress > imageSize - SIGNATURE_SIZE ||
+            function.EndAddress - function.BeginAddress < SIGNATURE_SIZE) {
+            continue;
+        }
+        auto* candidate = const_cast<std::uint8_t*>(base + function.BeginAddress);
+        if (std::memcmp(candidate, EXPECTED_SIGNATURE, SIGNATURE_SIZE) != 0) {
+            continue;
+        }
+        if (found) {
+            return nullptr;
+        }
+        found = candidate;
+    }
+    return found;
 }
 
 void writeAbsoluteJump(std::uint8_t* destination, const void* target) {
@@ -237,7 +265,7 @@ InternalString* __fastcall convertValueHook(
     return converted;
 }
 
-int installHook(std::uint32_t convertRva) {
+int installHook() {
     if (g_target) {
         return 2;
     }
@@ -246,13 +274,12 @@ int installHook(std::uint32_t convertRva) {
     if (!getModuleSize(wrapper, imageSize)) {
         return -3;
     }
-    if (convertRva > imageSize - PATCH_SIZE) {
+    if (imageSize < SIGNATURE_SIZE) {
         return -4;
     }
 
-    auto* base = reinterpret_cast<std::uint8_t*>(wrapper);
-    auto* target = base + convertRva;
-    if (std::memcmp(target, EXPECTED_PROLOGUE, PATCH_SIZE) != 0) {
+    auto* target = findUniqueConvertTarget(wrapper, imageSize);
+    if (!target) {
         return -5;
     }
 
@@ -297,22 +324,11 @@ int installHook(std::uint32_t convertRva) {
     resumeThreads(suspended, suspendedCount);
 
     g_target = target;
-    g_trampoline = trampoline;
     return 1;
 }
 
-napi_value __cdecl install(napi_env env, napi_callback_info info) {
-    napi_value args[1] = {};
-    std::size_t argc = 1;
-    std::int32_t result = -1;
-    if (g_napi.getCbInfo(env, info, &argc, args, nullptr, nullptr) == NAPI_OK && argc == 1) {
-        std::uint32_t convertRva = 0;
-        if (g_napi.getValueUint32(env, args[0], &convertRva) == NAPI_OK) {
-            result = installHook(convertRva);
-        } else {
-            result = -2;
-        }
-    }
+napi_value __cdecl install(napi_env env, napi_callback_info) {
+    const std::int32_t result = installHook();
     napi_value value = nullptr;
     g_napi.createInt32(env, result, &value);
     return value;

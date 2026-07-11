@@ -39,12 +39,7 @@ const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
 const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
 const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
 const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
-const POKE_NATIVE_TARGETS = new Map([
-    ['9.9.25-42905', {
-        binary: 'poke-bridge-42905.win32-x64.node',
-        convertRva: 0x0a12e74
-    }]
-]);
+const POKE_NATIVE_BINARY = 'poke-bridge.win32-x64.node';
 const MAX_RECALL_CACHE_SIZE = 100000;
 const IMAGE_EXTENSIONS = new Set([
     '.apng', '.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'
@@ -329,15 +324,6 @@ function registerPokeAccount(value) {
     return Boolean(selfUin);
 }
 
-function getQqVersion() {
-    try {
-        const packagePath = path.join(process.resourcesPath, 'app', 'package.json');
-        return String(JSON.parse(fsSync.readFileSync(packagePath, 'utf8'))?.version || '');
-    } catch {
-        return '';
-    }
-}
-
 function getQqWrapperApi() {
     if (pokeState.wrapperApi) {
         return pokeState.wrapperApi;
@@ -376,14 +362,9 @@ function installPokeBridge() {
     if (process.platform !== 'win32' || process.arch !== 'x64') {
         return false;
     }
-    const version = getQqVersion();
-    const target = POKE_NATIVE_TARGETS.get(version);
-    if (!target) {
-        return false;
-    }
     try {
-        pokeState.bridge ||= require(path.join(__dirname, '..', 'native', target.binary));
-        const code = Number(pokeState.bridge?.install?.(target.convertRva));
+        pokeState.bridge ||= require(path.join(__dirname, '..', 'native', POKE_NATIVE_BINARY));
+        const code = Number(pokeState.bridge?.install?.());
         pokeState.bridgeInstalled = code === 1 || code === 2;
         return pokeState.bridgeInstalled;
     } catch {
@@ -2935,7 +2916,6 @@ function installForAllWindows() {
 
 function start() {
     loadConfig();
-    installPokeBridge();
     loadPersistedRecallCache();
     installConfigIpc();
     installForAllWindows();
