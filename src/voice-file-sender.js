@@ -19,8 +19,12 @@ const VIDEO_FILE_EXTENSIONS = ['3g2', '3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v',
 const MEDIA_FILE_EXTENSIONS = uniqueStrings([...AUDIO_FILE_EXTENSIONS, ...VIDEO_FILE_EXTENSIONS]);
 const MEDIA_EXTENSION_SET = new Set(MEDIA_FILE_EXTENSIONS.map(extension => `.${extension}`));
 const TARGET_SILK_SAMPLE_RATE = 24000;
+const VOICE_WAVE_BIN_COUNT = 17;
+const VOICE_WAVE_MAX_AMPLITUDE = 99;
+const VOICE_WAVE_NOISE_FLOOR_DB = -60;
 let voiceFeatureEnabled = true;
 let voiceSaveInContextMenuEnabled = true;
+let fakeVoiceDurationSeconds = 0;
 
 function getPluginTempDir() {
     return path.join(os.tmpdir(), 'QQNT-Toolbox', VOICE_DATA_DIR_NAME);
@@ -1147,6 +1151,45 @@ function makePcm16Wav(pcmData, sampleRate, channels = 1) {
     return Buffer.concat([header, pcm]);
 }
 
+function calculatePcmWaveAmplitudes(pcmData, binCount = VOICE_WAVE_BIN_COUNT) {
+    const pcm = Buffer.from(pcmData);
+    const sampleCount = Math.floor(pcm.length / 2);
+    const count = Math.max(1, Math.trunc(Number(binCount)) || VOICE_WAVE_BIN_COUNT);
+    if (!sampleCount) {
+        return Array(count).fill(0);
+    }
+
+    const amplitudes = [];
+    for (let bin = 0; bin < count; bin += 1) {
+        const start = Math.floor(bin * sampleCount / count);
+        const end = Math.max(start + 1, Math.floor((bin + 1) * sampleCount / count));
+        const stride = Math.max(1, Math.floor((end - start) / 4096));
+        let sumSquares = 0;
+        let sampled = 0;
+        for (let sample = start; sample < end; sample += stride) {
+            const value = pcm.readInt16LE(sample * 2);
+            sumSquares += value * value;
+            sampled += 1;
+        }
+        if (!sumSquares || !sampled) {
+            amplitudes.push(0);
+            continue;
+        }
+        const rmsRatio = Math.sqrt(sumSquares / sampled) / 32768;
+        const decibels = 20 * Math.log10(rmsRatio);
+        const level = Math.min(1, Math.max(0,
+            (decibels - VOICE_WAVE_NOISE_FLOOR_DB) / -VOICE_WAVE_NOISE_FLOOR_DB
+        ));
+        amplitudes.push(Math.max(1, Math.round(level * VOICE_WAVE_MAX_AMPLITUDE)));
+    }
+    return amplitudes;
+}
+
+async function calculateSilkWaveAmplitudes(silkData) {
+    const decoded = await decode(toExactArrayBuffer(silkData), TARGET_SILK_SAMPLE_RATE);
+    return calculatePcmWaveAmplitudes(decoded.data);
+}
+
 function getSilkFrameStart(data) {
     const buffer = Buffer.from(data);
     if (buffer.length >= 10 && buffer[0] === 0x02 && buffer.subarray(1, 10).toString('latin1') === '#!SILK_V3') {
@@ -1284,6 +1327,7 @@ async function encodeMediaFileToSilk(mediaPath, options = {}) {
         return {
             data: repaired.data,
             duration: Number(options.durationMs) || estimateSilkDurationMs(repaired.data),
+            waveAmplitudes: await calculateSilkWaveAmplitudes(repaired.data),
             directSilk: true,
             sampleRate: TARGET_SILK_SAMPLE_RATE,
             silkRepair: {
@@ -1306,6 +1350,7 @@ async function encodeMediaFileToSilk(mediaPath, options = {}) {
         ...silkResult.data,
         data: repaired.data,
         duration: Number(silkResult.data.duration) || estimateSilkDurationMs(repaired.data),
+        waveAmplitudes: calculatePcmWaveAmplitudes(inputData),
         sampleRate: TARGET_SILK_SAMPLE_RATE,
         silkRepair: {
             action: repaired.action,
@@ -4236,8 +4281,9 @@ async function createNativePttCacheFile(silkPath) {
     return result;
 }
 
-async function createPttElement(silkPath, durationSeconds) {
+async function createPttElement(silkPath, durationSeconds, waveAmplitudes) {
     const fileInfo = await createNativePttCacheFile(silkPath);
+    const actualDuration = Math.max(1, Math.ceil(Number(durationSeconds) || 1));
     return {
         elementType: 4,
         elementId: '',
@@ -4246,12 +4292,12 @@ async function createPttElement(silkPath, durationSeconds) {
             filePath: fileInfo.filePath,
             md5HexStr: fileInfo.md5HexStr,
             fileSize: fileInfo.fileSize,
-            duration: Math.max(1, Math.ceil(Number(durationSeconds) || 1)),
+            duration: fakeVoiceDurationSeconds || actualDuration,
             formatType: 1,
             voiceType: 1,
             voiceChangeType: 0,
             canConvert2Text: true,
-            waveAmplitudes: [0, 18, 9, 23, 16, 17, 16, 15, 44, 17, 24, 20, 14, 15, 17],
+            waveAmplitudes,
             fileUuid: '',
             fileSubId: '',
             playState: 1,
@@ -4362,7 +4408,11 @@ async function sendMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) 
     const silkPath = await makeTempSilkPath();
     await fs.writeFile(silkPath, silkResult.data);
     try {
-        const pttElement = await createPttElement(silkPath, silkResult.duration / 1000);
+        const pttElement = await createPttElement(
+            silkPath,
+            silkResult.duration / 1000,
+            silkResult.waveAmplitudes
+        );
         const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
         const msgAttributeInfos = makeSendAttributeInfos(attrId);
         return await sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos, attrId);
@@ -4381,7 +4431,12 @@ async function sendSilkPathAsPtt(browserWindow, peer, silkPath, durationSeconds 
     if (!isSilkFile(silkPath)) {
         return await sendMediaPathAsPtt(browserWindow, peer, silkPath);
     }
-    const pttElement = await createPttElement(silkPath, durationSeconds);
+    const silkData = await fs.readFile(silkPath);
+    const pttElement = await createPttElement(
+        silkPath,
+        durationSeconds,
+        await calculateSilkWaveAmplitudes(silkData)
+    );
     const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
     const msgAttributeInfos = makeSendAttributeInfos(attrId);
     return await sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos, attrId);
@@ -4605,10 +4660,18 @@ function setSaveInContextMenuEnabled(enabled) {
     }
 }
 
+function setFakeDurationSeconds(value) {
+    const seconds = Math.trunc(Number(value));
+    fakeVoiceDurationSeconds = Number.isFinite(seconds) && seconds > 0
+        ? Math.min(seconds, 300)
+        : 0;
+}
+
 module.exports = {
     onBrowserWindowCreated,
     setEnabled,
     setSaveInContextMenuEnabled,
+    setFakeDurationSeconds,
     createPttPreviewItem,
     sendPttInfoAsPtt,
     sanitizePttInfo,

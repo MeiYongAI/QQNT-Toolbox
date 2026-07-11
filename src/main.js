@@ -75,7 +75,9 @@ const DEFAULT_CONFIG = {
     },
     voiceMessage: {
         enabled: true,
-        saveInContextMenu: true
+        saveInContextMenu: true,
+        fakeDurationEnabled: false,
+        fakeDurationSeconds: 1
     },
     messageTweaks: {
         promptNoSeq: false,
@@ -296,6 +298,15 @@ function isVoiceSaveInContextMenuEnabled() {
     return getConfig().voiceMessage.saveInContextMenu !== false;
 }
 
+function getFakeVoiceDurationSeconds() {
+    const config = getConfig().voiceMessage;
+    if (config.fakeDurationEnabled !== true) {
+        return 0;
+    }
+    const value = Math.trunc(Number(config.fakeDurationSeconds));
+    return Number.isFinite(value) ? Math.min(Math.max(value, 1), 300) : 1;
+}
+
 function getPreventRecallConfig() {
     return getConfig().preventRecall;
 }
@@ -316,6 +327,7 @@ function isPreventRecallEnabled() {
 function applyVoiceMessageConfig() {
     voiceFileSender?.setEnabled?.(isVoiceMessageEnabled());
     voiceFileSender?.setSaveInContextMenuEnabled?.(isVoiceSaveInContextMenuEnabled());
+    voiceFileSender?.setFakeDurationSeconds?.(getFakeVoiceDurationSeconds());
 }
 
 function registerPokeAccount(value) {

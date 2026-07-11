@@ -50,7 +50,9 @@
         },
         voiceMessage: {
             enabled: true,
-            saveInContextMenu: true
+            saveInContextMenu: true,
+            fakeDurationEnabled: false,
+            fakeDurationSeconds: 1
         },
         messageTweaks: {
             promptNoSeq: false,
@@ -1001,6 +1003,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
                     requires: 'voiceMessage.enabled',
                     child: true
+                }),
+                createSwitchItem(text('修改语音时长'), text('仅改变发送后的显示时长'), 'voiceMessage.fakeDurationEnabled', {
+                    requires: 'voiceMessage.enabled',
+                    child: true
+                }),
+                createNumberItem(text('显示时长'), text('范围 1–300 秒'), 'voiceMessage.fakeDurationSeconds', {
+                    requires: ['voiceMessage.enabled', 'voiceMessage.fakeDurationEnabled'],
+                    childLevel: 2,
+                    min: 1,
+                    max: 300,
+                    maxLength: 3,
+                    suffix: text('秒')
                 }),
                 createSwitchItem(text('复读'), text('消息尾部 +1 与右键复读'), 'repeatMessage.enabled'),
                 createSwitchItem(text('双击复读'), text('避免误触'), 'repeatMessage.doubleClick', {
