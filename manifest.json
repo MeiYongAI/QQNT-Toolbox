@@ -1,0 +1,28 @@
+{
+  "manifest_version": 4,
+  "type": "extension",
+  "name": "QQNT Toolbox",
+  "slug": "qqnt_toolbox",
+  "description": "Image retry, message repeat, voice library, prevent recall, and interface tools for LiteLoaderQQNT.",
+  "version": "0.6.2",
+  "authors": [
+    {
+      "name": "MeiYongAI",
+      "link": "https://github.com/MeiYongAI"
+    }
+  ],
+  "repository": {
+    "repo": "MeiYongAI/QQNT-Toolbox",
+    "branch": "main"
+  },
+  "platform": [
+    "win32",
+    "linux",
+    "darwin"
+  ],
+  "injects": {
+    "main": "./src/main.js",
+    "preload": "./src/preload.js",
+    "renderer": "./src/renderer.js"
+  }
+}
