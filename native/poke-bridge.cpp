@@ -1,0 +1,368 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <tlhelp32.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+struct napi_env__;
+struct napi_value__;
+struct napi_callback_info__;
+
+using napi_env = napi_env__*;
+using napi_value = napi_value__*;
+using napi_callback_info = napi_callback_info__*;
+using napi_callback = napi_value(__cdecl*)(napi_env, napi_callback_info);
+using napi_status = int;
+
+namespace {
+
+constexpr napi_status NAPI_OK = 0;
+constexpr std::size_t PATCH_SIZE = 15;
+
+using NapiGetCbInfo = napi_status(__cdecl*)(
+    napi_env, napi_callback_info, std::size_t*, napi_value*, napi_value*, void**);
+using NapiGetValueUint32 = napi_status(__cdecl*)(napi_env, napi_value, std::uint32_t*);
+using NapiCreateFunction = napi_status(__cdecl*)(
+    napi_env, const char*, std::size_t, napi_callback, void*, napi_value*);
+using NapiSetNamedProperty = napi_status(__cdecl*)(napi_env, napi_value, const char*, napi_value);
+using NapiCreateInt32 = napi_status(__cdecl*)(napi_env, std::int32_t, napi_value*);
+using NapiIsBuffer = napi_status(__cdecl*)(napi_env, napi_value, bool*);
+using NapiGetBufferInfo = napi_status(__cdecl*)(napi_env, napi_value, void**, std::size_t*);
+using NapiCreateStringLatin1 = napi_status(__cdecl*)(
+    napi_env, const char*, std::size_t, napi_value*);
+
+struct NapiApi {
+    NapiGetCbInfo getCbInfo = nullptr;
+    NapiGetValueUint32 getValueUint32 = nullptr;
+    NapiCreateFunction createFunction = nullptr;
+    NapiSetNamedProperty setNamedProperty = nullptr;
+    NapiCreateInt32 createInt32 = nullptr;
+    NapiIsBuffer isBuffer = nullptr;
+    NapiGetBufferInfo getBufferInfo = nullptr;
+    NapiCreateStringLatin1 createStringLatin1 = nullptr;
+};
+
+struct InternalString {
+    std::uint64_t capacityTag;
+    std::uint64_t size;
+    std::uint8_t* data;
+};
+
+using ConvertValue = InternalString*(__fastcall*)(InternalString*, napi_env, napi_value);
+
+NapiApi g_napi;
+ConvertValue g_originalConvert = nullptr;
+std::uint8_t* g_target = nullptr;
+void* g_trampoline = nullptr;
+volatile LONG g_conversionArmed = 0;
+
+constexpr std::size_t MAX_INTERCEPTED_BUFFER_SIZE = 4096;
+
+struct SuspendedThread {
+    HANDLE handle;
+};
+
+constexpr std::uint8_t EXPECTED_PROLOGUE[PATCH_SIZE] = {
+    0x55, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48, 0x83,
+    0xEC, 0x60, 0x48, 0x8D, 0x6C, 0x24, 0x60
+};
+
+template <typename T>
+T resolveNapi(const char* name) {
+    HMODULE executable = GetModuleHandleW(nullptr);
+    return executable ? reinterpret_cast<T>(GetProcAddress(executable, name)) : nullptr;
+}
+
+bool resolveNapiApi() {
+    g_napi.getCbInfo = resolveNapi<NapiGetCbInfo>("napi_get_cb_info");
+    g_napi.getValueUint32 = resolveNapi<NapiGetValueUint32>("napi_get_value_uint32");
+    g_napi.createFunction = resolveNapi<NapiCreateFunction>("napi_create_function");
+    g_napi.setNamedProperty = resolveNapi<NapiSetNamedProperty>("napi_set_named_property");
+    g_napi.createInt32 = resolveNapi<NapiCreateInt32>("napi_create_int32");
+    g_napi.isBuffer = resolveNapi<NapiIsBuffer>("napi_is_buffer");
+    g_napi.getBufferInfo = resolveNapi<NapiGetBufferInfo>("napi_get_buffer_info");
+    g_napi.createStringLatin1 =
+        resolveNapi<NapiCreateStringLatin1>("napi_create_string_latin1");
+    return g_napi.getCbInfo && g_napi.getValueUint32 && g_napi.createFunction &&
+        g_napi.setNamedProperty && g_napi.createInt32 && g_napi.isBuffer &&
+        g_napi.getBufferInfo && g_napi.createStringLatin1;
+}
+
+bool getModuleSize(HMODULE module, std::uint32_t& size) {
+    if (!module) {
+        return false;
+    }
+    const auto* base = reinterpret_cast<const std::uint8_t*>(module);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+        return false;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        return false;
+    }
+    size = nt->OptionalHeader.SizeOfImage;
+    return size > 0;
+}
+
+void writeAbsoluteJump(std::uint8_t* destination, const void* target) {
+    destination[0] = 0x48;
+    destination[1] = 0xB8;
+    const auto address = reinterpret_cast<std::uintptr_t>(target);
+    std::memcpy(destination + 2, &address, sizeof(address));
+    destination[10] = 0xFF;
+    destination[11] = 0xE0;
+}
+
+std::size_t suspendOtherThreads(
+    SuspendedThread* suspended,
+    std::size_t capacity,
+    const std::uint8_t* target,
+    const std::uint8_t* trampoline) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return static_cast<std::size_t>(-1);
+    }
+
+    const DWORD processId = GetCurrentProcessId();
+    const DWORD currentThreadId = GetCurrentThreadId();
+    std::size_t count = 0;
+    THREADENTRY32 entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID != processId || entry.th32ThreadID == currentThreadId) {
+                continue;
+            }
+            HANDLE thread = OpenThread(
+                THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION,
+                FALSE,
+                entry.th32ThreadID);
+            if (!thread) {
+                continue;
+            }
+            if (count == capacity || SuspendThread(thread) == static_cast<DWORD>(-1)) {
+                CloseHandle(thread);
+                continue;
+            }
+
+            CONTEXT context = {};
+            context.ContextFlags = CONTEXT_CONTROL;
+            if (!GetThreadContext(thread, &context)) {
+                ResumeThread(thread);
+                CloseHandle(thread);
+                continue;
+            }
+            const auto instruction = reinterpret_cast<const std::uint8_t*>(context.Rip);
+            if (instruction >= target && instruction < target + PATCH_SIZE) {
+                context.Rip = reinterpret_cast<DWORD64>(
+                    trampoline + (instruction - target));
+                if (!SetThreadContext(thread, &context)) {
+                    ResumeThread(thread);
+                    CloseHandle(thread);
+                    continue;
+                }
+            }
+            suspended[count++].handle = thread;
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return count;
+}
+
+void resumeThreads(SuspendedThread* suspended, std::size_t count) {
+    while (count > 0) {
+        HANDLE thread = suspended[--count].handle;
+        ResumeThread(thread);
+        CloseHandle(thread);
+    }
+}
+
+bool getBufferView(napi_env env, napi_value value, void*& data, std::size_t& length) {
+    bool isBuffer = false;
+    return g_napi.isBuffer(env, value, &isBuffer) == NAPI_OK && isBuffer &&
+        g_napi.getBufferInfo(env, value, &data, &length) == NAPI_OK;
+}
+
+InternalString* __fastcall convertValueHook(
+    InternalString* output,
+    napi_env env,
+    napi_value value) {
+    void* source = nullptr;
+    std::size_t length = 0;
+    if (!getBufferView(env, value, source, length)) {
+        return g_originalConvert(output, env, value);
+    }
+    if (InterlockedCompareExchange(&g_conversionArmed, 0, 1) != 1 ||
+        length > MAX_INTERCEPTED_BUFFER_SIZE) {
+        return g_originalConvert(output, env, value);
+    }
+    if (!output || (length > 0 && !source)) {
+        return nullptr;
+    }
+
+    char placeholder[MAX_INTERCEPTED_BUFFER_SIZE];
+    std::memset(placeholder, 'A', length);
+    napi_value placeholderValue = nullptr;
+    if (g_napi.createStringLatin1(env, placeholder, length, &placeholderValue) != NAPI_OK ||
+        !placeholderValue) {
+        return g_originalConvert(output, env, value);
+    }
+
+    InternalString* converted = g_originalConvert(output, env, placeholderValue);
+    if (!converted) {
+        return nullptr;
+    }
+
+    const auto tag = *reinterpret_cast<const std::uint8_t*>(converted);
+    std::uint8_t* destination = nullptr;
+    if ((tag & 1) != 0) {
+        if (converted->size != length || !converted->data) {
+            return nullptr;
+        }
+        destination = converted->data;
+    } else {
+        if (static_cast<std::size_t>(tag >> 1) != length) {
+            return nullptr;
+        }
+        destination = reinterpret_cast<std::uint8_t*>(converted) + 1;
+    }
+    if (length > 0) {
+        std::memcpy(destination, source, length);
+    }
+    destination[length] = 0;
+    return converted;
+}
+
+int installHook(std::uint32_t convertRva) {
+    if (g_target) {
+        return 2;
+    }
+    HMODULE wrapper = GetModuleHandleW(L"wrapper.node");
+    std::uint32_t imageSize = 0;
+    if (!getModuleSize(wrapper, imageSize)) {
+        return -3;
+    }
+    if (convertRva > imageSize - PATCH_SIZE) {
+        return -4;
+    }
+
+    auto* base = reinterpret_cast<std::uint8_t*>(wrapper);
+    auto* target = base + convertRva;
+    if (std::memcmp(target, EXPECTED_PROLOGUE, PATCH_SIZE) != 0) {
+        return -5;
+    }
+
+    constexpr std::size_t trampolineSize = PATCH_SIZE + 12;
+    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr,
+        trampolineSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE));
+    if (!trampoline) {
+        return -6;
+    }
+    std::memcpy(trampoline, target, PATCH_SIZE);
+    writeAbsoluteJump(trampoline + PATCH_SIZE, target + PATCH_SIZE);
+
+    g_originalConvert = reinterpret_cast<ConvertValue>(trampoline);
+
+    SuspendedThread suspended[1024] = {};
+    const std::size_t suspendedCount = suspendOtherThreads(
+        suspended,
+        sizeof(suspended) / sizeof(suspended[0]),
+        target,
+        trampoline);
+    if (suspendedCount == static_cast<std::size_t>(-1)) {
+        g_originalConvert = nullptr;
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return -7;
+    }
+
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(target, PATCH_SIZE, PAGE_EXECUTE_READWRITE, &oldProtection)) {
+        resumeThreads(suspended, suspendedCount);
+        g_originalConvert = nullptr;
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return -8;
+    }
+    writeAbsoluteJump(target, reinterpret_cast<const void*>(&convertValueHook));
+    std::memset(target + 12, 0x90, PATCH_SIZE - 12);
+    FlushInstructionCache(GetCurrentProcess(), target, PATCH_SIZE);
+    DWORD ignored = 0;
+    VirtualProtect(target, PATCH_SIZE, oldProtection, &ignored);
+    resumeThreads(suspended, suspendedCount);
+
+    g_target = target;
+    g_trampoline = trampoline;
+    return 1;
+}
+
+napi_value __cdecl install(napi_env env, napi_callback_info info) {
+    napi_value args[1] = {};
+    std::size_t argc = 1;
+    std::int32_t result = -1;
+    if (g_napi.getCbInfo(env, info, &argc, args, nullptr, nullptr) == NAPI_OK && argc == 1) {
+        std::uint32_t convertRva = 0;
+        if (g_napi.getValueUint32(env, args[0], &convertRva) == NAPI_OK) {
+            result = installHook(convertRva);
+        } else {
+            result = -2;
+        }
+    }
+    napi_value value = nullptr;
+    g_napi.createInt32(env, result, &value);
+    return value;
+}
+
+napi_value __cdecl armConversion(napi_env, napi_callback_info) {
+    InterlockedExchange(&g_conversionArmed, 1);
+    return nullptr;
+}
+
+napi_value __cdecl disarmConversion(napi_env, napi_callback_info) {
+    InterlockedExchange(&g_conversionArmed, 0);
+    return nullptr;
+}
+
+} // namespace
+
+extern "C" __declspec(dllexport) std::int32_t node_api_module_get_api_version_v1() {
+    return 8;
+}
+
+extern "C" __declspec(dllexport) napi_value napi_register_module_v1(
+    napi_env env,
+    napi_value exports) {
+    if (!resolveNapiApi()) {
+        return exports;
+    }
+    napi_value function = nullptr;
+    if (g_napi.createFunction(env, "install", 7, install, nullptr, &function) == NAPI_OK) {
+        g_napi.setNamedProperty(env, exports, "install", function);
+    }
+    function = nullptr;
+    if (g_napi.createFunction(
+        env,
+        "armConversion",
+        13,
+        armConversion,
+        nullptr,
+        &function) == NAPI_OK) {
+        g_napi.setNamedProperty(env, exports, "armConversion", function);
+    }
+    function = nullptr;
+    if (g_napi.createFunction(
+        env,
+        "disarmConversion",
+        16,
+        disarmConversion,
+        nullptr,
+        &function) == NAPI_OK) {
+        g_napi.setNamedProperty(env, exports, "disarmConversion", function);
+    }
+    return exports;
+}

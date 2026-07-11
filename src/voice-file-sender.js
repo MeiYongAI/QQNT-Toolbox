@@ -1,4 +1,4 @@
-const { BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 
 const util = require('util');
 const execFile = util.promisify(require("child_process").execFile);
@@ -90,9 +90,9 @@ function uniqueStrings(values) {
 
 function getTencentFilesRoots() {
     return uniqueStrings([
+        path.join(app.getPath('documents'), 'Tencent Files'),
         path.join(os.homedir(), 'Documents', 'Tencent Files'),
-        path.join(process.env.USERPROFILE || os.homedir(), 'Documents', 'Tencent Files'),
-        'D:\\Documents\\Tencent Files'
+        path.join(process.env.USERPROFILE || os.homedir(), 'Documents', 'Tencent Files')
     ]);
 }
 
@@ -190,14 +190,14 @@ function getToolCandidates(toolName) {
     return [
         process.env[`${toolName.toUpperCase()}_PATH`],
         process.env[`${toolName.toLowerCase()}_PATH`],
-        toolName === 'ffmpeg' ? 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe' : '',
-        toolName === 'ffmpeg' ? 'D:\\Documents\\LLBot-CLI-win-x64\\bin\\llbot\\ffmpeg.exe' : '',
+        ['ffmpeg', 'ffprobe'].includes(toolName)
+            ? `C:\\Program Files\\ffmpeg\\bin\\${toolName}.exe`
+            : '',
         toolName
     ].filter(Boolean);
 }
 
 async function runTool(toolName, args, options = {}) {
-    let notFoundError;
     for (const command of getToolCandidates(toolName)) {
         if (path.isAbsolute(command) && !fsSync.existsSync(command)) {
             continue;
@@ -210,7 +210,6 @@ async function runTool(toolName, args, options = {}) {
             });
         } catch (error) {
             if (error.code === 'ENOENT') {
-                notFoundError = error;
                 continue;
             }
             error.message = `${toolName} failed (${command}): ${error.message}`;
@@ -404,10 +403,6 @@ function getLibraryRelativePath(filePath) {
         return '';
     }
     return relativePath.replace(/\\/g, '/');
-}
-
-function isInsideLibraryVoiceDir(filePath) {
-    return Boolean(getLibraryRelativePath(filePath));
 }
 
 function encodeLibraryItemId(kind, relativePath) {
@@ -751,7 +746,7 @@ async function addVoiceDataToLibrary(voiceData, metadata = {}) {
     return item;
 }
 
-async function addFileToLibrary(sourcePath, kind = 'ptt', metadata = {}) {
+async function addFileToLibrary(sourcePath, metadata = {}) {
     if (!fsSync.existsSync(sourcePath)) {
         throw new Error(`File does not exist: ${sourcePath}`);
     }
@@ -1085,7 +1080,7 @@ async function addPttToLibrary(ptt) {
     }
     const duration = Number(ptt?.duration) || 0;
     const title = duration > 0 ? `语音 ${Math.ceil(duration)}s` : '语音消息';
-    return await addFileToLibrary(sourcePath, 'ptt', {
+    return await addFileToLibrary(sourcePath, {
         title,
         duration,
         originalName: ptt?.fileName || path.basename(sourcePath)
@@ -1318,13 +1313,6 @@ async function encodeMediaFileToSilk(mediaPath, options = {}) {
             after: repaired.after
         }
     };
-}
-
-function isEmptyNativeResult(value) {
-    return value === undefined ||
-        value === null ||
-        value === '' ||
-        isPlainEmptyObject(value);
 }
 
 function unwrapNativeValue(value) {
@@ -1942,10 +1930,17 @@ const VOICE_LIBRARY_PANEL_CSS = String.raw`
     padding: 0 8px;
     border: 1px solid var(--voice-border);
     border-radius: 6px;
-    color: var(--voice-text);
-    background: var(--voice-layer);
+    outline: 0;
+    color: var(--voice-text) !important;
+    -webkit-text-fill-color: var(--voice-text) !important;
+    caret-color: var(--voice-text);
+    background: var(--voice-layer) !important;
     font: 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     letter-spacing: 0;
+}
+#qqnt-toolbox-voice-library .qvlib-dialog input:focus {
+    border-color: var(--voice-accent);
+    background: var(--voice-hover) !important;
 }
 #qqnt-toolbox-voice-library .qvlib-dialog-actions {
     display: flex;
@@ -3197,28 +3192,6 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
     }
     function isInputOrToolbarElement(element) {
         return Boolean(element?.closest?.('input,textarea,[contenteditable="true"],[class*="input"],[class*="editor"],[class*="toolbar"],[class*="operation"]'));
-    }
-
-    function isInMessageList(element) {
-        if (!(element instanceof Element) || isInputOrToolbarElement(element)) {
-            return false;
-        }
-        let current = element;
-        for (let depth = 0; current && current !== document.documentElement && depth < 12; depth += 1) {
-            const className = String(current.className || '');
-            if (/ptt|voice|audio|bubble/i.test(className)) {
-                return true;
-            }
-            if (/(messageitem|msgitem)|(^|\b)(message|msg)(\b|[-_])/i.test(className) && !/input|editor|toolbar|operation|panel|root|list/i.test(className)) {
-                return true;
-            }
-            current = current.parentElement;
-        }
-        return false;
-    }
-
-    function isInMessageEvent(event) {
-        return (event.composedPath?.() || []).some(item => item instanceof Element && isInMessageList(item));
     }
 
     function isInsideNativeContextMenu(element) {
@@ -4638,5 +4611,6 @@ module.exports = {
     setSaveInContextMenuEnabled,
     createPttPreviewItem,
     sendPttInfoAsPtt,
-    sanitizePttInfo
+    sanitizePttInfo,
+    runTool
 };

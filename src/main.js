@@ -4,13 +4,18 @@ const fsSync = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { Readable, Writable } = require('stream');
 const { pathToFileURL } = require('url');
 const { serialize, deserialize } = require('v8');
 const { deflateSync, inflateSync } = require('zlib');
+const { ZipWriter } = require('@zip.js/zip.js');
+const { randomizePngEncoding } = require('./png-variant');
+const { buildPokePacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
 const MSG_UPDATE_CMD = 'nodeIKernelMsgListener/onMsgInfoListUpdate';
+const POKE_RECEIVE_CMD = 'nodeIKernelMsgListener/onRecvMsg';
 const SEND_STATUS_FAILED = 0;
 const SEND_STATUS_SUCCESS_NO_SEQ = 3;
 const MAX_RETRY_PER_RECORD = 1;
@@ -20,6 +25,8 @@ const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
+const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
+const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
 const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
 const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
 const CHANNEL_OPEN_RECALL_IMAGE_DIR = 'qqnt-toolbox:open-recall-image-dir';
@@ -28,9 +35,27 @@ const CHANNEL_GET_RECALL_VIEWER_DATA = 'qqnt-toolbox:get-recall-viewer-data';
 const CHANNEL_GET_RECALL_AUDIO_PREVIEW = 'qqnt-toolbox:get-recall-audio-preview';
 const CHANNEL_JUMP_RECALL_MESSAGE = 'qqnt-toolbox:jump-recall-message';
 const CHANNEL_COPY_RECALL_TEXT = 'qqnt-toolbox:copy-recall-text';
+const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
+const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
+const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
+const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
+const POKE_NATIVE_TARGETS = new Map([
+    ['9.9.25-42905', {
+        binary: 'poke-bridge-42905.win32-x64.node',
+        convertRva: 0x0a12e74
+    }]
+]);
 const MAX_RECALL_CACHE_SIZE = 100000;
 const IMAGE_EXTENSIONS = new Set([
     '.apng', '.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'
+]);
+const VIDEO_EXTENSIONS = new Set([
+    '.3g2', '.3gp', '.asf', '.avi', '.flv', '.m2ts', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg',
+    '.mts', '.ogv', '.ts', '.vob', '.webm', '.wmv'
+]);
+const AUDIO_EXTENSIONS = new Set([
+    '.aac', '.ac3', '.aiff', '.alac', '.amr', '.ape', '.flac', '.m4a', '.mka', '.mp3', '.ogg', '.opus',
+    '.wav', '.weba', '.wma'
 ]);
 let voiceFileSender = null;
 try {
@@ -39,8 +64,14 @@ try {
     voiceFileSender = null;
 }
 const DEFAULT_CONFIG = {
-    imageRetryFixer: {
-        enabled: true
+    fileRetryFixer: {
+        enabled: true,
+        image: true,
+        video: true,
+        audio: true,
+        otherFiles: false,
+        deleteFailedMessage: false,
+        archivePassword: ''
     },
     repeatMessage: {
         enabled: true,
@@ -54,6 +85,11 @@ const DEFAULT_CONFIG = {
     messageTweaks: {
         promptNoSeq: false,
         removeReplyAt: false
+    },
+    entertainment: {
+        autoPokeBack: false,
+        autoPokeBackLimit: 1,
+        doubleClickAvatarPoke: false
     },
     preventRecall: {
         enabled: false,
@@ -92,6 +128,15 @@ const DEFAULT_CONFIG = {
 const windowStates = new WeakMap();
 const cleanupState = {
     lastRunAt: 0
+};
+const pokeState = {
+    selfUin: '',
+    bridge: null,
+    bridgeInstalled: false,
+    wrapperApi: null,
+    wrapperSession: null,
+    processedEvents: new Map(),
+    autoReplySequences: new Map()
 };
 const recallState = {
     liveMessages: new Map(),
@@ -133,7 +178,7 @@ function safeJson(value) {
             }
             return item;
         });
-    } catch (error) {
+    } catch {
         return String(value);
     }
 }
@@ -161,7 +206,7 @@ function getPluginDataDir() {
 }
 
 function getRepairDir() {
-    return path.join(getPluginDataDir(), 'image-retry');
+    return path.join(getPluginDataDir(), 'file-retry');
 }
 
 function getPreventRecallDir() {
@@ -238,8 +283,8 @@ function getConfig() {
     return loadConfig();
 }
 
-function isImageRetryEnabled() {
-    return getConfig().imageRetryFixer.enabled !== false;
+function getFileRetryConfig() {
+    return getConfig().fileRetryFixer;
 }
 
 function isRepeatMessageEnabled() {
@@ -258,6 +303,15 @@ function getPreventRecallConfig() {
     return getConfig().preventRecall;
 }
 
+function getEntertainmentConfig() {
+    return getConfig().entertainment;
+}
+
+function getAutoPokeBackLimit() {
+    const value = Math.trunc(Number(getEntertainmentConfig().autoPokeBackLimit));
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 9999) : 1;
+}
+
 function isPreventRecallEnabled() {
     return getPreventRecallConfig().enabled === true;
 }
@@ -265,6 +319,135 @@ function isPreventRecallEnabled() {
 function applyVoiceMessageConfig() {
     voiceFileSender?.setEnabled?.(isVoiceMessageEnabled());
     voiceFileSender?.setSaveInContextMenuEnabled?.(isVoiceSaveInContextMenuEnabled());
+}
+
+function registerPokeAccount(value) {
+    const selfUin = normalizeUin(value);
+    if (selfUin) {
+        pokeState.selfUin = selfUin;
+    }
+    return Boolean(selfUin);
+}
+
+function getQqVersion() {
+    try {
+        const packagePath = path.join(process.resourcesPath, 'app', 'package.json');
+        return String(JSON.parse(fsSync.readFileSync(packagePath, 'utf8'))?.version || '');
+    } catch {
+        return '';
+    }
+}
+
+function getQqWrapperApi() {
+    if (pokeState.wrapperApi) {
+        return pokeState.wrapperApi;
+    }
+    for (const [id, module] of Object.entries(require.cache)) {
+        if (path.basename(id).toLowerCase() === 'wrapper.node' &&
+            module?.exports?.NodeIQQNTWrapperSession) {
+            pokeState.wrapperApi = module.exports;
+            return pokeState.wrapperApi;
+        }
+    }
+    pokeState.wrapperApi = require(path.join(process.resourcesPath, 'app', 'wrapper.node'));
+    return pokeState.wrapperApi;
+}
+
+function getQqWrapperSession() {
+    if (pokeState.wrapperSession) {
+        return pokeState.wrapperSession;
+    }
+    const sessionClass = getQqWrapperApi()?.NodeIQQNTWrapperSession;
+    if (typeof sessionClass?.getNTWrapperSession !== 'function') {
+        return null;
+    }
+    const session = sessionClass.getNTWrapperSession('nt_1');
+    if (!session || typeof session.getMsgService !== 'function') {
+        return null;
+    }
+    pokeState.wrapperSession = session;
+    return session;
+}
+
+function installPokeBridge() {
+    if (pokeState.bridgeInstalled) {
+        return true;
+    }
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+        return false;
+    }
+    const version = getQqVersion();
+    const target = POKE_NATIVE_TARGETS.get(version);
+    if (!target) {
+        return false;
+    }
+    try {
+        pokeState.bridge ||= require(path.join(__dirname, '..', 'native', target.binary));
+        const code = Number(pokeState.bridge?.install?.(target.convertRva));
+        pokeState.bridgeInstalled = code === 1 || code === 2;
+        return pokeState.bridgeInstalled;
+    } catch {
+        return false;
+    }
+}
+
+async function sendPokeThroughWrapperSession(packet) {
+    const session = getQqWrapperSession();
+    const service = session?.getMsgService?.();
+    if (!service || typeof service.sendSsoCmdReqByContend !== 'function' ||
+        typeof pokeState.bridge?.armConversion !== 'function' ||
+        typeof pokeState.bridge?.disarmConversion !== 'function') {
+        return null;
+    }
+    let request;
+    pokeState.bridge.armConversion();
+    try {
+        request = service.sendSsoCmdReqByContend(POKE_COMMAND, packet);
+    } finally {
+        pokeState.bridge.disarmConversion();
+    }
+    return {
+        path: 'wrapper-session',
+        response: await request
+    };
+}
+
+async function sendPoke(browserWindow, payload) {
+    const targetUin = normalizeUin(payload?.targetUin);
+    const groupUin = Number(payload?.chatType) === 2 ? normalizeUin(payload?.groupUin) : '';
+    registerPokeAccount(payload?.selfUin);
+    if (!targetUin || (Number(payload?.chatType) === 2 && !groupUin)) {
+        return { ok: false, reason: 'invalid-target' };
+    }
+    if (!installPokeBridge()) {
+        return { ok: false, reason: 'bridge-unavailable' };
+    }
+
+    try {
+        const packet = buildPokePacket({ targetUin, groupUin });
+        const directResult = await sendPokeThroughWrapperSession(packet);
+        let response;
+        if (directResult) {
+            response = directResult.response;
+        } else {
+            response = await qqNativeInvoke(
+                browserWindow,
+                'ntApi',
+                'nodeIKernelMsgService/sendSsoCmdReqByContend',
+                [POKE_COMMAND, packet],
+                true,
+                10000
+            );
+        }
+        const nativeCode = Number(response?.result);
+        if (isNativeFailure(response) || (Number.isFinite(nativeCode) && nativeCode !== 0)) {
+            throw new Error(`Native SSO request failed: ${safeJson(response)}`);
+        }
+        return { ok: true };
+    } catch (error) {
+        warn('poke failed:', error?.message || error);
+        return { ok: false, reason: 'send-failed' };
+    }
 }
 
 function broadcastConfigChanged() {
@@ -290,6 +473,17 @@ function installConfigIpc() {
         }
         return await repeatMessageFromRenderer(browserWindow, payload);
     });
+    ipcMain.handle(CHANNEL_SEND_POKE, async (event, payload) => {
+        if (getEntertainmentConfig().doubleClickAvatarPoke !== true) {
+            return { ok: false, reason: 'disabled' };
+        }
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found' };
+        }
+        return await sendPoke(browserWindow, payload);
+    });
+    ipcMain.handle(CHANNEL_REGISTER_POKE_ACCOUNT, (_event, selfUin) => registerPokeAccount(selfUin));
     ipcMain.handle(CHANNEL_CLEAR_RECALL_CACHE, async () => clearPreventRecallCache());
     ipcMain.handle(CHANNEL_OPEN_RECALL_DIR, async () => openPreventRecallDir());
     ipcMain.handle(CHANNEL_OPEN_RECALL_IMAGE_DIR, async () => openPreventRecallImageDir());
@@ -467,6 +661,153 @@ function collectMsgRecords(value, records = [], depth = 0, seen = new WeakSet())
         collectMsgRecords(value[key], records, depth + 1, seen);
     }
     return records;
+}
+
+function resolveUinFromUid(browserWindow, uid) {
+    uid = normalizeText(uid);
+    if (!uid) {
+        return '';
+    }
+    for (const [uin, mappedUid] of getWindowState(browserWindow).peerUidByUin) {
+        if (mappedUid === uid) {
+            return normalizeUin(uin);
+        }
+    }
+    return '';
+}
+
+function rememberPokeAccountFromRecords(records) {
+    for (const record of records) {
+        if (Number(record?.sendType) === 1 && registerPokeAccount(record?.senderUin)) {
+            return;
+        }
+    }
+}
+
+function getPokeEventKey(record, event) {
+    const msgId = normalizeText(record?.msgId);
+    if (msgId && msgId !== '0') {
+        return `msg:${msgId}`;
+    }
+    return [
+        'poke',
+        normalizeText(record?.chatType),
+        normalizeText(record?.peerUid || record?.peerUin),
+        normalizeText(record?.msgSeq),
+        normalizeText(record?.msgTime),
+        event.initiatorUin || event.initiatorUid,
+        event.targetUin || event.targetUid
+    ].join(':');
+}
+
+function getPokeReplyTargetKey(chatType, targetUin, groupUin = '') {
+    return [
+        Number(chatType) || 0,
+        normalizeUin(groupUin),
+        normalizeUin(targetUin)
+    ].join(':');
+}
+
+function prunePokeState() {
+    const now = Date.now();
+    const cutoff = now - POKE_EVENT_TTL_MS;
+    for (const [key, timestamp] of pokeState.processedEvents) {
+        if (timestamp < cutoff) {
+            pokeState.processedEvents.delete(key);
+        }
+    }
+    const sequenceCutoff = now - POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS;
+    for (const [key, sequence] of pokeState.autoReplySequences) {
+        if (sequence.lastAt < sequenceCutoff) {
+            pokeState.autoReplySequences.delete(key);
+        }
+    }
+}
+
+function isRecentPokeRecord(record) {
+    const msgTime = Number(record?.msgTime);
+    if (!Number.isFinite(msgTime) || msgTime <= 0) {
+        return true;
+    }
+    return Math.abs(Date.now() - msgTime * 1000) <= POKE_AUTO_REPLY_MAX_AGE_MS;
+}
+
+function processPokeUpdates(browserWindow, args) {
+    if (!args.some(arg =>
+        arg?.cmdName === POKE_RECEIVE_CMD || arg?.payload?.cmdName === POKE_RECEIVE_CMD)) {
+        return;
+    }
+    const records = [];
+    for (const arg of args) {
+        collectMsgRecords(arg, records);
+        collectMsgRecords(arg?.payload, records);
+    }
+    rememberPokeAccountFromRecords(records);
+    if (getEntertainmentConfig().autoPokeBack !== true) {
+        return;
+    }
+
+    prunePokeState();
+    for (const record of new Set(records)) {
+        const event = extractPokeEvent(record);
+        if (!event || !isRecentPokeRecord(record)) {
+            continue;
+        }
+        event.initiatorUin ||= resolveUinFromUid(browserWindow, event.initiatorUid);
+        event.targetUin ||= resolveUinFromUid(browserWindow, event.targetUid);
+
+        const chatType = Number(record?.chatType);
+        const peerUin = normalizeUin(record?.peerUin || record?.peerUid) ||
+            resolveUinFromUid(browserWindow, record?.peerUid);
+        if (chatType === 1 && peerUin && event.initiatorUin === peerUin &&
+            event.targetUin && event.targetUin !== peerUin) {
+            registerPokeAccount(event.targetUin);
+        }
+        if (!event.initiatorUin || !event.targetUin || !pokeState.selfUin ||
+            event.targetUin !== pokeState.selfUin || event.initiatorUin === pokeState.selfUin) {
+            continue;
+        }
+
+        const groupUin = chatType === 2 ? peerUin : '';
+        if ((chatType !== 1 && chatType !== 2) || (chatType === 2 && !groupUin)) {
+            continue;
+        }
+        const key = getPokeEventKey(record, event);
+        if (pokeState.processedEvents.has(key)) {
+            continue;
+        }
+        const now = Date.now();
+        pokeState.processedEvents.set(key, now);
+        const replyTargetKey = getPokeReplyTargetKey(chatType, event.initiatorUin, groupUin);
+        const previousSequence = pokeState.autoReplySequences.get(replyTargetKey);
+        const sequence = previousSequence &&
+            now - previousSequence.lastAt <= POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS
+            ? previousSequence
+            : { count: 0, lastAt: 0 };
+        const limit = getAutoPokeBackLimit();
+        if (limit > 0 && sequence.count >= limit) {
+            sequence.lastAt = now;
+            pokeState.autoReplySequences.set(replyTargetKey, sequence);
+            continue;
+        }
+        const nextSequence = { count: sequence.count + 1, lastAt: now };
+        pokeState.autoReplySequences.set(replyTargetKey, nextSequence);
+        Promise.resolve(sendPoke(browserWindow, {
+            chatType,
+            targetUin: event.initiatorUin,
+            groupUin,
+            selfUin: pokeState.selfUin
+        })).then(result => {
+            if (!result?.ok && pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
+                pokeState.autoReplySequences.delete(replyTargetKey);
+            }
+        }).catch(error => {
+            if (pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
+                pokeState.autoReplySequences.delete(replyTargetKey);
+            }
+            warn('automatic poke-back failed:', error?.message || error);
+        });
+    }
 }
 
 function isMsgRecord(value) {
@@ -1411,7 +1752,7 @@ async function nativeInvoke(browserWindow, eventName, cmdName, payload = [], wai
 }
 
 async function qqNativeInvoke(browserWindow, eventName, cmdName, payload = [], waitResponse = true, timeoutMs = 10000) {
-    return await nativeInvoke(browserWindow, eventName, cmdName, payload, waitResponse, timeoutMs);
+    return await nativeInvoke(browserWindow, eventName, cmdName, payload, waitResponse, timeoutMs, 'invoke');
 }
 
 function isMsgInfoListUpdate(args) {
@@ -1426,13 +1767,20 @@ function isImageElement(element) {
     return Number(element?.elementType) === 2 || Boolean(element?.picElement);
 }
 
-function getImageElements(record) {
-    return getRecordElements(record).filter(isImageElement);
-}
-
-function isImageOnlyRecord(record) {
-    const elements = getRecordElements(record);
-    return elements.length > 0 && elements.every(isImageElement);
+function getElementRetryFingerprint(element) {
+    if (isImageElement(element)) {
+        const pic = element.picElement || element;
+        return `image:${normalizeText(pic.md5HexStr || pic.md5 || pic.fileName || pic.sourcePath)}`;
+    }
+    if (Number(element?.elementType) === 5 || element?.videoElement) {
+        const video = element.videoElement || element;
+        return `video:${normalizeText(video.videoMd5 || video.fileMd5 || video.fileName || video.filePath)}`;
+    }
+    if (Number(element?.elementType) === 3 || element?.fileElement) {
+        const file = element.fileElement || element;
+        return `file:${normalizeText(file.fileMd5 || file.fileName || file.filePath)}`;
+    }
+    return `element:${Number(element?.elementType) || 0}`;
 }
 
 function getRecordRetryKey(record) {
@@ -1441,10 +1789,7 @@ function getRecordRetryKey(record) {
         return `msg:${msgId}`;
     }
     const attrId = getMsgAttrId(record);
-    const md5s = getImageElements(record)
-        .map(element => normalizeText(element?.picElement?.md5HexStr || element?.picElement?.md5))
-        .filter(Boolean)
-        .join(',');
+    const fingerprints = getRecordElements(record).map(getElementRetryFingerprint).join(',');
     return [
         'record',
         normalizeText(record?.chatType),
@@ -1452,7 +1797,7 @@ function getRecordRetryKey(record) {
         normalizeText(record?.msgSeq),
         normalizeText(record?.msgRandom),
         normalizeText(attrId),
-        md5s
+        fingerprints
     ].join(':');
 }
 
@@ -1520,6 +1865,17 @@ function getThumbPathCandidate(thumbPath) {
     return '';
 }
 
+function getThumbSizeCandidate(thumbPath) {
+    let value;
+    if (thumbPath instanceof Map) {
+        value = Array.from(thumbPath.keys())[0];
+    } else if (thumbPath && typeof thumbPath === 'object') {
+        value = Object.keys(thumbPath)[0];
+    }
+    const size = Number(value);
+    return Number.isFinite(size) && size > 0 ? size : 750;
+}
+
 function getPicSourcePath(picElement) {
     const candidates = [
         picElement?.sourcePath,
@@ -1538,34 +1894,101 @@ function getPicSourcePath(picElement) {
     return '';
 }
 
+function getVideoSourcePath(videoElement) {
+    return getExistingFilePath([
+        videoElement?.filePath,
+        videoElement?.sourcePath,
+        videoElement?.originPath,
+        videoElement?.localPath,
+        videoElement?.path
+    ]);
+}
+
+function getFileSourcePath(fileElement) {
+    return getExistingFilePath([
+        fileElement?.filePath,
+        fileElement?.sourcePath,
+        fileElement?.originPath,
+        fileElement?.localPath,
+        fileElement?.path
+    ]);
+}
+
+function getExistingFilePath(candidates) {
+    for (const candidate of candidates) {
+        const filePath = normalizePathText(candidate);
+        if (filePath && fsSync.existsSync(filePath) && fsSync.statSync(filePath).isFile()) {
+            return filePath;
+        }
+    }
+    return '';
+}
+
 function isGeneratedRepairPath(filePath) {
     const repairDir = normalizeComparablePath(getRepairDir());
-    return normalizeComparablePath(filePath).startsWith(repairDir);
+    const candidate = normalizeComparablePath(filePath);
+    return candidate === repairDir || candidate.startsWith(`${repairDir}\\`);
 }
 
 function isSupportedImagePath(filePath) {
     return IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
-function shouldRepairRecord(record) {
-    const sendStatus = Number(record?.sendStatus);
-    if (sendStatus !== SEND_STATUS_FAILED && sendStatus !== SEND_STATUS_SUCCESS_NO_SEQ) {
-        return false;
-    }
-    if (!isImageOnlyRecord(record)) {
-        return false;
-    }
-    const pics = getImageElements(record);
-    if (!pics.length) {
-        return false;
-    }
-    return pics.every(element => {
+function getRepairDescriptor(element) {
+    if (isImageElement(element)) {
         const sourcePath = getPicSourcePath(element.picElement || element);
-        return sourcePath && isSupportedImagePath(sourcePath) && !isGeneratedRepairPath(sourcePath);
-    });
+        if (!sourcePath || !isSupportedImagePath(sourcePath)) {
+            return null;
+        }
+        return { kind: 'image', element, sourcePath };
+    }
+    if (Number(element?.elementType) === 5 || element?.videoElement) {
+        const video = element.videoElement || element;
+        const sourcePath = getVideoSourcePath(video);
+        const extension = path.extname(sourcePath) || path.extname(normalizeText(video.fileName));
+        return sourcePath ? { kind: 'video', element, sourcePath, extension } : null;
+    }
+    if (Number(element?.elementType) !== 3 && !element?.fileElement) {
+        return null;
+    }
+    const file = element.fileElement || element;
+    const sourcePath = getFileSourcePath(file);
+    if (!sourcePath) {
+        return null;
+    }
+    const extension = (path.extname(sourcePath) || path.extname(normalizeText(file.fileName))).toLowerCase();
+    const kind = VIDEO_EXTENSIONS.has(extension)
+        ? 'video'
+        : AUDIO_EXTENSIONS.has(extension)
+            ? 'audio'
+            : 'otherFiles';
+    return { kind, element, sourcePath, extension };
 }
 
-function queueImageRetry(browserWindow, record) {
+function createRecordRepairPlan(record) {
+    const sendStatus = Number(record?.sendStatus);
+    if (sendStatus !== SEND_STATUS_FAILED && sendStatus !== SEND_STATUS_SUCCESS_NO_SEQ) {
+        return null;
+    }
+    const elements = getRecordElements(record);
+    if (!elements.length) {
+        return null;
+    }
+    const descriptors = elements.map(getRepairDescriptor);
+    if (descriptors.some(descriptor => !descriptor || isGeneratedRepairPath(descriptor.sourcePath))) {
+        return null;
+    }
+    const config = getFileRetryConfig();
+    if (config.enabled === false || descriptors.some(descriptor => config[descriptor.kind] === false)) {
+        return null;
+    }
+    if (descriptors.some(descriptor => descriptor.kind === 'otherFiles') && !String(config.archivePassword || '')) {
+        return null;
+    }
+    return descriptors;
+}
+
+function queueFileRetry(browserWindow, record, plan) {
     if (browserWindow.isDestroyed()) {
         return;
     }
@@ -1582,8 +2005,8 @@ function queueImageRetry(browserWindow, record) {
     });
     state.inFlightRecords.add(key);
     setTimeout(() => {
-        retryImageRecord(browserWindow, record, key)
-            .catch(error => warn('image retry failed:', error?.message || error))
+        retryFileRecord(browserWindow, record, plan, key)
+            .catch(error => warn('file retry failed:', error?.message || error))
             .finally(() => state.inFlightRecords.delete(key));
     }, RETRY_DELAY_MS);
 }
@@ -1592,7 +2015,7 @@ function processMessageUpdates(browserWindow, args) {
     if (!isMsgInfoListUpdate(args)) {
         return;
     }
-    if (!isImageRetryEnabled()) {
+    if (getFileRetryConfig().enabled === false) {
         return;
     }
     const state = getWindowState(browserWindow);
@@ -1613,8 +2036,9 @@ function processMessageUpdates(browserWindow, args) {
         if (attrId !== undefined && state.pluginAttrIds.has(String(attrId))) {
             continue;
         }
-        if (shouldRepairRecord(record)) {
-            queueImageRetry(browserWindow, record);
+        const plan = createRecordRepairPlan(record);
+        if (plan) {
+            queueFileRetry(browserWindow, record, plan);
         }
     }
 }
@@ -1653,14 +2077,14 @@ async function cleanupOldRepairFiles(force = false) {
 }
 
 function safeFileStem(value) {
-    return String(value || 'image')
+    return String(value || 'file')
         .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
         .replace(/\s+/g, ' ')
         .trim()
-        .slice(0, 80) || 'image';
+        .slice(0, 80) || 'file';
 }
 
-async function createOnePixelVariant(sourcePath) {
+async function createPixelPreservingImageVariant(sourcePath) {
     if (!nativeImage) {
         throw new Error('Electron nativeImage is not available.');
     }
@@ -1677,15 +2101,12 @@ async function createOnePixelVariant(sourcePath) {
     if (bitmap.length !== expectedLength) {
         throw new Error(`Unexpected bitmap size: ${bitmap.length}, expected ${expectedLength}.`);
     }
-    const pixelOffset = bitmap.length - 4;
-    bitmap[pixelOffset] = bitmap[pixelOffset] >= 255 ? 254 : bitmap[pixelOffset] + 1;
-
-    const repairedImage = nativeImage.createFromBitmap(bitmap, {
-        width: size.width,
-        height: size.height,
-        scaleFactor: 1
-    });
-    const png = repairedImage.toPNG();
+    const png = randomizePngEncoding(image.toPNG());
+    const variantImage = nativeImage.createFromBuffer(png, { scaleFactor: 1 });
+    const variantBitmap = Buffer.from(variantImage.toBitmap({ scaleFactor: 1 }));
+    if (variantImage.isEmpty() || !variantBitmap.equals(bitmap)) {
+        throw new Error('Pixel-preserving image verification failed.');
+    }
     const repairDir = await ensureRepairDir();
     const stem = safeFileStem(path.basename(sourcePath, path.extname(sourcePath)));
     const fileName = `${stem}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.qqnt-toolbox.png`;
@@ -1693,6 +2114,126 @@ async function createOnePixelVariant(sourcePath) {
     await fs.writeFile(outPath, png);
     cleanupOldRepairFiles().catch(() => {});
     return outPath;
+}
+
+async function probeMediaInfo(filePath) {
+    if (!voiceFileSender?.runTool) {
+        throw new Error('FFmpeg tools are unavailable.');
+    }
+    const { stdout } = await voiceFileSender.runTool('ffprobe', [
+        '-v', 'error',
+        '-show_entries', 'format=duration:stream=codec_type,width,height,duration',
+        '-of', 'json',
+        filePath
+    ]);
+    const result = JSON.parse(stdout);
+    const videoStream = result?.streams?.find(stream => stream.codec_type === 'video');
+    const duration = Number(result?.format?.duration ?? videoStream?.duration);
+    if (!Number.isFinite(duration) || duration < 0) {
+        throw new Error(`Cannot read media duration: ${filePath}`);
+    }
+    return {
+        duration,
+        width: Number(videoStream?.width) || 0,
+        height: Number(videoStream?.height) || 0
+    };
+}
+
+async function createRemuxedMediaVariant(sourcePath, extensionHint = '') {
+    if (!voiceFileSender?.runTool) {
+        throw new Error('FFmpeg tools are unavailable.');
+    }
+    const extension = (path.extname(sourcePath) || extensionHint).toLowerCase();
+    if (!extension) {
+        throw new Error(`Media file has no extension: ${sourcePath}`);
+    }
+    const repairDir = await ensureRepairDir();
+    const stem = safeFileStem(path.basename(sourcePath, path.extname(sourcePath)));
+    const nonce = `${Date.now()}.${crypto.randomBytes(4).toString('hex')}`;
+    const outPath = path.join(repairDir, `${stem}.${nonce}.qqnt-toolbox${extension}`);
+    try {
+        const sourceInfo = await probeMediaInfo(sourcePath);
+        const ffmpegArgs = [
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-y',
+            '-i', sourcePath,
+            '-map', '0',
+            '-map_metadata', '0',
+            '-map_chapters', '0',
+            '-c', 'copy',
+            '-metadata', `comment=qqnt-toolbox-${nonce}`
+        ];
+        if (['.3g2', '.3gp', '.m4v', '.mov', '.mp4'].includes(extension)) {
+            ffmpegArgs.push('-movflags', '+faststart');
+        }
+        ffmpegArgs.push(outPath);
+        await voiceFileSender.runTool('ffmpeg', ffmpegArgs);
+        const [outputInfo, sourceMd5, outputMd5, outputStat] = await Promise.all([
+            probeMediaInfo(outPath),
+            getFileMd5(sourcePath),
+            getFileMd5(outPath),
+            fs.stat(outPath)
+        ]);
+        if (Math.abs(sourceInfo.duration - outputInfo.duration) > 0.001) {
+            throw new Error(`Media duration changed (${sourceInfo.duration} -> ${outputInfo.duration}).`);
+        }
+        if (!outputStat.size || sourceMd5 === outputMd5) {
+            throw new Error('Media remux did not create a distinct file.');
+        }
+        cleanupOldRepairFiles().catch(() => {});
+        return {
+            filePath: outPath,
+            ...outputInfo
+        };
+    } catch (error) {
+        await fs.unlink(outPath).catch(() => {});
+        throw error;
+    }
+}
+
+async function createEncryptedArchiveVariant(sourcePath, password) {
+    if (!String(password || '')) {
+        throw new Error('Archive password is empty.');
+    }
+    const sourceStat = await fs.stat(sourcePath);
+    const repairDir = await ensureRepairDir();
+    const originalStem = path.basename(sourcePath, path.extname(sourcePath));
+    const stem = safeFileStem(originalStem);
+    const nonce = `${Date.now()}.${crypto.randomBytes(4).toString('hex')}`;
+    const outPath = path.join(repairDir, `${stem}.${nonce}.qqnt-toolbox.zip`);
+    const output = fsSync.createWriteStream(outPath);
+    const zipWriter = new ZipWriter(Writable.toWeb(output), {
+        password: String(password),
+        encryptionStrength: 3,
+        level: 6,
+        useWebWorkers: false
+    });
+    try {
+        await zipWriter.add(
+            path.basename(sourcePath),
+            Readable.toWeb(fsSync.createReadStream(sourcePath)),
+            {
+                lastModDate: sourceStat.mtime,
+                lastAccessDate: sourceStat.atime,
+                creationDate: sourceStat.birthtime
+            }
+        );
+        await zipWriter.close();
+        const outputStat = await fs.stat(outPath);
+        if (!outputStat.size) {
+            throw new Error('Encrypted archive is empty.');
+        }
+        cleanupOldRepairFiles().catch(() => {});
+        return {
+            filePath: outPath,
+            fileName: `${originalStem}.zip`
+        };
+    } catch (error) {
+        output.destroy();
+        await fs.unlink(outPath).catch(() => {});
+        throw error;
+    }
 }
 
 async function getFileMd5(filePath) {
@@ -1811,6 +2352,10 @@ async function copyImageToQqCache(browserWindow, filePath, picSubType) {
 async function createPicElement(browserWindow, filePath, originalPicElement = {}) {
     const picSubType = Number(originalPicElement?.picSubType) || 0;
     const copied = await copyImageToQqCache(browserWindow, filePath, picSubType);
+    const originalMd5 = normalizeText(originalPicElement.md5HexStr || originalPicElement.md5).toLowerCase();
+    if (originalMd5 && copied.md5.toLowerCase() === originalMd5) {
+        throw new Error('QQ normalized the image variant back to the original hash.');
+    }
     const sourcePath = fsSync.existsSync(copied.newPath) ? copied.newPath : filePath;
     const [fileType, imageSize, fileSize] = await Promise.all([
         nativeFileType(browserWindow, sourcePath),
@@ -1837,6 +2382,195 @@ async function createPicElement(browserWindow, filePath, originalPicElement = {}
             thumbFileSize: 0,
             summary: normalizeText(originalPicElement?.summary)
         },
+        extBufForUI: new Uint8Array()
+    };
+}
+
+async function copyMediaToQqCache(browserWindow, filePath, elementType, preferredFileName = '') {
+    const md5 = await getFileMd5(filePath);
+    let fileName = normalizeText(preferredFileName) || path.basename(filePath);
+    if (!path.extname(fileName) && path.extname(filePath)) {
+        fileName += path.extname(filePath);
+    }
+    const result = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        'nodeIKernelMsgService/getRichMediaFilePathForGuild',
+        [{
+            md5HexStr: md5,
+            fileName,
+            elementType,
+            elementSubType: 0,
+            thumbSize: 0,
+            needCreate: true,
+            downloadType: 1,
+            file_uuid: ''
+        }],
+        true,
+        15000
+    );
+    if (isNativeFailure(result)) {
+        throw new Error(`getRichMediaFilePathForGuild failed: ${safeJson(result)}`);
+    }
+    const value = unwrapNativeValue(result);
+    const cachePath = normalizePathText(
+        typeof value === 'string'
+            ? value
+            : findFirstByKey(result, ['newPath', 'filePath', 'path'])
+    );
+    if (!cachePath) {
+        throw new Error(`getRichMediaFilePathForGuild returned no path: ${safeJson(result)}`);
+    }
+    await fs.mkdir(path.dirname(cachePath), { recursive: true });
+    if (normalizeComparablePath(filePath) !== normalizeComparablePath(cachePath)) {
+        await fs.copyFile(filePath, cachePath);
+    }
+    return { fileName, filePath: cachePath, md5 };
+}
+
+async function createBlurredVideoThumbnail(filePath, originalThumbPath = '', options = {}) {
+    const repairDir = await ensureRepairDir();
+    const stem = safeFileStem(path.basename(filePath, path.extname(filePath)));
+    const extension = options.extension === '.jpg' ? '.jpg' : '.png';
+    const outPath = path.join(
+        repairDir,
+        `${stem}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.thumb.blur${extension}`
+    );
+    const hasOriginalThumb = Boolean(originalThumbPath && fsSync.existsSync(originalThumbPath));
+    const inputPath = hasOriginalThumb ? originalThumbPath : filePath;
+    try {
+        const ffmpegArgs = [
+            '-hide_banner',
+            '-loglevel', 'error',
+            '-y'
+        ];
+        if (!hasOriginalThumb) {
+            ffmpegArgs.push('-ss', '0');
+        }
+        ffmpegArgs.push(
+            '-i', inputPath,
+            '-map', '0:v:0',
+            '-frames:v', '1',
+            '-vf', options.maxWidth
+                ? `scale=w='min(${Number(options.maxWidth)},iw)':h=-2,gblur=sigma=18`
+                : 'gblur=sigma=18',
+            '-update', '1',
+            '-an'
+        );
+        if (extension === '.jpg') {
+            ffmpegArgs.push('-q:v', '4');
+        }
+        ffmpegArgs.push(outPath);
+        await voiceFileSender.runTool('ffmpeg', ffmpegArgs);
+        const image = nativeImage.createFromPath(outPath);
+        if (image.isEmpty()) {
+            throw new Error('Generated blurred video thumbnail is invalid.');
+        }
+        cleanupOldRepairFiles().catch(() => {});
+        return outPath;
+    } catch (error) {
+        await fs.unlink(outPath).catch(() => {});
+        throw error;
+    }
+}
+
+function getVideoThumbCachePath(videoCachePath, videoMd5) {
+    const normalized = path.normalize(videoCachePath);
+    const root = path.parse(normalized).root;
+    const parts = normalized.slice(root.length).split(path.sep).filter(Boolean);
+    let oriIndex = -1;
+    for (let index = parts.length - 1; index >= 0; index--) {
+        if (parts[index].toLowerCase() === 'ori') {
+            oriIndex = index;
+            break;
+        }
+    }
+    if (oriIndex < 0) {
+        return '';
+    }
+    parts[oriIndex] = 'Thumb';
+    return path.join(root, ...parts.slice(0, -1), `${videoMd5}_0.png`);
+}
+
+async function cacheGeneratedVideoThumbnail(videoCachePath, videoMd5, thumbFilePath) {
+    const cachePath = getVideoThumbCachePath(videoCachePath, videoMd5);
+    if (!cachePath) {
+        return thumbFilePath;
+    }
+    await fs.mkdir(path.dirname(cachePath), { recursive: true });
+    await fs.copyFile(thumbFilePath, cachePath);
+    return cachePath;
+}
+
+async function createVideoElement(browserWindow, filePath, originalVideoElement = {}, mediaInfo = null) {
+    const info = mediaInfo || await probeMediaInfo(filePath);
+    if (!info.width || !info.height) {
+        throw new Error('Video stream dimensions are unavailable.');
+    }
+    const originalThumbPath = getThumbPathCandidate(originalVideoElement.thumbPath);
+    const blurredThumbPath = await createBlurredVideoThumbnail(filePath, originalThumbPath);
+    const cached = await copyMediaToQqCache(browserWindow, filePath, 5, originalVideoElement.fileName);
+    const thumbFilePath = await cacheGeneratedVideoThumbnail(cached.filePath, cached.md5, blurredThumbPath);
+    const [fileSize, thumbStat, thumbMd5] = await Promise.all([
+        fs.stat(filePath),
+        fs.stat(thumbFilePath),
+        getFileMd5(thumbFilePath)
+    ]);
+    const originalFileTime = Number(originalVideoElement.fileTime ?? originalVideoElement.duration);
+    return {
+        elementType: 5,
+        elementId: '',
+        videoElement: {
+            fileName: cached.fileName,
+            filePath: cached.filePath,
+            videoMd5: cached.md5,
+            thumbMd5,
+            fileTime: Number.isFinite(originalFileTime) && originalFileTime > 0
+                ? originalFileTime
+                : Math.trunc(info.duration),
+            thumbPath: new Map([[0, thumbFilePath]]),
+            thumbSize: thumbStat.size,
+            thumbWidth: Number(originalVideoElement.thumbWidth) || info.width,
+            thumbHeight: Number(originalVideoElement.thumbHeight) || info.height,
+            fileSize: String(fileSize.size)
+        },
+        extBufForUI: new Uint8Array()
+    };
+}
+
+async function createFileElement(filePath, fileName, originalFileElement = {}, videoInfo = null) {
+    const fileSize = (await fs.stat(filePath)).size;
+    const fileElement = {
+        fileName,
+        folderId: originalFileElement.folderId,
+        fileBizId: undefined,
+        filePath,
+        fileSize: String(fileSize)
+    };
+    if (videoInfo) {
+        const thumbSize = getThumbSizeCandidate(originalFileElement.picThumbPath);
+        const originalThumbPath = getThumbPathCandidate(originalFileElement.picThumbPath);
+        const thumbPath = await createBlurredVideoThumbnail(filePath, originalThumbPath, {
+            extension: '.jpg',
+            maxWidth: thumbSize
+        });
+        Object.assign(fileElement, {
+            fileMd5: '',
+            picHeight: Number(originalFileElement.picHeight) || videoInfo.height,
+            picWidth: Number(originalFileElement.picWidth) || videoInfo.width,
+            picThumbPath: new Map([[thumbSize, thumbPath]]),
+            file10MMd5: '',
+            fileSha: '',
+            fileSha3: '',
+            fileUuid: '',
+            fileSubId: '',
+            thumbFileSize: thumbSize
+        });
+    }
+    return {
+        elementType: 3,
+        elementId: '',
+        fileElement,
         extBufForUI: new Uint8Array()
     };
 }
@@ -1875,56 +2609,51 @@ async function generateMsgUniqueId(browserWindow, chatType) {
     return uniqueId;
 }
 
-async function sendImageElements(browserWindow, peer, msgElements, attrId) {
+async function sendRepairedElements(browserWindow, peer, msgElements, attrId) {
     getWindowState(browserWindow).pluginAttrIds.set(String(attrId), Date.now());
     const msgAttributeInfos = makeSendAttributeInfos(attrId);
-    const attempts = [
-        {
-            name: 'array',
-            payload: ['0', peer, msgElements, msgAttributeInfos]
-        },
-        {
-            name: 'object',
-            payload: [{
+    const sentMsgWaiter = createNativeEventWaiter(browserWindow, {
+        cmdName: MSG_UPDATE_CMD,
+        attrId,
+        sendStatus: 2
+    }, 30000);
+    try {
+        await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendMsg',
+            [{
                 msgId: '0',
                 peer,
                 msgElements,
                 msgAttributeInfos
-            }, null]
-        }
-    ];
-    let lastResult;
-    for (const attempt of attempts) {
-        const sentMsgWaiter = createNativeEventWaiter(browserWindow, {
-            cmdName: MSG_UPDATE_CMD,
-            attrId,
-            sendStatus: 2
-        }, 30000);
-        try {
-            const result = await qqNativeInvoke(
-                browserWindow,
-                'ntApi',
-                'nodeIKernelMsgService/sendMsg',
-                attempt.payload,
-                true,
-                15000
-            );
-            lastResult = result;
-            if (!isNativeFailure(result)) {
-                sentMsgWaiter.promise
-                    .then(() => debug('image retry sent'))
-                    .catch(error => warn('image retry status not confirmed:', error?.message || error));
-                return {
-                    shape: attempt.name,
-                    result
-                };
-            }
-        } catch (error) {
-            lastResult = error;
-        }
+            }, null],
+            false
+        );
+        return await sentMsgWaiter.promise;
+    } catch (error) {
         sentMsgWaiter.cancel();
+        throw new Error(`File retry was not confirmed successful: ${error?.message || error}`);
     }
-    throw new Error(`QQNT rejected image sendMsg: ${safeJson(lastResult)}`);
+}
+
+async function deleteFailedRecord(browserWindow, peer, record) {
+    const msgId = normalizeText(record?.msgId);
+    if (!msgId || msgId === '0') {
+        return false;
+    }
+    const result = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        'nodeIKernelMsgService/deleteMsg',
+        [{ peer, msgIds: [msgId] }, null],
+        true,
+        10000
+    );
+    if (isNativeFailure(result)) {
+        throw new Error(`deleteMsg failed: ${safeJson(result)}`);
+    }
+    return true;
 }
 
 function normalizeRepeatPeer(browserWindow, payload = {}) {
@@ -2100,7 +2829,38 @@ async function repeatMessageFromRenderer(browserWindow, payload = {}) {
     };
 }
 
-async function retryImageRecord(browserWindow, record, key) {
+async function createRepairedElement(browserWindow, descriptor, archivePassword) {
+    const { element, kind, sourcePath } = descriptor;
+    if (kind === 'image') {
+        const originalPic = element.picElement || element;
+        const repairedPath = await createPixelPreservingImageVariant(sourcePath);
+        return await createPicElement(browserWindow, repairedPath, originalPic);
+    }
+    if (kind === 'otherFiles') {
+        const originalFile = element.fileElement || element;
+        const archive = await createEncryptedArchiveVariant(sourcePath, archivePassword);
+        return await createFileElement(archive.filePath, archive.fileName, originalFile);
+    }
+    const remuxed = await createRemuxedMediaVariant(sourcePath, descriptor.extension);
+    if (kind === 'video' && (element.videoElement || Number(element.elementType) === 5)) {
+        return await createVideoElement(
+            browserWindow,
+            remuxed.filePath,
+            element.videoElement || element,
+            remuxed
+        );
+    }
+    const originalFile = element.fileElement || element;
+    const fileName = normalizeText(originalFile.fileName) || path.basename(sourcePath);
+    return await createFileElement(
+        remuxed.filePath,
+        fileName,
+        originalFile,
+        kind === 'video' ? remuxed : null
+    );
+}
+
+async function retryFileRecord(browserWindow, record, plan, key) {
     if (browserWindow.isDestroyed()) {
         return;
     }
@@ -2108,16 +2868,23 @@ async function retryImageRecord(browserWindow, record, key) {
     if (!peer) {
         throw new Error(`Cannot resolve original peer for ${key}.`);
     }
-    const images = getImageElements(record);
+    const config = getFileRetryConfig();
+    if (config.enabled === false || plan.some(descriptor => config[descriptor.kind] === false)) {
+        return;
+    }
     const repairedElements = [];
-    for (const element of images) {
-        const originalPic = element.picElement || element;
-        const sourcePath = getPicSourcePath(originalPic);
-        const repairedPath = await createOnePixelVariant(sourcePath);
-        repairedElements.push(await createPicElement(browserWindow, repairedPath, originalPic));
+    for (const descriptor of plan) {
+        repairedElements.push(await createRepairedElement(
+            browserWindow,
+            descriptor,
+            config.archivePassword
+        ));
     }
     const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
-    await sendImageElements(browserWindow, peer, repairedElements, attrId);
+    await sendRepairedElements(browserWindow, peer, repairedElements, attrId);
+    if (getFileRetryConfig().deleteFailedMessage === true) {
+        await deleteFailedRecord(browserWindow, peer, record);
+    }
 }
 
 function handleNativeSend(browserWindow, channel, args) {
@@ -2128,6 +2895,7 @@ function handleNativeSend(browserWindow, channel, args) {
     notifyNativeWaiters(browserWindow, channel, args);
     processDeleteBubbleSkin(args);
     processPreventRecall(args);
+    processPokeUpdates(browserWindow, args);
     Promise.resolve()
         .then(() => processMessageUpdates(browserWindow, args))
         .catch(error => warn('message update processing failed:', error?.message || error));
@@ -2167,6 +2935,7 @@ function installForAllWindows() {
 
 function start() {
     loadConfig();
+    installPokeBridge();
     loadPersistedRecallCache();
     installConfigIpc();
     installForAllWindows();

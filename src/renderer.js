@@ -13,6 +13,7 @@
             interface: false,
             messages: false,
             preventRecall: false,
+            entertainment: false,
             simplifySidebar: false,
             simplifyTop: false,
             simplifyChat: false,
@@ -20,8 +21,14 @@
         }
     };
     const DEFAULT_CONFIG = {
-        imageRetryFixer: {
-            enabled: true
+        fileRetryFixer: {
+            enabled: true,
+            image: true,
+            video: true,
+            audio: true,
+            otherFiles: false,
+            deleteFailedMessage: false,
+            archivePassword: ''
         },
         repeatMessage: {
             enabled: true,
@@ -35,6 +42,11 @@
         messageTweaks: {
             promptNoSeq: false,
             removeReplyAt: false
+        },
+        entertainment: {
+            autoPokeBack: false,
+            autoPokeBackLimit: 1,
+            doubleClickAvatarPoke: false
         },
         preventRecall: {
             enabled: false,
@@ -84,6 +96,10 @@
     let messageBadgeObserver = null;
     let messageBadgeResizeObserver = null;
     let messageBadgeRefreshTimer = 0;
+    let registeredPokeAccountUin = '';
+    let lastPokeAccountProbeAt = 0;
+    let pendingAvatarPoke = null;
+    let suppressAvatarClicksUntil = 0;
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
     let simplifyConfigSaveTimer = 0;
@@ -95,6 +111,7 @@
     };
     const preventDragMouseButtons = new Set([1, 4, 8, 16]);
     const repeatButtonRecords = new WeakMap();
+    const pokeAvatarAnimations = new WeakMap();
 
     if (window.__qqntToolboxRendererInstalled) {
         return;
@@ -414,6 +431,10 @@
     font-size: 13px;
     font-weight: 500;
 }
+#${PANEL_ID} .qqnt-toolbox-item[data-child-level="2"] {
+    width: calc(100% - 68px);
+    margin-left: 68px;
+}
 #${PANEL_ID} .qqnt-toolbox-item[data-disabled="true"] {
     opacity: .56;
 }
@@ -512,6 +533,66 @@
 }
 #${PANEL_ID} .qqnt-toolbox-color-input::-webkit-color-swatch {
     border: 0;
+}
+#${PANEL_ID} .qqnt-toolbox-password-input {
+    flex: none;
+    width: 128px;
+    height: 30px;
+    padding: 0 9px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .22)));
+    border-radius: 6px;
+    outline: 0;
+    color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329))) !important;
+    -webkit-text-fill-color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329))) !important;
+    caret-color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .12))) !important;
+    font: inherit;
+    user-select: text;
+}
+#${PANEL_ID} .qqnt-toolbox-password-input:focus {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    background: var(--overlay_hover, var(--fill_light_primary, rgba(127, 127, 127, .18))) !important;
+}
+#${PANEL_ID} .qqnt-toolbox-password-input:disabled {
+    cursor: default;
+    opacity: .58;
+}
+#${PANEL_ID} .qqnt-toolbox-number-control {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary, var(--text-02, #6b7280));
+    font-size: 12px;
+}
+#${PANEL_ID} .qqnt-toolbox-number-input {
+    width: 56px;
+    height: 28px;
+    padding: 0 5px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .22)));
+    border-radius: 6px;
+    outline: 0;
+    color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329))) !important;
+    -webkit-text-fill-color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329))) !important;
+    caret-color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .12))) !important;
+    font: inherit;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    user-select: text;
+    appearance: none;
+    -moz-appearance: none;
+}
+#${PANEL_ID} .qqnt-toolbox-number-input:focus {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    background: var(--overlay_hover, var(--fill_light_primary, rgba(127, 127, 127, .18))) !important;
+}
+#${PANEL_ID} .qqnt-toolbox-number-input:disabled {
+    cursor: default;
+    opacity: .58;
 }
 body.qqnt-toolbox-side-repeat .message .message-content__wrapper > .qqnt-toolbox-repeat-slot.plus-one-btn {
     display: none !important;
@@ -628,15 +709,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return element;
     }
 
+    function applyItemOptions(item, options = {}) {
+        if (options.requires) {
+            const requirements = Array.isArray(options.requires) ? options.requires : [options.requires];
+            item.dataset.requires = requirements.join('|');
+        }
+        const childLevel = Number(options.childLevel) || (options.child ? 1 : 0);
+        if (childLevel > 0) {
+            item.dataset.child = 'true';
+            item.dataset.childLevel = String(childLevel);
+        }
+    }
+
     function createSwitchItem(name, meta, configPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.configPath = configPath;
-        if (options.requires) {
-            item.dataset.requires = options.requires;
-        }
-        if (options.child) {
-            item.dataset.child = 'true';
-        }
+        applyItemOptions(item, options);
         const itemMain = createElement('div', 'qqnt-toolbox-item-main');
         itemMain.append(createElement('div', 'qqnt-toolbox-item-name', name));
         if (meta) {
@@ -651,12 +739,59 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function createPasswordItem(name, meta, configPath, options = {}) {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.configPath = configPath;
+        item.dataset.passwordItem = 'true';
+        applyItemOptions(item, options);
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(createElement('div', 'qqnt-toolbox-item-name', name));
+        if (meta) {
+            itemMain.append(createElement('div', 'qqnt-toolbox-item-meta', meta));
+        }
+        const input = createElement('input', 'qqnt-toolbox-password-input');
+        input.type = 'password';
+        input.autocomplete = 'off';
+        input.maxLength = 128;
+        input.dataset.configPath = configPath;
+        input.setAttribute('aria-label', name);
+        item.append(itemMain, input);
+        return item;
+    }
+
+    function createNumberItem(name, meta, configPath, options = {}) {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.configPath = configPath;
+        item.dataset.numberItem = 'true';
+        applyItemOptions(item, options);
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(createElement('div', 'qqnt-toolbox-item-name', name));
+        if (meta) {
+            itemMain.append(createElement('div', 'qqnt-toolbox-item-meta', meta));
+        }
+        const control = createElement('div', 'qqnt-toolbox-number-control');
+        const input = createElement('input', 'qqnt-toolbox-number-input');
+        input.type = 'text';
+        input.inputMode = 'numeric';
+        input.pattern = '[0-9]*';
+        input.maxLength = String(options.maxLength ?? 4);
+        input.min = String(options.min ?? 1);
+        input.max = String(options.max ?? 99);
+        input.step = String(options.step ?? 1);
+        input.dataset.configPath = configPath;
+        input.setAttribute('aria-label', name);
+        control.append(input);
+        if (options.suffix) {
+            control.append(createElement('span', 'qqnt-toolbox-number-suffix', options.suffix));
+        }
+        item.append(itemMain, control);
+        return item;
+    }
+
     function createActionItem(name, meta, action, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.action = action;
-        if (options.child) {
-            item.dataset.child = 'true';
-        }
+        applyItemOptions(item, options);
         const itemMain = createElement('div', 'qqnt-toolbox-item-main');
         itemMain.append(createElement('div', 'qqnt-toolbox-item-name', name));
         if (meta) {
@@ -675,12 +810,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function createColorPairItem(name, meta, lightPath, darkPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.colorItem = 'true';
-        if (options.requires) {
-            item.dataset.requires = options.requires;
-        }
-        if (options.child) {
-            item.dataset.child = 'true';
-        }
+        applyItemOptions(item, options);
         const itemMain = createElement('div', 'qqnt-toolbox-item-main');
         itemMain.append(createElement('div', 'qqnt-toolbox-item-name', name));
         if (meta) {
@@ -824,7 +954,31 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('隐藏 VIP 彩色昵称'), '', 'interfaceTweaks.removeVipColor')
             ]),
             createSection('messages', text('消息相关'), [
-                createSwitchItem(text('图片发送修复'), 'Failed / NoSeq', 'imageRetryFixer.enabled'),
+                createSwitchItem(text('文件发送修复'), 'Failed / NoSeq', 'fileRetryFixer.enabled'),
+                createSwitchItem(text('自动删除失败消息'), text('重试成功后删除原失败条目'), 'fileRetryFixer.deleteFailedMessage', {
+                    requires: 'fileRetryFixer.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('图片'), text('随机重写 PNG'), 'fileRetryFixer.image', {
+                    requires: 'fileRetryFixer.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('视频'), text('无损重封装'), 'fileRetryFixer.video', {
+                    requires: 'fileRetryFixer.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('音频'), text('无损重封装'), 'fileRetryFixer.audio', {
+                    requires: 'fileRetryFixer.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('其他文件'), text('发送加密 ZIP'), 'fileRetryFixer.otherFiles', {
+                    requires: 'fileRetryFixer.enabled',
+                    child: true
+                }),
+                createPasswordItem(text('压缩密码'), 'AES-256', 'fileRetryFixer.archivePassword', {
+                    requires: ['fileRetryFixer.enabled', 'fileRetryFixer.otherFiles'],
+                    childLevel: 2
+                }),
                 createSwitchItem(text('提示 NoSeq 消息'), text('标记可能未成功发送的消息'), 'messageTweaks.promptNoSeq'),
                 createSwitchItem(text('语音消息'), text('拖拽发送与语音库'), 'voiceMessage.enabled'),
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
@@ -872,6 +1026,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     danger: true
                 })
             ]),
+            createSection('entertainment', text('娱乐互动'), [
+                createSwitchItem(text('自动回拍'), text('收到拍一拍后自动拍回'), 'entertainment.autoPokeBack'),
+                createNumberItem(text('回拍阈值'), text('0 为无限制'), 'entertainment.autoPokeBackLimit', {
+                    min: 0,
+                    max: 9999,
+                    maxLength: 4,
+                    suffix: text('次'),
+                    requires: 'entertainment.autoPokeBack',
+                    child: true
+                }),
+                createSwitchItem(text('双击头像拍一拍'), text('替代双击头像打开私聊'), 'entertainment.doubleClickAvatarPoke')
+            ]),
             createCategoryTitle(text('精简')),
             createSection('simplifySidebar', text('侧边栏'), []),
             createSection('simplifyTop', text('顶部功能栏'), []),
@@ -904,6 +1070,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return panel;
     }
 
+    function areRequirementsEnabled(value) {
+        return !value || String(value).split('|').every(isFeatureEnabled);
+    }
+
     function updateConfigUi(panel = document.getElementById(PANEL_ID)) {
         if (!panel) {
             return;
@@ -911,7 +1081,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         panel.querySelectorAll('.qqnt-toolbox-item[data-config-path]').forEach(item => {
             const configPath = item.dataset.configPath;
             const requires = item.dataset.requires;
-            const disabled = Boolean(requires && !isFeatureEnabled(requires));
+            const disabled = !areRequirementsEnabled(requires);
             item.dataset.disabled = String(disabled);
             const switchButton = item.querySelector('.qqnt-toolbox-switch');
             if (!switchButton) {
@@ -925,13 +1095,31 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         });
         panel.querySelectorAll('.qqnt-toolbox-item[data-color-item="true"]').forEach(item => {
             const requires = item.dataset.requires;
-            const disabled = Boolean(requires && !isFeatureEnabled(requires));
+            const disabled = !areRequirementsEnabled(requires);
             item.dataset.disabled = String(disabled);
             item.querySelectorAll('.qqnt-toolbox-color-input[data-config-path]').forEach(input => {
                 const fallback = getByPath(DEFAULT_CONFIG, input.dataset.configPath);
                 input.value = normalizeColorHex(getByPath(currentConfig, input.dataset.configPath), fallback);
                 input.disabled = disabled || (!configReady && Boolean(getBridge()));
             });
+        });
+        panel.querySelectorAll('.qqnt-toolbox-item[data-password-item="true"]').forEach(item => {
+            const input = item.querySelector('.qqnt-toolbox-password-input[data-config-path]');
+            if (!input) {
+                return;
+            }
+            input.value = String(getByPath(currentConfig, input.dataset.configPath) || '');
+            input.disabled = !areRequirementsEnabled(item.dataset.requires) || (!configReady && Boolean(getBridge()));
+        });
+        panel.querySelectorAll('.qqnt-toolbox-item[data-number-item="true"]').forEach(item => {
+            const input = item.querySelector('.qqnt-toolbox-number-input[data-config-path]');
+            if (!input) {
+                return;
+            }
+            const fallback = Number(getByPath(DEFAULT_CONFIG, input.dataset.configPath)) || 1;
+            const value = Math.trunc(Number(getByPath(currentConfig, input.dataset.configPath)));
+            input.value = String(Number.isFinite(value) ? clamp(value, Number(input.min), Number(input.max)) : fallback);
+            input.disabled = !areRequirementsEnabled(item.dataset.requires) || (!configReady && Boolean(getBridge()));
         });
         updateGroupUi(panel);
     }
@@ -986,12 +1174,49 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             setConfigBoolean(configPath, nextChecked);
         });
         panel.addEventListener('change', event => {
+            const numberInput = event.target.closest?.('.qqnt-toolbox-number-input[data-config-path]');
+            if (numberInput && panel.contains(numberInput) && !numberInput.disabled) {
+                const fallback = Number(getByPath(DEFAULT_CONFIG, numberInput.dataset.configPath)) || 1;
+                const rawValue = numberInput.value.trim();
+                const value = /^\d+$/.test(rawValue) ? Math.trunc(Number(rawValue)) : fallback;
+                const normalized = clamp(
+                    Number.isFinite(value) ? value : fallback,
+                    Number(numberInput.min),
+                    Number(numberInput.max)
+                );
+                numberInput.value = String(normalized);
+                setConfigValue(numberInput.dataset.configPath, normalized);
+                return;
+            }
+            const passwordInput = event.target.closest?.('.qqnt-toolbox-password-input[data-config-path]');
+            if (passwordInput && panel.contains(passwordInput) && !passwordInput.disabled) {
+                setConfigValue(passwordInput.dataset.configPath, passwordInput.value);
+                return;
+            }
             const colorInput = event.target.closest?.('.qqnt-toolbox-color-input[data-config-path]');
             if (!colorInput || !panel.contains(colorInput) || colorInput.disabled) {
                 return;
             }
             const fallback = getByPath(DEFAULT_CONFIG, colorInput.dataset.configPath);
             setConfigValue(colorInput.dataset.configPath, normalizeColorHex(colorInput.value, fallback));
+        });
+        panel.addEventListener('input', event => {
+            const numberInput = event.target.closest?.('.qqnt-toolbox-number-input[data-config-path]');
+            if (!numberInput || !panel.contains(numberInput) || numberInput.disabled) {
+                return;
+            }
+            const digits = numberInput.value.replace(/\D/g, '').slice(0, Number(numberInput.maxLength) || 4);
+            if (numberInput.value !== digits) {
+                numberInput.value = digits;
+            }
+        });
+        panel.addEventListener('keydown', event => {
+            const input = event.target.closest?.(
+                '.qqnt-toolbox-password-input[data-config-path], .qqnt-toolbox-number-input[data-config-path]'
+            );
+            if (input && event.key === 'Enter') {
+                input.blur();
+            }
         });
     }
 
@@ -1758,6 +1983,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const record = findMessageRecordFromElement(messageElement);
             upsertMessageBadges(messageElement, record);
         });
+        registerPokeAccountFromPage();
     }
 
     function scheduleMessageBadgeRefresh() {
@@ -1883,6 +2109,197 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function getCurrentAioData() {
         return findVueValue(document.querySelector('.aio.vue-component'), ['proxy.commonAioStore.curAioData', 'ctx.commonAioStore.curAioData']) ||
             findVueValue(document.querySelector('.aio'), ['proxy.commonAioStore.curAioData', 'ctx.commonAioStore.curAioData']);
+    }
+
+    function normalizeUin(value) {
+        const content = String(value ?? '').trim();
+        return /^\d+$/.test(content) && content !== '0' ? content : '';
+    }
+
+    function findSelfUinFromPage() {
+        const paths = [
+            'proxy.selfUin',
+            'ctx.selfUin',
+            'proxy.authData.uin',
+            'ctx.authData.uin',
+            'proxy.commonAioStore.authData.uin',
+            'ctx.commonAioStore.authData.uin',
+            'proxy.aioStore.authData.uin',
+            'ctx.aioStore.authData.uin'
+        ];
+        for (const root of [document.querySelector('.aio.vue-component'), document.querySelector('.aio')]) {
+            const selfUin = normalizeUin(findVueValue(root, paths));
+            if (selfUin) {
+                return selfUin;
+            }
+        }
+        for (const messageElement of getVisibleMessageElements()) {
+            const record = findMessageRecordFromElement(messageElement);
+            if (Number(record?.sendType) === 1) {
+                const selfUin = normalizeUin(record?.senderUin);
+                if (selfUin) {
+                    return selfUin;
+                }
+            }
+        }
+        return '';
+    }
+
+    function registerPokeAccountFromPage(force = false) {
+        const now = Date.now();
+        if (!force && now - lastPokeAccountProbeAt < 2000) {
+            return registeredPokeAccountUin;
+        }
+        lastPokeAccountProbeAt = now;
+        const selfUin = findSelfUinFromPage();
+        if (!selfUin || selfUin === registeredPokeAccountUin) {
+            return selfUin;
+        }
+        registeredPokeAccountUin = selfUin;
+        Promise.resolve(getBridge()?.registerPokeAccount?.(selfUin)).catch(() => {
+            if (registeredPokeAccountUin === selfUin) {
+                registeredPokeAccountUin = '';
+            }
+        });
+        return selfUin;
+    }
+
+    function getPokeAvatarFromEvent(event) {
+        const path = event?.composedPath?.() || [event?.target];
+        for (const item of path) {
+            if (!(item instanceof Element) ||
+                !item.matches('.avatar-span .avatar, .avatar.message-container__avatar')) {
+                continue;
+            }
+            if (getMessageElementFromElement(item)) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    function getPokePayload(avatar) {
+        const record = findMessageRecordFromElement(avatar);
+        const aioData = getCurrentAioData() || {};
+        const header = aioData.header || {};
+        const chatType = Number(record?.chatType || aioData.chatType || header.chatType || 0);
+        const peerUin = [
+            record?.peerUin,
+            record?.peerUid,
+            aioData.peerUin,
+            aioData.peerUid,
+            header.uin,
+            header.peerUin,
+            header.uid,
+            header.peerUid
+        ].map(normalizeUin).find(Boolean) || '';
+        if (chatType === 2) {
+            const targetUin = normalizeUin(record?.senderUin || record?.sender?.uin);
+            return targetUin && peerUin ? { chatType, targetUin, groupUin: peerUin } : null;
+        }
+        if (chatType === 1) {
+            return peerUin ? { chatType, targetUin: peerUin, groupUin: '' } : null;
+        }
+        return null;
+    }
+
+    function stopAvatarEvent(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+    }
+
+    function animatePokedAvatar(avatar) {
+        if (!(avatar instanceof Element) || !avatar.isConnected) {
+            return;
+        }
+        pokeAvatarAnimations.get(avatar)?.cancel();
+        const animation = avatar.animate([
+            { transform: 'translateX(0) rotate(0deg)' },
+            { transform: 'translateX(-5px) rotate(-5deg)', offset: .14 },
+            { transform: 'translateX(5px) rotate(4deg)', offset: .28 },
+            { transform: 'translateX(-4px) rotate(-3deg)', offset: .42 },
+            { transform: 'translateX(4px) rotate(3deg)', offset: .58 },
+            { transform: 'translateX(-2px) rotate(-2deg)', offset: .72 },
+            { transform: 'translateX(2px) rotate(1deg)', offset: .86 },
+            { transform: 'translateX(0) rotate(0deg)' }
+        ], {
+            duration: 460,
+            easing: 'cubic-bezier(.36, .07, .19, .97)',
+            composite: 'add'
+        });
+        pokeAvatarAnimations.set(avatar, animation);
+        const clearAnimation = () => {
+            if (pokeAvatarAnimations.get(avatar) === animation) {
+                pokeAvatarAnimations.delete(avatar);
+            }
+        };
+        animation.addEventListener('finish', clearAnimation, { once: true });
+        animation.addEventListener('cancel', clearAnimation, { once: true });
+    }
+
+    function sendAvatarPoke(payload, avatar) {
+        const request = {
+            ...(payload || { chatType: 0, targetUin: '', groupUin: '' }),
+            selfUin: registerPokeAccountFromPage(true)
+        };
+        Promise.resolve(getBridge()?.sendPoke?.(request)).then(result => {
+            if (result?.ok === true) {
+                animatePokedAvatar(avatar);
+            }
+        }).catch(() => {});
+    }
+
+    function handleAvatarPointerDown(event) {
+        if (!isFeatureEnabled('entertainment.doubleClickAvatarPoke') || event.button !== 0) {
+            pendingAvatarPoke = null;
+            return;
+        }
+        const now = performance.now();
+        const pending = pendingAvatarPoke;
+        const avatar = getPokeAvatarFromEvent(event);
+        if (!avatar) {
+            pendingAvatarPoke = null;
+            return;
+        }
+        const isSecondPress = pending && pending.avatar === avatar && now - pending.time <= 480 &&
+            Math.hypot(event.clientX - pending.x, event.clientY - pending.y) <= 20;
+        if (isSecondPress) {
+            stopAvatarEvent(event);
+            suppressAvatarClicksUntil = now + 650;
+            pendingAvatarPoke = null;
+            sendAvatarPoke(pending.payload, pending.avatar);
+            return;
+        }
+
+        stopAvatarEvent(event);
+        suppressAvatarClicksUntil = now + 650;
+        const next = {
+            time: now,
+            x: event.clientX,
+            y: event.clientY,
+            avatar,
+            payload: getPokePayload(avatar)
+        };
+        pendingAvatarPoke = next;
+        window.setTimeout(() => {
+            if (pendingAvatarPoke === next) {
+                pendingAvatarPoke = null;
+            }
+        }, 500);
+    }
+
+    function suppressAvatarClick(event) {
+        if (performance.now() <= suppressAvatarClicksUntil) {
+            stopAvatarEvent(event);
+        }
+    }
+
+    function installPokeInteractions() {
+        document.addEventListener('pointerdown', handleAvatarPointerDown, true);
+        document.addEventListener('click', suppressAvatarClick, true);
+        document.addEventListener('dblclick', suppressAvatarClick, true);
+        registerPokeAccountFromPage(true);
     }
 
     function getPeerFromRecord(record) {
@@ -2481,6 +2898,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     loadConfig();
     subscribeConfig();
+    installPokeInteractions();
     installRepeatEntrypoints();
     installInterfaceTweaksObserver();
     installMessageBadgeObserver();

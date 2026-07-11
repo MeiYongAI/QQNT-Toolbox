@@ -9,9 +9,11 @@
     "url": "https://github.com/MeiYongAI/QQNT-Toolbox.git"
   },
   "scripts": {
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/voice-file-sender.js && node --check src/recall-viewer-preload.js && node --check src/recall-viewer.js"
+    "build:native": "cmd /d /c native\\build.cmd",
+    "check": "node --check src/main.js && node --check src/png-variant.js && node --check src/poke-protocol.js && node --check src/preload.js && node --check src/renderer.js && node --check src/voice-file-sender.js && node --check src/recall-viewer-preload.js && node --check src/recall-viewer.js"
   },
   "dependencies": {
+    "@zip.js/zip.js": "2.8.26",
     "silk-wasm": "3.3.4"
   }
 }
