@@ -63,6 +63,12 @@ C:\ffmpeg\bin\ffmpeg.exe
 - 只处理符合条件的图片消息，不处理普通文件或文字消息。
 - 每条失败消息只重试一次，避免循环发送。
 
+### 提示 NoSeq 消息
+
+开启“消息相关 > 提示 NoSeq 消息”后，插件会给 `sendStatus` 为 NoSeq 的非灰条消息添加一个小型感叹号标记。鼠标悬停标记时会显示“这条消息可能未成功发送（NoSeq）”。
+
+NoSeq 通常表示消息在弱网环境下可能没有成功发送，或者被服务器拦截。这个功能只负责提示，不会自动修改或重发消息；图片消息的自动重试由上面的“图片发送修复”单独控制。
+
 ### 消息复读
 
 开启“消息相关 > 复读”后，可选择以下一种入口：
@@ -195,7 +201,7 @@ qqnt_toolbox
 
 ## 致谢
 
-- [QAuxiliary](https://github.com/cinit/QAuxiliary)：参考 NoSeq 图片修复与消息复读的行为设计。
+- [QAuxiliary](https://github.com/cinit/QAuxiliary)：参考 NoSeq 消息提示、图片修复与消息复读的行为设计。
 - [lite-tools](https://github.com/xiyuesaves/lite-tools)：参考阻止撤回持久化、界面调整和撤回查看器设计。
 - [LiteLoaderQQNT-Audio-Sender](https://github.com/xtaw/LiteLoaderQQNT-Audio-Sender)：原始语音文件发送思路及早期实现参考。
 - [silk-wasm](https://www.npmjs.com/package/silk-wasm)：Release 中包含的 Silk 编解码运行库，遵循其自身许可证。

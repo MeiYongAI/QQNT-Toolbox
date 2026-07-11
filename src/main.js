@@ -52,6 +52,7 @@ const DEFAULT_CONFIG = {
         saveInContextMenu: true
     },
     messageTweaks: {
+        promptNoSeq: false,
         removeReplyAt: false
     },
     preventRecall: {

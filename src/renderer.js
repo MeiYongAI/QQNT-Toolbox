@@ -2,6 +2,8 @@
     const PANEL_ID = 'qqnt-toolbox-panel';
     const STYLE_ID = 'qqnt-toolbox-style';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
+    const MSG_TYPE_GRAY_TIPS = 5;
+    const SEND_STATUS_SUCCESS_NO_SEQ = 3;
     const DEFAULT_PANEL_STATE = {
         x: null,
         y: null,
@@ -31,6 +33,7 @@
             saveInContextMenu: true
         },
         messageTweaks: {
+            promptNoSeq: false,
             removeReplyAt: false
         },
         preventRecall: {
@@ -78,9 +81,9 @@
     let replyAtEditor = null;
     let replyAtCleanupBusy = false;
     let imageViewerDrag = null;
-    let recallBadgeObserver = null;
-    let recallBadgeResizeObserver = null;
-    let recallBadgeRefreshTimer = 0;
+    let messageBadgeObserver = null;
+    let messageBadgeResizeObserver = null;
+    let messageBadgeRefreshTimer = 0;
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
     let simplifyConfigSaveTimer = 0;
@@ -556,7 +559,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 .qqnt-toolbox-hidden {
     display: none !important;
 }
-.qqnt-toolbox-recall-badge {
+.qqnt-toolbox-status-badge {
     position: absolute;
     top: -6px;
     right: -7px;
@@ -569,13 +572,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     margin: 0;
     padding: 0;
     border: 0;
-    color: var(--qqnt-toolbox-recall-color, var(--text-secondary, var(--text-02, #8a8f99)));
     background: transparent;
     opacity: .58;
     user-select: none;
     pointer-events: auto;
     transition: opacity .15s ease, transform .15s ease;
     transform: scale(.92);
+}
+.qqnt-toolbox-recall-badge {
+    color: var(--qqnt-toolbox-recall-color, var(--text-secondary, var(--text-02, #8a8f99)));
 }
 .qqnt-toolbox-recall-badge::before {
     content: "";
@@ -585,13 +590,27 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5'/%3E%3C/svg%3E") center / contain no-repeat;
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5'/%3E%3C/svg%3E") center / contain no-repeat;
 }
-.message:hover .qqnt-toolbox-recall-badge,
-.ml-item:hover .qqnt-toolbox-recall-badge,
-.qqnt-toolbox-recall-badge:hover {
+.qqnt-toolbox-noseq-badge {
+    color: var(--warning-color, var(--warning-text-color, #d97706));
+}
+.qqnt-toolbox-noseq-badge::before {
+    content: "!";
+    display: flex;
+    width: 12px;
+    height: 12px;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+    font: 700 9px/12px Arial, sans-serif;
+}
+.message:hover .qqnt-toolbox-status-badge,
+.ml-item:hover .qqnt-toolbox-status-badge,
+.qqnt-toolbox-status-badge:hover {
     opacity: 1;
     transform: scale(1);
 }
-[data-qqnt-toolbox-recall-anchor="true"] {
+[data-qqnt-toolbox-status-anchor="true"] {
     position: relative !important;
 }
 `;
@@ -806,6 +825,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             ]),
             createSection('messages', text('消息相关'), [
                 createSwitchItem(text('图片发送修复'), 'Failed / NoSeq', 'imageRetryFixer.enabled'),
+                createSwitchItem(text('提示 NoSeq 消息'), text('标记可能未成功发送的消息'), 'messageTweaks.promptNoSeq'),
                 createSwitchItem(text('语音消息'), text('拖拽发送与语音库'), 'voiceMessage.enabled'),
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
                     requires: 'voiceMessage.enabled',
@@ -1343,7 +1363,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             document.querySelector('.topbar.container-topbar .topbar-content')?.style.setProperty('padding-right', `${controlWidth - 10}px`);
         }
         applySimplifyTweaks();
-        scheduleRecallBadgeRefresh();
+        scheduleMessageBadgeRefresh();
     }
 
     function scheduleInterfaceTweaksRefresh() {
@@ -1612,7 +1632,14 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         });
     }
 
-    function getRecallBadgeTarget(messageElement, record) {
+    function isNoSeqMessage(record) {
+        if (Number(record?.sendStatus) !== SEND_STATUS_SUCCESS_NO_SEQ || Number(record?.msgType) === MSG_TYPE_GRAY_TIPS) {
+            return false;
+        }
+        return !(Array.isArray(record?.elements) && record.elements.some(element => element?.grayTipElement));
+    }
+
+    function getMessageBadgeTarget(messageElement, record) {
         const wrapper = messageElement.querySelector('.message-content__wrapper');
         const elementTypes = new Set((Array.isArray(record?.elements) ? record.elements : [])
             .map(element => Number(element?.elementType)));
@@ -1644,7 +1671,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return wrapper || messageElement;
     }
 
-    function positionRecallBadge(badge, host, target) {
+    function positionMessageBadge(badge, host, target, slot) {
         const hostRect = host.getBoundingClientRect();
         const targetRect = target.getBoundingClientRect();
         if (!hostRect.width || !hostRect.height || !targetRect.width || !targetRect.height) {
@@ -1654,38 +1681,67 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         badge.style.top = `${Math.round(targetRect.top - hostRect.top - 5)}px`;
-        badge.style.left = `${Math.round(targetRect.right - hostRect.left - 9)}px`;
+        badge.style.left = `${Math.round(targetRect.right - hostRect.left - 9 - slot * 17)}px`;
         badge.style.right = 'auto';
     }
 
-    function upsertRecallBadge(messageElement, record) {
+    function setMessageBadge(messageElement, className, visible, title) {
+        let badge = messageElement.querySelector(`:scope .${className}`);
+        if (!visible) {
+            badge?.remove();
+            return null;
+        }
+        if (!badge) {
+            badge = createElement('span');
+        }
+        badge.classList.add('qqnt-toolbox-status-badge', className);
+        badge.title = title;
+        badge.setAttribute('role', 'img');
+        badge.setAttribute('aria-label', title);
+        return badge;
+    }
+
+    function upsertMessageBadges(messageElement, record) {
         const mark = getRecallMark(record);
-        const existing = messageElement.querySelector(':scope .qqnt-toolbox-recall-badge');
-        if (!isConfigEnabled('preventRecall.enabled') || !mark) {
-            const anchor = existing?.parentElement;
-            existing?.remove();
-            anchor?.removeAttribute('data-qqnt-toolbox-recall-anchor');
+        const titleParts = [text('\u8be5\u6d88\u606f\u5df2\u88ab'), getRecallOperatorName(mark), text('\u64a4\u56de'), formatRecallTime(mark?.recallTime)].filter(Boolean);
+        const recallBadge = setMessageBadge(
+            messageElement,
+            'qqnt-toolbox-recall-badge',
+            isConfigEnabled('preventRecall.enabled') && Boolean(mark),
+            titleParts.join(' ')
+        );
+        const noSeqTitle = text('这条消息可能未成功发送（NoSeq）');
+        const noSeqBadge = setMessageBadge(
+            messageElement,
+            'qqnt-toolbox-noseq-badge',
+            isConfigEnabled('messageTweaks.promptNoSeq') && isNoSeqMessage(record),
+            noSeqTitle
+        );
+        const badges = [recallBadge, noSeqBadge].filter(Boolean);
+        const anchors = messageElement.querySelectorAll('[data-qqnt-toolbox-status-anchor="true"]');
+        if (!badges.length) {
+            anchors.forEach(anchor => anchor.removeAttribute('data-qqnt-toolbox-status-anchor'));
             return;
         }
-        let badge = existing;
-        if (!badge) {
-            badge = createElement('span', 'qqnt-toolbox-recall-badge');
-        }
-        const titleParts = [text('\u8be5\u6d88\u606f\u5df2\u88ab'), getRecallOperatorName(mark), text('\u64a4\u56de'), formatRecallTime(mark.recallTime)].filter(Boolean);
-        badge.title = titleParts.join(' ');
-        const target = getRecallBadgeTarget(messageElement, record);
+        const target = getMessageBadgeTarget(messageElement, record);
         const host = messageElement.querySelector('.message-container') ||
             messageElement.querySelector('.message-content__wrapper') ||
             messageElement;
-        if (badge.parentElement !== host) {
-            badge.parentElement?.removeAttribute('data-qqnt-toolbox-recall-anchor');
-            host.appendChild(badge);
+        anchors.forEach(anchor => {
+            if (anchor !== host) {
+                anchor.removeAttribute('data-qqnt-toolbox-status-anchor');
+            }
+        });
+        for (const [slot, badge] of badges.entries()) {
+            if (badge.parentElement !== host) {
+                host.appendChild(badge);
+            }
+            positionMessageBadge(badge, host, target, slot);
         }
-        host.dataset.qqntToolboxRecallAnchor = 'true';
-        positionRecallBadge(badge, host, target);
+        host.dataset.qqntToolboxStatusAnchor = 'true';
     }
 
-    function refreshRecallBadges() {
+    function refreshMessageBadges() {
         if (!document.body) {
             return;
         }
@@ -1700,35 +1756,35 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 return;
             }
             const record = findMessageRecordFromElement(messageElement);
-            upsertRecallBadge(messageElement, record);
+            upsertMessageBadges(messageElement, record);
         });
     }
 
-    function scheduleRecallBadgeRefresh() {
-        if (recallBadgeRefreshTimer) {
+    function scheduleMessageBadgeRefresh() {
+        if (messageBadgeRefreshTimer) {
             return;
         }
-        recallBadgeRefreshTimer = window.setTimeout(() => {
-            recallBadgeRefreshTimer = 0;
-            refreshRecallBadges();
+        messageBadgeRefreshTimer = window.setTimeout(() => {
+            messageBadgeRefreshTimer = 0;
+            refreshMessageBadges();
         }, 100);
     }
 
-    function installRecallBadgeObserver() {
-        if (recallBadgeObserver || !document.body) {
-            scheduleRecallBadgeRefresh();
+    function installMessageBadgeObserver() {
+        if (messageBadgeObserver || !document.body) {
+            scheduleMessageBadgeRefresh();
             return;
         }
-        recallBadgeObserver = new MutationObserver(scheduleRecallBadgeRefresh);
-        recallBadgeObserver.observe(document.body, {
+        messageBadgeObserver = new MutationObserver(scheduleMessageBadgeRefresh);
+        messageBadgeObserver.observe(document.body, {
             childList: true,
             subtree: true
         });
         if (typeof ResizeObserver === 'function') {
-            recallBadgeResizeObserver = new ResizeObserver(scheduleRecallBadgeRefresh);
-            recallBadgeResizeObserver.observe(document.body);
+            messageBadgeResizeObserver = new ResizeObserver(scheduleMessageBadgeRefresh);
+            messageBadgeResizeObserver.observe(document.body);
         }
-        scheduleRecallBadgeRefresh();
+        scheduleMessageBadgeRefresh();
     }
 
     function normalizeText(value) {
@@ -1967,7 +2023,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (!target) {
                 continue;
             }
-            const content = getRecallBadgeTarget(target.messageElement, target.record);
+            const content = getMessageBadgeTarget(target.messageElement, target.record);
             const rect = content?.getBoundingClientRect?.();
             if (rect?.width > 0 && rect?.height > 0 &&
                 event.clientX >= rect.left && event.clientX <= rect.right &&
@@ -2427,5 +2483,5 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     subscribeConfig();
     installRepeatEntrypoints();
     installInterfaceTweaksObserver();
-    installRecallBadgeObserver();
+    installMessageBadgeObserver();
 })();
