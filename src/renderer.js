@@ -4,6 +4,19 @@
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
     const MSG_TYPE_GRAY_TIPS = 5;
     const SEND_STATUS_SUCCESS_NO_SEQ = 3;
+    const PROFILE_CARD_HOVER_TRIGGER_SELECTOR = [
+        '[class*="avatar"]',
+        '.chat-header .panel-header__title',
+        '.message-container__name',
+        '.message-container__sender-name',
+        '[class*="member"][class*="item"]',
+        '[class*="member-item"] [class*="name"]',
+        '[class*="member-list"] [role="listitem"]',
+        '[class*="member-list"] [class*="viewport-list__inner"] > *',
+        '[class*="member-list"] [class*="name"]',
+        '[class*="group-member"] [class*="viewport-list__inner"] > *',
+        '.recent-contact-item .main-info'
+    ].join(',');
     const DEFAULT_PANEL_STATE = {
         x: null,
         y: null,
@@ -63,6 +76,8 @@
             imageViewerOptimization: false,
             goBackMainList: false,
             preventMessageDrag: false,
+            preventRecentContactDrag: false,
+            preventProfileCardHover: false,
             deleteBubbleSkin: false,
             hiddenWeatherBtn: false,
             hiddenClassicBtn: false,
@@ -945,6 +960,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('图片查看器优化'), text('点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
+                createSwitchItem(text('阻止消息列表拖拽'), text('防止拖出独立聊天窗口'), 'interfaceTweaks.preventRecentContactDrag'),
+                createSwitchItem(text('禁止悬停显示资料卡'), text('用户与群资料卡'), 'interfaceTweaks.preventProfileCardHover'),
                 createSwitchItem(text('删除消息气泡装扮'), '', 'interfaceTweaks.deleteBubbleSkin'),
                 createSwitchItem(text('隐藏天气按钮'), '', 'interfaceTweaks.hiddenWeatherBtn'),
                 createSwitchItem(text('隐藏经典模式切换按钮'), '', 'interfaceTweaks.hiddenClassicBtn'),
@@ -1568,6 +1585,26 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         applySimplifyVisibility(groups.chatFunc, currentConfig.chatFuncBar, 'chat-func');
     }
 
+    function handleProfileCardHover(event) {
+        if (!isConfigEnabled('interfaceTweaks.preventProfileCardHover')) {
+            return;
+        }
+        const isProfileTrigger = (event.composedPath?.() || [event.target]).some(item =>
+            item instanceof Element && item.matches(PROFILE_CARD_HOVER_TRIGGER_SELECTOR)
+        );
+        if (!isProfileTrigger) {
+            return;
+        }
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+    }
+
+    function installProfileCardHoverBlocker() {
+        for (const eventName of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter']) {
+            document.addEventListener(eventName, handleProfileCardHover, true);
+        }
+    }
+
     function applyInterfaceTweaks() {
         if (!document.body) {
             return;
@@ -1729,6 +1766,20 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         event.preventDefault();
         event.stopPropagation();
         goBackMainList();
+    }
+
+    function handleRecentContactDragStart(event) {
+        if (!isConfigEnabled('interfaceTweaks.preventRecentContactDrag')) {
+            return;
+        }
+        const target = event.target instanceof Element ? event.target : null;
+        const item = target?.closest('.recent-contact-item');
+        if (!item?.closest('.recent-contact, .recent-contact-list--wrapper')) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
     }
 
     function handlePreventMessageDragPointerDown(event) {
@@ -2861,6 +2912,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('mousedown', handleRepeatPlusOneEvent, true);
     document.addEventListener('click', handleRepeatPlusOneEvent, true);
     document.addEventListener('mouseup', handleSideBackMouseUp, true);
+    document.addEventListener('dragstart', handleRecentContactDragStart, true);
     document.addEventListener('pointerdown', handlePreventMessageDragPointerDown, true);
     document.addEventListener('pointerup', handlePreventMessageDragPointerUp, true);
     document.addEventListener('mousemove', handlePreventMessageDragMove, true);
@@ -2898,6 +2950,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     loadConfig();
     subscribeConfig();
+    installProfileCardHoverBlocker();
     installPokeInteractions();
     installRepeatEntrypoints();
     installInterfaceTweaksObserver();

@@ -101,6 +101,8 @@ const DEFAULT_CONFIG = {
         imageViewerOptimization: false,
         goBackMainList: false,
         preventMessageDrag: false,
+        preventRecentContactDrag: false,
+        preventProfileCardHover: false,
         deleteBubbleSkin: false,
         hiddenWeatherBtn: false,
         hiddenClassicBtn: false,
