@@ -52,9 +52,11 @@ $runtimeFiles = @(
     'package.json',
     'native/poke-bridge.win32-x64.node',
     'src/main.js',
+    'src/native-ipc.js',
     'src/png-variant.js',
     'src/poke-protocol.js',
     'src/preload.js',
+    'src/repeat-message.js',
     'src/recall-viewer-preload.js',
     'src/recall-viewer.html',
     'src/recall-viewer.js',
@@ -92,6 +94,8 @@ try {
     }
     foreach ($required in @(
         'QQNT-Toolbox/manifest.json',
+        'QQNT-Toolbox/src/native-ipc.js',
+        'QQNT-Toolbox/src/repeat-message.js',
         'QQNT-Toolbox/src/settings.css',
         'QQNT-Toolbox/native/poke-bridge.win32-x64.node',
         'QQNT-Toolbox/node_modules/silk-wasm/lib/silk_wasm.wasm'

@@ -5,7 +5,11 @@ let initializeToolboxSettings = async () => {};
     const SETTINGS_ID = 'qqnt-toolbox-settings';
     const STYLE_ID = 'qqnt-toolbox-style';
     const SETTINGS_STYLE_ID = 'qqnt-toolbox-settings-style';
+    const POKE_TOAST_ID = 'qqnt-toolbox-poke-toast';
+    const POKE_FALLBACK_MENU_ID = 'qqnt-toolbox-poke-fallback-menu';
+    const POKE_RECALL_NOTICE = '若对方QQ版本过低，可能无法撤回。';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
+    const ACTIVE_REPEAT_PEER_KEY_PREFIX = 'qqnt-toolbox-active-repeat-peer';
     const MSG_TYPE_GRAY_TIPS = 5;
     const SEND_STATUS_SUCCESS_NO_SEQ = 3;
     const PROFILE_CARD_HOVER_TRIGGER_SELECTOR = [
@@ -67,7 +71,8 @@ let initializeToolboxSettings = async () => {};
             autoPokeBack: false,
             autoPokeBackLimit: 1,
             doubleClickAvatarPoke: false,
-            rightClickAvatarPoke: true
+            rightClickAvatarPoke: true,
+            pokeToast: true
         },
         floatingPanel: {
             enabled: true,
@@ -128,8 +133,12 @@ let initializeToolboxSettings = async () => {};
     let messageBadgeRefreshTimer = 0;
     let registeredPokeAccountUin = '';
     let lastPokeAccountProbeAt = 0;
+    let lastPokeAccountSyncAt = 0;
     let pendingAvatarPoke = null;
     let suppressAvatarClicksUntil = 0;
+    let pokeToastTimer = 0;
+    let pokeAccountRegistration = null;
+    let activeRepeatPeerSignature = '';
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
     let simplifyConfigSaveTimer = 0;
@@ -143,6 +152,7 @@ let initializeToolboxSettings = async () => {};
     const preventDragMouseButtons = new Set([1, 4, 8, 16]);
     const repeatButtonRecords = new WeakMap();
     const pokeAvatarAnimations = new WeakMap();
+    const recalledPokeMessageIds = new Set();
 
     if (window.__qqntToolboxRendererInstalled) {
         return;
@@ -650,6 +660,85 @@ let initializeToolboxSettings = async () => {};
     cursor: default;
     opacity: .58;
 }
+#${POKE_TOAST_ID} {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 2147483646;
+    display: flex;
+    align-items: center;
+    min-height: 42px;
+    padding: 0 14px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
+    border-radius: 8px;
+    color: var(--text-primary, var(--text-01, #1f2329));
+    background: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    box-shadow: var(--shadow-bg-middle-primary, 0 8px 28px rgba(0, 0, 0, .18));
+    font: 13px/1.4 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    transform: translate(-50%, -50%);
+    user-select: none;
+}
+#${POKE_TOAST_ID} .qqnt-toolbox-poke-toast-label {
+    white-space: nowrap;
+}
+#${POKE_FALLBACK_MENU_ID} {
+    position: fixed;
+    z-index: 2147483646;
+    width: max-content !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    padding: 4px !important;
+    box-sizing: border-box;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
+    border-radius: 6px;
+    color: var(--text-primary, var(--text-01, #1f2329));
+    background: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    box-shadow: var(--shadow-bg-middle-primary, 0 8px 24px rgba(0, 0, 0, .18));
+}
+#${POKE_FALLBACK_MENU_ID} .q-context-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    max-height: 32px !important;
+    margin: 0 !important;
+    padding: 0 10px !important;
+    box-sizing: border-box;
+    border-radius: 4px;
+    cursor: default;
+    font-size: 14px;
+    line-height: 32px;
+    letter-spacing: 0;
+    user-select: none;
+}
+#${POKE_FALLBACK_MENU_ID} .q-context-menu-item:hover {
+    background: var(--overlay_hover, var(--background-hover, rgba(127, 127, 127, .12)));
+}
+#${POKE_FALLBACK_MENU_ID} .q-context-menu-item__icon {
+    display: flex;
+    flex: 0 0 16px;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+}
+#${POKE_FALLBACK_MENU_ID} .q-context-menu-item__text {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    line-height: 20px;
+    letter-spacing: 0;
+    text-align: left;
+    white-space: nowrap;
+}
 body.qqnt-toolbox-side-repeat .message .qqnt-toolbox-repeat-slot.plus-one-btn,
 body.qqnt-toolbox-side-repeat .ml-item .qqnt-toolbox-repeat-slot.plus-one-btn {
     position: absolute !important;
@@ -657,18 +746,49 @@ body.qqnt-toolbox-side-repeat .ml-item .qqnt-toolbox-repeat-slot.plus-one-btn {
     bottom: auto !important;
     z-index: 3;
     display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 28px !important;
+    min-width: 28px !important;
+    max-width: 28px !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    max-height: 28px !important;
     margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    border: 0 !important;
+    border-radius: 50% !important;
+    outline: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
     visibility: hidden !important;
     opacity: 0 !important;
     pointer-events: none !important;
     cursor: pointer;
     transform: translateY(-50%) !important;
 }
+body.qqnt-toolbox-side-repeat .qqnt-toolbox-repeat-slot.plus-one-btn > svg {
+    display: block !important;
+    flex: none !important;
+    width: 26px !important;
+    height: 26px !important;
+}
 body.qqnt-toolbox-side-repeat .message:hover .qqnt-toolbox-repeat-slot.plus-one-btn,
 body.qqnt-toolbox-side-repeat .ml-item:hover .qqnt-toolbox-repeat-slot.plus-one-btn {
     visibility: visible !important;
     opacity: 1 !important;
     pointer-events: auto !important;
+}
+body.qqnt-toolbox-side-repeat .message .plus-one-btn:not(.qqnt-toolbox-repeat-slot),
+body.qqnt-toolbox-side-repeat .ml-item .plus-one-btn:not(.qqnt-toolbox-repeat-slot) {
+    display: none !important;
+}
+.chat-record-list .plus-one-btn,
+.msg-record-container .plus-one-btn,
+.record-msg-panel .plus-one-btn,
+body.qqnt-toolbox-search-record .plus-one-btn {
+    display: none !important;
 }
 body.qqnt-toolbox-context-repeat .message .plus-one-btn:not(.qqnt-toolbox-repeat-menu-plus-one),
 body.qqnt-toolbox-context-repeat .ml-item .plus-one-btn:not(.qqnt-toolbox-repeat-menu-plus-one),
@@ -679,7 +799,9 @@ body.qqnt-toolbox-context-repeat .qqnt-toolbox-repeat-slot {
     pointer-events: none !important;
     transform: scale(.72);
     transform-origin: center;
-    color: currentColor;
+    color: inherit !important;
+    --brand_standard: currentColor;
+    --brand-primary: currentColor;
 }
 body.qqnt-toolbox-hide-weather .weather-widget,
 body.qqnt-toolbox-hide-classic .window-control-area .narrow-toggler,
@@ -1259,8 +1381,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 })
             ]),
             createSection('entertainment', text('娱乐互动'), [
-                createSwitchItem(text('自动回拍'), text('收到拍一拍后自动拍回'), 'entertainment.autoPokeBack'),
-                createNumberItem(text('回拍阈值'), text('0 为无限制'), 'entertainment.autoPokeBackLimit', {
+                createSwitchItem(text('自动回戳'), text('收到戳戳后自动回戳'), 'entertainment.autoPokeBack'),
+                createNumberItem(text('回戳阈值'), text('0 为无限制'), 'entertainment.autoPokeBackLimit', {
                     min: 0,
                     max: 9999,
                     maxLength: 4,
@@ -1268,8 +1390,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'entertainment.autoPokeBack',
                     child: true
                 }),
-                createSwitchItem(text('双击头像拍一拍'), text('替代双击头像打开私聊'), 'entertainment.doubleClickAvatarPoke'),
-                createSwitchItem(text('右键头像戳一戳'), text('控制头像右键菜单中的戳一戳入口'), 'entertainment.rightClickAvatarPoke')
+                createSwitchItem(text('双击头像戳戳'), text('替代双击头像打开私聊'), 'entertainment.doubleClickAvatarPoke'),
+                createSwitchItem(text('右键头像戳戳'), text('控制头像右键菜单中的戳一戳入口'), 'entertainment.rightClickAvatarPoke'),
+                createSwitchItem(text('戳戳提示'), text('发送后显示结果提示'), 'entertainment.pokeToast')
             ]),
             createCategoryTitle(text('精简')),
             createSection('simplifySidebar', text('侧边栏'), []),
@@ -1405,6 +1528,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const nextConfig = clonePlain(currentConfig);
         setByPath(nextConfig, configPath, value);
         currentConfig = mergeConfig(nextConfig);
+        syncPokeToastVisibility();
+        syncMessageBadgeObserver(true);
         refreshConfigViews();
         scheduleRepeatEntrypointRefresh();
         scheduleInterfaceTweaksRefresh();
@@ -1417,6 +1542,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
+            syncPokeToastVisibility();
+            syncMessageBadgeObserver(true);
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
@@ -1993,7 +2120,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             document.querySelector('.topbar.container-topbar .topbar-content')?.style.setProperty('padding-right', `${controlWidth - 10}px`);
         }
         applySimplifyTweaks();
-        scheduleMessageBadgeRefresh();
     }
 
     function scheduleInterfaceTweaksRefresh() {
@@ -2321,6 +2447,37 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return wrapper || messageElement;
     }
 
+    function isCompositeMediaRecord(record) {
+        const elements = Array.isArray(record?.elements) ? record.elements.filter(Boolean) : [];
+        return elements.length > 1 && elements.some(element =>
+            [2, 3, 4, 5].includes(Number(element?.elementType)) ||
+            Boolean(element?.picElement) ||
+            Boolean(element?.fileElement) ||
+            Boolean(element?.pttElement) ||
+            Boolean(element?.videoElement)
+        );
+    }
+
+    function getRepeatButtonTarget(messageElement, record) {
+        if (!isCompositeMediaRecord(record)) {
+            return getMessageBadgeTarget(messageElement, record);
+        }
+        const wrapper = messageElement.querySelector('.message-content__wrapper');
+        const selectors = [
+            '.mix-message__container',
+            '.message-content.mix-message__inner',
+            '.msg-content-container',
+            '.message-content'
+        ];
+        for (const selector of selectors) {
+            const target = wrapper?.querySelector(selector) || messageElement.querySelector(selector);
+            if (target) {
+                return target;
+            }
+        }
+        return wrapper || messageElement;
+    }
+
     function getMessageLayoutHost(messageElement) {
         return messageElement.querySelector('.message-container') ||
             messageElement.querySelector('.message-content__wrapper') ||
@@ -2358,6 +2515,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function upsertMessageBadges(messageElement, record) {
+        applyPokeRecallNotice(messageElement, record);
         const mark = getRecallMark(record);
         const titleParts = [text('\u8be5\u6d88\u606f\u5df2\u88ab'), getRecallOperatorName(mark), text('\u64a4\u56de'), formatRecallTime(mark?.recallTime)].filter(Boolean);
         const recallBadge = setMessageBadge(
@@ -2377,6 +2535,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const anchors = messageElement.querySelectorAll('[data-qqnt-toolbox-status-anchor="true"]');
         if (!badges.length) {
             anchors.forEach(anchor => anchor.removeAttribute('data-qqnt-toolbox-status-anchor'));
+            messageBadgeResizeObserver?.unobserve(messageElement);
             return;
         }
         const target = getMessageBadgeTarget(messageElement, record);
@@ -2393,9 +2552,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             positionMessageBadge(badge, host, target, slot);
         }
         host.dataset.qqntToolboxStatusAnchor = 'true';
+        messageBadgeResizeObserver?.observe(messageElement);
     }
 
-    function refreshMessageBadges() {
+    function updateMessageBadgeTheme() {
         if (!document.body) {
             return;
         }
@@ -2404,18 +2564,41 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 ? currentConfig.preventRecall.customTextColor.dark
                 : currentConfig.preventRecall.customTextColor.light)
             : '');
-        document.querySelectorAll('.message, .ml-item').forEach(element => {
-            const messageElement = getMessageElementFromElement(element);
-            if (!messageElement) {
-                return;
+    }
+
+    function processMessageBadgeElements(messageElements) {
+        for (const messageElement of messageElements) {
+            if (!(messageElement instanceof Element) || !messageElement.isConnected) {
+                continue;
             }
             const record = findMessageRecordFromElement(messageElement);
             upsertMessageBadges(messageElement, record);
-        });
-        registerPokeAccountFromPage();
+        }
     }
 
-    function scheduleMessageBadgeRefresh() {
+    function getAllMessageElements() {
+        const messages = new Set();
+        document.querySelectorAll('.message, .ml-item').forEach(element => {
+            const messageElement = getMessageElementFromElement(element);
+            if (messageElement) {
+                messages.add(messageElement);
+            }
+        });
+        return messages;
+    }
+
+    function refreshMessageBadges() {
+        if (!document.body) {
+            return;
+        }
+        updateMessageBadgeTheme();
+        processMessageBadgeElements(getAllMessageElements());
+    }
+
+    function scheduleMessageBadgeRefresh(force = false) {
+        if (!force && !isMessageBadgeObserverNeeded()) {
+            return;
+        }
         if (messageBadgeRefreshTimer) {
             return;
         }
@@ -2425,21 +2608,94 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }, 100);
     }
 
-    function installMessageBadgeObserver() {
-        if (messageBadgeObserver || !document.body) {
-            scheduleMessageBadgeRefresh();
+    function addMessageBadgeCandidate(messages, node, includeDescendants = true) {
+        const element = node instanceof Element ? node : node?.parentElement;
+        if (!element) {
             return;
         }
-        messageBadgeObserver = new MutationObserver(scheduleMessageBadgeRefresh);
-        messageBadgeObserver.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-        if (typeof ResizeObserver === 'function') {
-            messageBadgeResizeObserver = new ResizeObserver(scheduleMessageBadgeRefresh);
-            messageBadgeResizeObserver.observe(document.body);
+        const direct = getMessageElementFromElement(element);
+        if (direct) {
+            messages.add(direct);
         }
-        scheduleMessageBadgeRefresh();
+        if (!includeDescendants) {
+            return;
+        }
+        element.querySelectorAll?.('.message, .ml-item').forEach(candidate => {
+            const messageElement = getMessageElementFromElement(candidate);
+            if (messageElement) {
+                messages.add(messageElement);
+            }
+        });
+    }
+
+    function unobserveRemovedMessageBadges(node) {
+        if (!(node instanceof Element)) {
+            return;
+        }
+        const messages = new Set();
+        addMessageBadgeCandidate(messages, node);
+        messages.forEach(message => messageBadgeResizeObserver?.unobserve(message));
+    }
+
+    function handleMessageBadgeMutations(mutations) {
+        if (!isMessageBadgeObserverNeeded()) {
+            return;
+        }
+        const messages = new Set();
+        for (const mutation of mutations) {
+            addMessageBadgeCandidate(messages, mutation.target, false);
+            mutation.addedNodes.forEach(node => addMessageBadgeCandidate(messages, node));
+            mutation.removedNodes.forEach(unobserveRemovedMessageBadges);
+        }
+        processMessageBadgeElements(messages);
+    }
+
+    function isMessageBadgeObserverNeeded() {
+        return isConfigEnabled('preventRecall.enabled') ||
+            isConfigEnabled('messageTweaks.promptNoSeq') ||
+            recalledPokeMessageIds.size > 0;
+    }
+
+    function disconnectMessageBadgeObservers() {
+        messageBadgeObserver?.disconnect();
+        messageBadgeObserver = null;
+        messageBadgeResizeObserver?.disconnect();
+        messageBadgeResizeObserver = null;
+    }
+
+    function syncMessageBadgeObserver(fullRefresh = false) {
+        if (!document.body) {
+            return;
+        }
+        updateMessageBadgeTheme();
+        if (!isMessageBadgeObserverNeeded()) {
+            window.clearTimeout(messageBadgeRefreshTimer);
+            messageBadgeRefreshTimer = 0;
+            disconnectMessageBadgeObservers();
+            if (document.querySelector('.qqnt-toolbox-status-badge, [data-qqnt-toolbox-status-anchor="true"]')) {
+                refreshMessageBadges();
+            }
+            return;
+        }
+        if (!messageBadgeObserver) {
+            messageBadgeObserver = new MutationObserver(handleMessageBadgeMutations);
+            messageBadgeObserver.observe(document.body, {
+                childList: true,
+                subtree: true
+            });
+        }
+        if (!messageBadgeResizeObserver && typeof ResizeObserver === 'function') {
+            messageBadgeResizeObserver = new ResizeObserver(entries => {
+                processMessageBadgeElements(entries.map(entry => entry.target));
+            });
+        }
+        if (fullRefresh) {
+            scheduleMessageBadgeRefresh(true);
+        }
+    }
+
+    function installMessageBadgeObserver() {
+        syncMessageBadgeObserver(true);
     }
 
     function normalizeText(value) {
@@ -2455,6 +2711,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 seen.add(item);
                 instances.push(item);
             }
+        }
+        if (element?.__vueParentComponent && !seen.has(element.__vueParentComponent)) {
+            instances.push(element.__vueParentComponent);
         }
         return instances;
     }
@@ -2489,7 +2748,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (isMsgRecord(value)) {
             return value;
         }
-        for (const key of ['props', 'ctx', 'proxy', 'msgRecord', 'message', 'record']) {
+        if (value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
+            return null;
+        }
+        for (const key of ['props', 'setupState', 'ctx', 'proxy', 'msgRecord', 'message', 'record', 'msg']) {
             const found = findMsgRecordInValue(value[key], depth + 1, seen);
             if (found) {
                 return found;
@@ -2540,9 +2802,151 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             findVueValue(document.querySelector('.aio'), ['proxy.commonAioStore.curAioData', 'ctx.commonAioStore.curAioData']);
     }
 
+    function isSearchChatRecordWindow() {
+        return location.hash === '#/record' || location.hash.startsWith('#/record?');
+    }
+
+    function isForwardRecordWindow() {
+        return location.hash.startsWith('#/forward/');
+    }
+
+    function getForwardRouteContext() {
+        const prefix = '#/forward/';
+        if (!location.hash.startsWith(prefix)) {
+            return null;
+        }
+        try {
+            const value = JSON.parse(decodeURIComponent(location.hash.slice(prefix.length)));
+            const rootMsg = value?.rootMsg;
+            const msgId = normalizeText(rootMsg?.msgId);
+            const chatType = Number(rootMsg?.chatType);
+            const peerUid = normalizeText(rootMsg?.peerUid);
+            if (!msgId || !chatType || !peerUid) {
+                return null;
+            }
+            return {
+                rootMsg: {
+                    msgId,
+                    chatType,
+                    peerUid,
+                    guildId: normalizeText(rootMsg?.guildId)
+                }
+            };
+        } catch {
+            return null;
+        }
+    }
+
     function normalizeUin(value) {
         const content = String(value ?? '').trim();
         return /^\d+$/.test(content) && content !== '0' ? content : '';
+    }
+
+    function getStructuredValue(value, key) {
+        if (value instanceof Map) {
+            return value.get(key);
+        }
+        return value && typeof value === 'object' ? value[key] : undefined;
+    }
+
+    function getPokeRecordEvent(record) {
+        for (const element of Array.isArray(record?.elements) ? record.elements : []) {
+            const tip = element?.grayTipElement?.jsonGrayTipElement;
+            if (String(tip?.busiId || '') !== '1061') {
+                continue;
+            }
+            const xmlParams = tip?.xmlToJsonParam;
+            const params = getStructuredValue(xmlParams, 'templParam');
+            return {
+                initiatorUin: normalizeUin(getStructuredValue(params, 'uin_str1')),
+                targetUin: normalizeUin(getStructuredValue(params, 'uin_str2')),
+                businessId: normalizeText(tip?.busiId || getStructuredValue(xmlParams, 'busiId')),
+                businessType: normalizeText(getStructuredValue(xmlParams, 'busiType')),
+                tipsSeqId: normalizeText(getStructuredValue(xmlParams, 'seqId'))
+            };
+        }
+        return null;
+    }
+
+    function applyPokeRecallNotice(messageElement, record) {
+        const msgId = normalizeText(record?.msgId);
+        if (!msgId || !recalledPokeMessageIds.has(msgId) || !(messageElement instanceof Element)) {
+            return false;
+        }
+        const target = messageElement.querySelector('.gray-tip-content') ||
+            getMessageBadgeTarget(messageElement, record);
+        if (!target || target.dataset.qqntToolboxPokeRecalled === msgId) {
+            return Boolean(target);
+        }
+        target.replaceChildren(document.createTextNode(POKE_RECALL_NOTICE));
+        target.dataset.qqntToolboxPokeRecalled = msgId;
+        target.setAttribute('aria-label', POKE_RECALL_NOTICE);
+        return true;
+    }
+
+    function markPokeRecalled(messageElement, record) {
+        const msgId = normalizeText(record?.msgId);
+        if (!msgId) {
+            return;
+        }
+        recalledPokeMessageIds.add(msgId);
+        syncMessageBadgeObserver();
+        applyPokeRecallNotice(messageElement, record);
+    }
+
+    function isOwnPokeRecord(record) {
+        if (recalledPokeMessageIds.has(normalizeText(record?.msgId))) {
+            return false;
+        }
+        const event = getPokeRecordEvent(record);
+        if (!event?.initiatorUin) {
+            return false;
+        }
+        const selfUin = registerPokeAccountFromPage(true);
+        return Boolean(selfUin && event.initiatorUin === selfUin);
+    }
+
+    function getPokeRecordFromContextEvent(event) {
+        const directRecord = event?.target instanceof Element
+            ? findMessageRecordFromElement(event.target)
+            : null;
+        if (getPokeRecordEvent(directRecord)) {
+            return directRecord;
+        }
+        const path = event?.composedPath?.() || [event?.target];
+        for (const item of path) {
+            if (!(item instanceof Element)) {
+                continue;
+            }
+            const record = findMessageRecordFromElement(item);
+            if (getPokeRecordEvent(record)) {
+                return record;
+            }
+        }
+        return null;
+    }
+
+    function createPokeRecallPayload(record) {
+        const pokeEvent = getPokeRecordEvent(record);
+        if (!pokeEvent) {
+            return null;
+        }
+        return {
+            selfUin: registerPokeAccountFromPage(true),
+            recall: {
+                initiatorUin: pokeEvent.initiatorUin,
+                targetUin: pokeEvent.targetUin,
+                chatType: Number(record?.chatType),
+                peerUin: normalizeText(record?.peerUin || record?.peerUid),
+                msgType: pokeEvent.businessType || normalizeText(record?.subMsgType),
+                msgSeq: normalizeText(record?.msgSeq),
+                msgTime: normalizeText(record?.msgTime),
+                msgUid: normalizeText(record?.msgRandom),
+                msgId: normalizeText(record?.msgId),
+                businessId: pokeEvent.businessId,
+                tipsSeqId: pokeEvent.tipsSeqId
+            }
+        };
     }
 
     function supportsNativeNudge() {
@@ -2597,16 +3001,27 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         lastPokeAccountProbeAt = now;
         const selfUin = findSelfUinFromPage();
-        if (!selfUin || selfUin === registeredPokeAccountUin) {
-            return selfUin;
+        const accountChanged = Boolean(selfUin && selfUin !== registeredPokeAccountUin);
+        if (selfUin) {
+            registeredPokeAccountUin = selfUin;
         }
-        registeredPokeAccountUin = selfUin;
-        Promise.resolve(getBridge()?.registerPokeAccount?.(selfUin)).catch(() => {
-            if (registeredPokeAccountUin === selfUin) {
-                registeredPokeAccountUin = '';
-            }
-        });
-        return selfUin;
+        const shouldSync = accountChanged || !registeredPokeAccountUin || now - lastPokeAccountSyncAt >= 30000;
+        if (shouldSync && !pokeAccountRegistration) {
+            lastPokeAccountSyncAt = now;
+            pokeAccountRegistration = Promise.resolve(getBridge()?.registerPokeAccount?.(selfUin || ''))
+                .then(value => {
+                    const registered = normalizeUin(value);
+                    if (registered) {
+                        registeredPokeAccountUin = registered;
+                        rememberActiveRepeatPeer();
+                    }
+                })
+                .catch(() => {})
+                .finally(() => {
+                    pokeAccountRegistration = null;
+                });
+        }
+        return registeredPokeAccountUin;
     }
 
     function getPokeAvatarFromEvent(event) {
@@ -2659,7 +3074,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return targetUin && groupUin ? { chatType, targetUin, groupUin, peerUid: groupUin } : null;
         }
         if (chatType === 1) {
-            return peerUin ? { chatType, targetUin: peerUin, groupUin: '', peerUid } : null;
+            const targetUin = normalizeUin(record?.senderUin || record?.sender?.uin) || peerUin;
+            return targetUin ? { chatType, targetUin, groupUin: '', peerUid } : null;
         }
         return null;
     }
@@ -2699,7 +3115,104 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         animation.addEventListener('cancel', clearAnimation, { once: true });
     }
 
+    function dismissPokeToast(delay = 0) {
+        window.clearTimeout(pokeToastTimer);
+        pokeToastTimer = window.setTimeout(() => {
+            document.getElementById(POKE_TOAST_ID)?.remove();
+            pokeToastTimer = 0;
+        }, delay);
+    }
+
+    function syncPokeToastVisibility() {
+        if (isFeatureEnabled('entertainment.pokeToast')) {
+            return;
+        }
+        window.clearTimeout(pokeToastTimer);
+        pokeToastTimer = 0;
+        document.getElementById(POKE_TOAST_ID)?.remove();
+    }
+
+    function showPokeToast(message, force = false) {
+        if (!force && !isFeatureEnabled('entertainment.pokeToast')) {
+            return;
+        }
+        injectStyle();
+        window.clearTimeout(pokeToastTimer);
+        pokeToastTimer = 0;
+        document.getElementById(POKE_TOAST_ID)?.remove();
+
+        const toast = document.createElement('div');
+        toast.id = POKE_TOAST_ID;
+        toast.setAttribute('role', 'status');
+        const label = document.createElement('span');
+        label.className = 'qqnt-toolbox-poke-toast-label';
+        label.textContent = text(message);
+        toast.append(label);
+        document.body?.appendChild(toast);
+        dismissPokeToast(4000);
+    }
+
+    function showPokeSentToast() {
+        showPokeToast('已戳戳');
+    }
+
+    function removeNativePokeToast(node) {
+        if (!(node instanceof Element)) {
+            return false;
+        }
+        const candidates = new Set([node]);
+        node.querySelectorAll?.([
+            '[class*="toast" i]',
+            '[class*="notice" i]',
+            '[class*="notify" i]',
+            '[role="status"]',
+            '[role="alert"]'
+        ].join(',')).forEach(element => candidates.add(element));
+        for (let parent = node.parentElement, depth = 0; parent && parent !== document.body && depth < 6;
+            parent = parent.parentElement, depth++) {
+            candidates.add(parent);
+        }
+        for (const candidate of candidates) {
+            if (candidate.id === POKE_TOAST_ID) {
+                continue;
+            }
+            const content = compactText(candidate);
+            if (!content.includes('撤回') || (!content.includes('戳') && !content.includes('拍'))) {
+                continue;
+            }
+            const className = String(candidate.className?.baseVal || candidate.className || '');
+            const position = window.getComputedStyle(candidate).position;
+            if (!/toast|notice|notify/i.test(className) && position !== 'fixed') {
+                continue;
+            }
+            candidate.remove();
+            return true;
+        }
+        return false;
+    }
+
+    function suppressNextNativePokeToast() {
+        if (!document.body) {
+            return;
+        }
+        const observer = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (removeNativePokeToast(node)) {
+                        observer.disconnect();
+                        return;
+                    }
+                }
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        window.setTimeout(() => observer.disconnect(), 5000);
+    }
+
     function sendAvatarPoke(payload, avatar, source = 'double-click') {
+        if (!isFeatureEnabled('entertainment.pokeToast')) {
+            suppressNextNativePokeToast();
+        }
         const request = {
             ...(payload || { chatType: 0, targetUin: '', groupUin: '' }),
             selfUin: registerPokeAccountFromPage(true),
@@ -2708,6 +3221,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         Promise.resolve(getBridge()?.sendPoke?.(request)).then(result => {
             if (result?.ok === true) {
                 animatePokedAvatar(avatar);
+                if (!supportsNativeNudge()) {
+                    showPokeSentToast();
+                }
             }
         }).catch(() => {});
     }
@@ -2805,16 +3321,136 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         };
     }
 
-    function buildRepeatPayload(record) {
-        const msgId = normalizeText(record?.msgId);
-        const peer = getPeerFromRecord(record);
-        if (!msgId || !peer) {
+    function getActiveRepeatPeerStorageKey() {
+        const selfUin = registeredPokeAccountUin || registerPokeAccountFromPage(true);
+        return selfUin ? `${ACTIVE_REPEAT_PEER_KEY_PREFIX}:${selfUin}` : '';
+    }
+
+    function rememberActiveRepeatPeer() {
+        if (isSearchChatRecordWindow() || isForwardRecordWindow() ||
+            !document.querySelector('.aio.vue-component, .aio')) {
+            return;
+        }
+        const storageKey = getActiveRepeatPeerStorageKey();
+        const peer = getPeerFromRecord({});
+        if (!storageKey || !peer) {
+            return;
+        }
+        const signature = `${storageKey}:${peer.chatType}:${peer.peerUid}:${peer.guildId}`;
+        if (signature === activeRepeatPeerSignature) {
+            return;
+        }
+        activeRepeatPeerSignature = signature;
+        try {
+            localStorage.setItem(storageKey, JSON.stringify(peer));
+        } catch {
+        }
+    }
+
+    function getActiveRepeatPeer() {
+        const storageKey = getActiveRepeatPeerStorageKey();
+        if (!storageKey) {
             return null;
         }
-        return {
+        try {
+            const peer = JSON.parse(localStorage.getItem(storageKey) || 'null');
+            const chatType = Number(peer?.chatType);
+            const peerUid = normalizeText(peer?.peerUid);
+            if (!chatType || !peerUid) {
+                return null;
+            }
+            return {
+                chatType,
+                peerUid,
+                guildId: normalizeText(peer?.guildId)
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    function cloneRepeatPayloadValue(value, depth = 0, seen = new WeakMap()) {
+        if (value === null || value === undefined || depth > 12 || typeof value !== 'object') {
+            return typeof value === 'function' ? undefined : value;
+        }
+        if (value instanceof Node) {
+            return undefined;
+        }
+        if (value instanceof Uint8Array) {
+            return new Uint8Array(value);
+        }
+        if (seen.has(value)) {
+            return seen.get(value);
+        }
+        if (value instanceof Map) {
+            const map = new Map();
+            seen.set(value, map);
+            for (const [key, item] of value) {
+                map.set(key, cloneRepeatPayloadValue(item, depth + 1, seen));
+            }
+            return map;
+        }
+        if (Array.isArray(value)) {
+            const array = [];
+            seen.set(value, array);
+            for (const item of value) {
+                array.push(cloneRepeatPayloadValue(item, depth + 1, seen));
+            }
+            return array;
+        }
+        const object = {};
+        seen.set(value, object);
+        try {
+            for (const [key, item] of Object.entries(value)) {
+                if (typeof item !== 'function') {
+                    object[key] = cloneRepeatPayloadValue(item, depth + 1, seen);
+                }
+            }
+        } catch {
+            return object;
+        }
+        return object;
+    }
+
+    function buildRepeatPayload(record) {
+        const msgId = normalizeText(record?.msgId);
+        const sourcePeer = getPeerFromRecord(record);
+        if (!msgId || !sourcePeer) {
+            return null;
+        }
+        const payload = {
             msgId,
-            peer
+            peer: sourcePeer
         };
+        if (!isForwardRecordWindow()) {
+            return payload;
+        }
+        const destinationPeer = getActiveRepeatPeer();
+        const elements = cloneRepeatPayloadValue(record?.elements);
+        if (!destinationPeer || !Array.isArray(elements) || !elements.length) {
+            return null;
+        }
+        payload.destinationPeer = destinationPeer;
+        payload.recordSource = 'forward-detail';
+        payload.forwardContext = getForwardRouteContext();
+        payload.record = {
+            msgId,
+            chatType: Number(record?.chatType || sourcePeer.chatType),
+            peerUid: normalizeText(record?.peerUid || record?.peer?.peerUid || sourcePeer.peerUid),
+            guildId: normalizeText(record?.guildId || record?.peer?.guildId || sourcePeer.guildId),
+            msgSeq: normalizeText(record?.msgSeq),
+            msgTime: normalizeText(record?.msgTime),
+            msgRandom: normalizeText(record?.msgRandom),
+            senderUid: normalizeText(record?.senderUid),
+            elements
+        };
+        return payload;
+    }
+
+    function debugRepeatFailure(error) {
+        if (isConfigEnabled('debug.enabled')) {
+            console.warn('[QQNT Toolbox] Repeat failed:', error);
+        }
     }
 
     async function repeatRecord(record) {
@@ -2824,11 +3460,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const bridge = getBridge();
         const payload = buildRepeatPayload(record);
         if (!bridge?.repeatMessage || !payload) {
+            debugRepeatFailure(new Error('The repeat request could not be built.'));
             return;
         }
         try {
             await bridge.repeatMessage(payload);
-        } catch {
+        } catch (error) {
+            debugRepeatFailure(error);
         }
     }
 
@@ -2837,7 +3475,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function shouldUseSideRepeat() {
-        return isFeatureEnabled('repeatMessage.enabled') && !isFeatureEnabled('repeatMessage.showInContextMenu');
+        return !isSearchChatRecordWindow() &&
+            isFeatureEnabled('repeatMessage.enabled') &&
+            !isFeatureEnabled('repeatMessage.showInContextMenu');
     }
 
     function shouldUseContextRepeat() {
@@ -2876,7 +3516,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (!target) {
                 continue;
             }
-            const content = getMessageBadgeTarget(target.messageElement, target.record);
+            const content = getRepeatButtonTarget(target.messageElement, target.record);
             const rect = content?.getBoundingClientRect?.();
             if (rect?.width > 0 && rect?.height > 0 &&
                 event.clientX >= rect.left && event.clientX <= rect.right &&
@@ -2916,6 +3556,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function updateRepeatModeClass() {
         const sideRepeat = shouldUseSideRepeat();
         const contextRepeat = shouldUseContextRepeat();
+        document.body?.classList.toggle('qqnt-toolbox-search-record', isSearchChatRecordWindow());
         document.body?.classList.toggle('qqnt-toolbox-side-repeat', sideRepeat);
         document.body?.classList.toggle('qqnt-toolbox-context-repeat', contextRepeat);
     }
@@ -2959,8 +3600,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return svg;
     }
 
-    function createNativePlusOneButton() {
-        const template = getNativePlusOneTemplate();
+    function createNativePlusOneButton(template = getNativePlusOneTemplate()) {
         const button = template?.cloneNode(true) || document.createElement('div');
         const icon = template?.querySelector('svg')?.cloneNode(true) || createQqPlusOneIcon();
         button.removeAttribute('id');
@@ -2979,8 +3619,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return button;
     }
 
-    function createSideRepeatButton(record) {
-        const button = createNativePlusOneButton();
+    function createSideRepeatButton(record, template = null) {
+        const button = createNativePlusOneButton(template || undefined);
         button.classList.add('qqnt-toolbox-repeat-slot');
         button.dataset.msgId = normalizeText(record?.msgId);
         button.setAttribute('role', 'button');
@@ -2990,7 +3630,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function positionSideRepeatButton(button, messageElement, record) {
-        const target = getMessageBadgeTarget(messageElement, record);
+        const target = getRepeatButtonTarget(messageElement, record);
         const host = getMessageLayoutHost(messageElement);
         const hostRect = host.getBoundingClientRect();
         const targetRect = target.getBoundingClientRect();
@@ -3110,15 +3750,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         const nativePlusOne = wrapper.querySelector(':scope > .plus-one-btn:not(.qqnt-toolbox-repeat-slot):not(.qqnt-toolbox-repeat-menu-plus-one)');
-        if (nativePlusOne) {
-            return;
-        }
-        const button = createSideRepeatButton(record);
+        const button = createSideRepeatButton(record, nativePlusOne);
         getMessageLayoutHost(messageElement).append(button);
         positionSideRepeatButton(button, messageElement, record);
     }
 
     function refreshRepeatEntrypoints() {
+        rememberActiveRepeatPeer();
         updateRepeatModeClass();
         if (!shouldUseSideRepeat()) {
             removeSideRepeatEntrypoints();
@@ -3199,7 +3837,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             .filter(item => {
                 if (!item || seen.has(item) ||
                     item.classList?.contains('qqnt-toolbox-repeat-menu-item') ||
-                    item.classList?.contains('qqnt-toolbox-poke-menu-item')) {
+                    item.classList?.contains('qqnt-toolbox-poke-menu-item') ||
+                    item.classList?.contains('qqnt-toolbox-poke-recall-menu-item')) {
                     return false;
                 }
                 seen.add(item);
@@ -3211,6 +3850,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function findNativeContextMenuNear(point) {
         const menus = Array.from(document.querySelectorAll('.q-context-menu, [class*="context-menu"], [role="menu"]'))
             .filter(menu => {
+                if (menu.matches('.q-context-menu-item, [class*="context-menu-item"], [role="menuitem"]')) {
+                    return false;
+                }
                 if (!isVisible(menu)) {
                     return false;
                 }
@@ -3255,6 +3897,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         plusOne.classList.add('qqnt-toolbox-repeat-menu-plus-one');
         plusOne.removeAttribute('title');
         plusOne.setAttribute('aria-hidden', 'true');
+        plusOne.querySelectorAll('svg [stroke]').forEach(element => {
+            if (element.getAttribute('stroke') !== 'none') {
+                element.setAttribute('stroke', 'currentColor');
+            }
+        });
+        plusOne.querySelectorAll('svg [fill]').forEach(element => {
+            if (element.getAttribute('fill') !== 'none') {
+                element.setAttribute('fill', 'currentColor');
+            }
+        });
         icon.replaceChildren(plusOne);
         icon.style.display = icon.style.display || 'flex';
         icon.style.alignItems = 'center';
@@ -3270,18 +3922,73 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!icon) {
             return;
         }
-        icon.replaceChildren();
+        const svgNamespace = 'http://www.w3.org/2000/svg';
+        const iconElement = document.createElement('i');
+        iconElement.className = 'q-svg-icon q-icon vue-component';
+        iconElement.style.width = '16px';
+        iconElement.style.height = '16px';
+        iconElement.style.color = 'inherit';
+        const svg = document.createElementNS(svgNamespace, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        const path = document.createElementNS(svgNamespace, 'path');
+        path.setAttribute('d', 'M15.1326 5.12573C15.6495 3.98089 17.1938 3.79238 17.9597 4.7644L20.7273 8.27612L20.7205 8.28003L21.2917 9.00366C21.2967 9.00998 21.2991 9.0141 21.2996 9.01538V19.0935C21.2992 19.5667 20.9152 19.9509 20.4412 19.9509H11.9167C11.3487 19.9507 10.8224 19.6605 10.5183 19.1863L10.4607 19.0886L9.03394 16.4919C8.86227 16.1793 8.77226 15.8276 8.77222 15.4705V12.7166H4.56226C3.53378 12.7164 2.70009 11.8825 2.69995 10.8542L2.70972 10.6638C2.80515 9.72475 3.59815 8.99206 4.56226 8.99194H15.614L15.4246 8.08765L15.0193 6.15308C14.9565 5.85276 14.9787 5.53756 15.0828 5.2478L15.1326 5.12573Z');
+        path.setAttribute('stroke', 'currentColor');
+        path.setAttribute('stroke-width', '1.5');
+        svg.appendChild(path);
+        iconElement.appendChild(svg);
+        icon.replaceChildren(iconElement);
+        icon.style.display = icon.style.display || 'flex';
+        icon.style.alignItems = 'center';
+        icon.style.justifyContent = 'center';
         icon.style.background = 'transparent';
         icon.style.backgroundImage = 'none';
         icon.style.maskImage = 'none';
         icon.style.webkitMaskImage = 'none';
-        icon.style.visibility = 'hidden';
+        icon.style.visibility = 'visible';
+    }
+
+    function setNativeMenuItemRecallIcon(item) {
+        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
+        if (!icon) {
+            return;
+        }
+        const namespace = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(namespace, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('width', '16');
+        svg.setAttribute('height', '16');
+        const path = document.createElementNS(namespace, 'path');
+        path.setAttribute('d', 'M9 7 4 12l5 5M5 12h8a6 6 0 0 1 6 6');
+        path.setAttribute('stroke', 'currentColor');
+        path.setAttribute('stroke-width', '1.7');
+        path.setAttribute('stroke-linecap', 'round');
+        path.setAttribute('stroke-linejoin', 'round');
+        svg.append(path);
+        icon.replaceChildren(svg);
+        icon.style.display = icon.style.display || 'flex';
+        icon.style.alignItems = 'center';
+        icon.style.justifyContent = 'center';
+        icon.style.background = 'transparent';
+        icon.style.backgroundImage = 'none';
+        icon.style.maskImage = 'none';
+        icon.style.webkitMaskImage = 'none';
+        icon.style.visibility = 'visible';
     }
 
     function createPokeMenuItem(menu, payload, avatar) {
         const template = getNativeMenuItemElements(menu)[0];
         const item = template?.cloneNode(true) || document.createElement('div');
         item.classList?.add('qqnt-toolbox-poke-menu-item');
+        if (!template) {
+            item.classList.add('q-context-menu-item');
+            const icon = document.createElement('span');
+            icon.className = 'q-context-menu-item__icon';
+            const label = document.createElement('span');
+            label.className = 'q-context-menu-item__text';
+            item.append(icon, label);
+        }
         item.removeAttribute('id');
         item.setAttribute('role', item.getAttribute('role') || 'menuitem');
         item.setAttribute('tabindex', '-1');
@@ -3302,6 +4009,29 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function removeFallbackPokeMenu() {
+        document.getElementById(POKE_FALLBACK_MENU_ID)?.remove();
+    }
+
+    function showFallbackPokeMenu(point, payload, avatar, requestId) {
+        if (requestId !== pokeMenuRequestId || supportsNativeNudge() || Number(payload?.chatType) !== 1 ||
+            !isFeatureEnabled('entertainment.rightClickAvatarPoke')) {
+            return false;
+        }
+        removeFallbackPokeMenu();
+        injectStyle();
+        const menu = document.createElement('div');
+        menu.id = POKE_FALLBACK_MENU_ID;
+        menu.className = 'q-context-menu';
+        menu.setAttribute('role', 'menu');
+        menu.append(createPokeMenuItem(menu, payload, avatar));
+        document.body?.append(menu);
+        const rect = menu.getBoundingClientRect();
+        menu.style.left = `${Math.max(8, Math.min(point.x, window.innerWidth - rect.width - 8))}px`;
+        menu.style.top = `${Math.max(8, Math.min(point.y, window.innerHeight - rect.height - 8))}px`;
+        return true;
+    }
+
     function syncPokeMenuItem(point, payload, avatar, menu = null) {
         menu = menu || findNativeContextMenuNear(point);
         if (!menu) {
@@ -3309,9 +4039,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         const enabled = isFeatureEnabled('entertainment.rightClickAvatarPoke');
         const nativeItems = getNativeMenuItemElements(menu)
-            .filter(item => compactText(item).includes('\u6233\u4e00\u6233'));
+            .filter(item => ['\u6233\u6233', '\u6233\u4e00\u6233'].includes(compactText(item)));
         if (nativeItems.length) {
-            nativeItems.forEach(item => setToolboxHidden(item, !enabled));
+            nativeItems.forEach(item => {
+                setNativeMenuItemLabel(item, text('\u6233\u4e00\u6233'));
+                setToolboxHidden(item, !enabled);
+            });
             return true;
         }
         if (!enabled || supportsNativeNudge()) {
@@ -3334,6 +4067,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const point = { x: event.clientX, y: event.clientY };
         const run = () => requestId === pokeMenuRequestId && syncPokeMenuItem(point, payload, avatar);
         [24, 72, 160, 300, 480].forEach(delay => setTimeout(run, delay));
+        setTimeout(() => {
+            if (requestId === pokeMenuRequestId && !findNativeContextMenuNear(point)) {
+                showFallbackPokeMenu(point, payload, avatar, requestId);
+            }
+        }, 540);
         const observer = new MutationObserver(() => {
             if (requestId !== pokeMenuRequestId) {
                 observer.disconnect();
@@ -3348,6 +4086,85 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             subtree: true
         });
         setTimeout(() => observer.disconnect(), 900);
+    }
+
+    function createPokeRecallMenuItem(menu, record, messageElement) {
+        const template = getNativeMenuItemElements(menu)[0];
+        const item = template?.cloneNode(true) || document.createElement('div');
+        item.classList?.add('qqnt-toolbox-poke-recall-menu-item');
+        item.removeAttribute('id');
+        item.setAttribute('role', item.getAttribute('role') || 'menuitem');
+        item.setAttribute('tabindex', '-1');
+        setNativeMenuItemLabel(item, text('撤回'));
+        setNativeMenuItemRecallIcon(item);
+        const stop = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        };
+        item.addEventListener('pointerdown', stop, true);
+        item.addEventListener('mousedown', stop, true);
+        item.addEventListener('click', event => {
+            stop(event);
+            const payload = createPokeRecallPayload(record);
+            const recallPoke = getBridge()?.recallPoke;
+            menu.remove();
+            if (!payload || typeof recallPoke !== 'function') {
+                showPokeToast('撤回接口未加载', true);
+                return;
+            }
+            let request;
+            try {
+                request = recallPoke(payload);
+            } catch {
+                showPokeToast('撤回失败', true);
+                return;
+            }
+            Promise.resolve(request).then(result => {
+                if (result?.ok) {
+                    markPokeRecalled(messageElement, record);
+                }
+                showPokeToast(result?.ok ? '已撤回' : '撤回失败', true);
+            }).catch(() => {
+                showPokeToast('撤回失败', true);
+            });
+        }, true);
+        return item;
+    }
+
+    function insertPokeRecallMenuItem(point, record, messageElement, menu = null) {
+        menu = menu || findNativeContextMenuNear(point);
+        if (!menu || menu.querySelector('.qqnt-toolbox-poke-recall-menu-item')) {
+            return Boolean(menu);
+        }
+        const items = getNativeMenuItemElements(menu);
+        const recallItem = createPokeRecallMenuItem(menu, record, messageElement);
+        if (items[0]?.parentElement) {
+            items[0].parentElement.insertBefore(recallItem, items[0]);
+        } else {
+            menu.insertBefore(recallItem, menu.firstChild);
+        }
+        return true;
+    }
+
+    function schedulePokeRecallContextMenu(event, record) {
+        const point = { x: event.clientX, y: event.clientY };
+        const messageElement = event.target instanceof Element
+            ? getMessageElementFromElement(event.target)
+            : null;
+        const run = () => {
+            const menu = findNativeContextMenuNear(point);
+            if (!menu) {
+                return false;
+            }
+            if (!isOwnPokeRecord(record)) {
+                return true;
+            }
+            return insertPokeRecallMenuItem(point, record, messageElement, menu);
+        };
+        setTimeout(run, 0);
+        setTimeout(run, 48);
+        setTimeout(run, 140);
     }
 
     function createRepeatMenuItem(menu, record) {
@@ -3418,6 +4235,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const bridge = getBridge();
         if (!bridge?.getConfig) {
             configReady = true;
+            syncMessageBadgeObserver(true);
             return;
         }
         try {
@@ -3425,6 +4243,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
+            syncPokeToastVisibility();
+            syncMessageBadgeObserver(true);
             refreshConfigViews();
             refreshRepeatEntrypoints();
             scheduleRepeatEntrypointRefresh();
@@ -3440,6 +4260,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         bridge.onConfigChanged(config => {
             currentConfig = mergeConfig(config);
             configReady = true;
+            syncPokeToastVisibility();
+            syncMessageBadgeObserver(true);
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
@@ -3491,22 +4313,57 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('contextmenu', event => {
         const repeatRequestId = ++repeatMenuRequestId;
         const pokeRequestId = ++pokeMenuRequestId;
+        removeFallbackPokeMenu();
         document.querySelectorAll('.qqnt-toolbox-repeat-menu-item').forEach(item => item.remove());
         document.querySelectorAll('.qqnt-toolbox-poke-menu-item').forEach(item => item.remove());
+        document.querySelectorAll('.qqnt-toolbox-poke-recall-menu-item').forEach(item => item.remove());
         const avatar = getPokeAvatarFromEvent(event);
         const payload = avatar && getPokePayload(avatar);
         if (payload) {
-            schedulePokeContextMenu(event, payload, avatar, pokeRequestId);
+            if (!supportsNativeNudge() && Number(payload.chatType) === 1) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation?.();
+                showFallbackPokeMenu({ x: event.clientX, y: event.clientY }, payload, avatar, pokeRequestId);
+            } else {
+                schedulePokeContextMenu(event, payload, avatar, pokeRequestId);
+            }
+        }
+        const pokeRecord = getPokeRecordFromContextEvent(event);
+        const target = pokeRecord ? null : getRepeatTargetFromEvent(event);
+        const record = pokeRecord || target?.record;
+        if (!supportsNativeNudge() && pokeRecord) {
+            schedulePokeRecallContextMenu(event, pokeRecord);
         }
         if (!shouldUseContextRepeat()) {
             return;
         }
-        const target = getRepeatTargetFromEvent(event);
-        const record = target?.record;
         if (!isRepeatableRecord(record)) {
             return;
         }
         scheduleRepeatContextMenu(event, record, repeatRequestId);
+    }, true);
+
+    document.addEventListener('pointerdown', event => {
+        const menu = document.getElementById(POKE_FALLBACK_MENU_ID);
+        if (menu && !menu.contains(event.target)) {
+            menu.remove();
+        }
+    }, true);
+
+    document.addEventListener('wheel', event => {
+        if (!document.getElementById(POKE_FALLBACK_MENU_ID)) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+    }, { capture: true, passive: false });
+
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            removeFallbackPokeMenu();
+        }
     }, true);
 
     window.addEventListener('resize', () => {
@@ -3522,6 +4379,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     });
 
     window.addEventListener('scroll', scheduleRepeatEntrypointRefresh, true);
+    window.addEventListener('focus', rememberActiveRepeatPeer);
 
     loadConfig();
     subscribeConfig();

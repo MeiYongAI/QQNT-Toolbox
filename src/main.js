@@ -5,12 +5,21 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { Readable, Writable } = require('stream');
-const { pathToFileURL } = require('url');
+const { pipeline } = require('stream/promises');
+const { fileURLToPath, pathToFileURL } = require('url');
 const { serialize, deserialize } = require('v8');
 const { deflateSync, inflateSync } = require('zlib');
 const { ZipWriter } = require('@zip.js/zip.js');
 const { randomizePngEncoding } = require('./png-variant');
-const { buildPokePacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
+const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
+const { createRepeatMessageHandler } = require('./repeat-message');
+const {
+    addNativeSendHandler,
+    createNativeEventWaiter,
+    isNativeFailure,
+    qqNativeInvoke,
+    unwrapNativeValue
+} = require('./native-ipc');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
@@ -26,6 +35,7 @@ const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
+const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
 const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
 const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
 const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
@@ -42,6 +52,7 @@ const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
 const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
 const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
 const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
+const POKE_RECALL_COMMAND = 'OidbSvcTrpcTcp.0xF51_1';
 const POKE_NATIVE_BINARY = 'poke-bridge.win32-x64.node';
 const MAX_RECALL_CACHE_SIZE = 100000;
 const IMAGE_EXTENSIONS = new Set([
@@ -90,7 +101,8 @@ const DEFAULT_CONFIG = {
         autoPokeBack: false,
         autoPokeBackLimit: 1,
         doubleClickAvatarPoke: false,
-        rightClickAvatarPoke: true
+        rightClickAvatarPoke: true,
+        pokeToast: true
     },
     floatingPanel: {
         enabled: true,
@@ -139,7 +151,6 @@ const cleanupState = {
     lastRunAt: 0
 };
 const pokeState = {
-    selfUin: '',
     bridge: null,
     bridgeInstalled: false,
     wrapperApi: null,
@@ -376,12 +387,67 @@ function applyVoiceMessageConfig() {
     voiceFileSender?.setFakeDurationSeconds?.(getFakeVoiceDurationSeconds());
 }
 
-function registerPokeAccount(value) {
+function registerPokeAccount(browserWindow, value) {
     const selfUin = normalizeUin(value);
-    if (selfUin) {
-        pokeState.selfUin = selfUin;
+    if (selfUin && browserWindow && !browserWindow.isDestroyed()) {
+        getWindowState(browserWindow).selfUin = selfUin;
     }
     return Boolean(selfUin);
+}
+
+function findAuthUin(value, depth = 0, seen = new WeakSet()) {
+    if (!value || depth > 5) {
+        return '';
+    }
+    if (typeof value === 'string') {
+        const direct = normalizeUin(value);
+        if (direct) {
+            return direct;
+        }
+        try {
+            return findAuthUin(JSON.parse(value), depth + 1, seen);
+        } catch {
+            return '';
+        }
+    }
+    if (typeof value !== 'object' || value instanceof Uint8Array || seen.has(value)) {
+        return '';
+    }
+    seen.add(value);
+    for (const key of ['uin', 'selfUin', 'accountUin']) {
+        const uin = normalizeUin(value[key]);
+        if (uin) {
+            return uin;
+        }
+    }
+    for (const key of ['authData', 'data', 'result', 'payload', 'account', 'accountInfo']) {
+        const uin = findAuthUin(value[key], depth + 1, seen);
+        if (uin) {
+            return uin;
+        }
+    }
+    return '';
+}
+
+async function resolvePokeAccount(browserWindow, pageUin = '') {
+    registerPokeAccount(browserWindow, pageUin);
+    const state = getWindowState(browserWindow);
+    let authUin = '';
+    try {
+        const authData = await qqNativeInvoke(
+            browserWindow,
+            'GlobalDataApi',
+            'fetchAuthData',
+            [],
+            true,
+            3000
+        );
+        authUin = findAuthUin(authData);
+        registerPokeAccount(browserWindow, authUin);
+    } catch (error) {
+        debug('poke account lookup failed:', error?.message || error);
+    }
+    return state.selfUin || '';
 }
 
 function getQqVersion() {
@@ -462,7 +528,7 @@ function installPokeBridge() {
     }
 }
 
-async function sendPokeThroughWrapperSession(packet) {
+async function sendSsoThroughWrapperSession(command, packet) {
     const session = getQqWrapperSession();
     const service = session?.getMsgService?.();
     if (!service || typeof service.sendSsoCmdReqByContend !== 'function' ||
@@ -473,7 +539,7 @@ async function sendPokeThroughWrapperSession(packet) {
     let request;
     pokeState.bridge.armConversion();
     try {
-        request = service.sendSsoCmdReqByContend(POKE_COMMAND, packet);
+        request = service.sendSsoCmdReqByContend(command, packet);
     } finally {
         pokeState.bridge.disarmConversion();
     }
@@ -535,7 +601,7 @@ async function sendPokeThroughLegacyProtocol(browserWindow, targetUin, groupUin)
         return { ok: false, reason: 'bridge-unavailable' };
     }
     const packet = buildPokePacket({ targetUin, groupUin });
-    const directResult = await sendPokeThroughWrapperSession(packet);
+    const directResult = await sendSsoThroughWrapperSession(POKE_COMMAND, packet);
     const response = directResult
         ? directResult.response
         : await qqNativeInvoke(
@@ -553,11 +619,71 @@ async function sendPokeThroughLegacyProtocol(browserWindow, targetUin, groupUin)
     return { ok: true, method: 'legacy-sso' };
 }
 
+async function recallPokeThroughLegacyProtocol(browserWindow, request) {
+    const selfUin = getWindowState(browserWindow).selfUin;
+    const chatType = Number(request?.chatType);
+    const initiatorUin = normalizeUin(request?.initiatorUin);
+    const peerUin = chatType === 2
+        ? normalizeUin(request?.peerUin)
+        : normalizeUin(request?.targetUin);
+    if (!initiatorUin || initiatorUin !== selfUin ||
+        (chatType !== 1 && chatType !== 2) || !peerUin) {
+        return { ok: false, reason: 'invalid-record' };
+    }
+    if (!installPokeBridge()) {
+        return { ok: false, reason: 'bridge-unavailable' };
+    }
+
+    const packet = buildPokeRecallPacket({
+        chatType,
+        peerUin,
+        msgType: request?.msgType,
+        msgSeq: request?.msgSeq,
+        msgTime: request?.msgTime,
+        msgUid: request?.msgUid,
+        msgId: request?.msgId,
+        businessId: request?.businessId,
+        tipsSeqId: request?.tipsSeqId
+    });
+    const directResult = await sendSsoThroughWrapperSession(POKE_RECALL_COMMAND, packet);
+    const response = directResult
+        ? directResult.response
+        : await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendSsoCmdReqByContend',
+            [POKE_RECALL_COMMAND, packet],
+            true,
+            10000
+        );
+    const nativeCode = Number(response?.result);
+    if (isNativeFailure(response) || (Number.isFinite(nativeCode) && nativeCode !== 0)) {
+        throw new Error(`Poke recall request failed: ${safeJson(response)}`);
+    }
+    return { ok: true, method: 'legacy-f51' };
+}
+
+async function recallPoke(browserWindow, payload) {
+    registerPokeAccount(browserWindow, payload?.selfUin);
+    if (supportsNativeNudge()) {
+        return { ok: false, reason: 'native-managed' };
+    }
+    if (!getWindowState(browserWindow).selfUin) {
+        return { ok: false, reason: 'account-unavailable' };
+    }
+    try {
+        return await recallPokeThroughLegacyProtocol(browserWindow, payload?.recall);
+    } catch (error) {
+        warn('poke recall failed:', error?.message || error);
+        return { ok: false, reason: 'recall-failed' };
+    }
+}
+
 async function sendPoke(browserWindow, payload) {
     const chatType = Number(payload?.chatType);
     const targetUin = normalizeUin(payload?.targetUin);
     const groupUin = chatType === 2 ? normalizeUin(payload?.groupUin) : '';
-    registerPokeAccount(payload?.selfUin);
+    registerPokeAccount(browserWindow, payload?.selfUin);
     if ((chatType !== 1 && chatType !== 2) || !targetUin || (chatType === 2 && !groupUin)) {
         return { ok: false, reason: 'invalid-target' };
     }
@@ -617,7 +743,20 @@ function installConfigIpc() {
         }
         return await sendPoke(browserWindow, payload);
     });
-    ipcMain.handle(CHANNEL_REGISTER_POKE_ACCOUNT, (_event, selfUin) => registerPokeAccount(selfUin));
+    ipcMain.handle(CHANNEL_RECALL_POKE, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found' };
+        }
+        return await recallPoke(browserWindow, payload);
+    });
+    ipcMain.handle(CHANNEL_REGISTER_POKE_ACCOUNT, async (event, selfUin) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return '';
+        }
+        return await resolvePokeAccount(browserWindow, selfUin);
+    });
     ipcMain.handle(CHANNEL_CLEAR_RECALL_CACHE, async () => clearPreventRecallCache());
     ipcMain.handle(CHANNEL_OPEN_RECALL_DIR, async () => openPreventRecallDir());
     ipcMain.handle(CHANNEL_OPEN_RECALL_IMAGE_DIR, async () => openPreventRecallImageDir());
@@ -646,63 +785,11 @@ function normalizeComparablePath(filePath) {
     return String(filePath || '').replace(/\//g, '\\').toLowerCase();
 }
 
-function isPlainEmptyObject(value) {
-    return Boolean(value) &&
-        typeof value === 'object' &&
-        !Array.isArray(value) &&
-        !(value instanceof Map) &&
-        !(value instanceof Uint8Array) &&
-        Object.keys(value).length === 0;
-}
-
-function isNativeFailure(value) {
-    return value?.promiseStatue === 'fail' ||
-        value?.promiseStatus === 'fail' ||
-        value?.result === false ||
-        Number(value?.result) < 0 ||
-        Number(value?.retCode) < 0 ||
-        Number(value?.errCode) < 0;
-}
-
-function unwrapNativeValue(value) {
-    if (!value || typeof value !== 'object' || value instanceof Map || value instanceof Uint8Array) {
-        return value;
-    }
-    for (const key of ['result', 'data', 'value', 'id']) {
-        if (value[key] !== undefined && !isPlainEmptyObject(value[key])) {
-            return value[key];
-        }
-    }
-    return value;
-}
-
-function extractNativeResult(response, result) {
-    if (isNativeFailure(response)) {
-        return response;
-    }
-    if (result !== undefined && !isPlainEmptyObject(result)) {
-        return result;
-    }
-    for (const item of [result, response]) {
-        if (!item || typeof item !== 'object') {
-            continue;
-        }
-        for (const key of ['payload', 'result', 'data', 'value', 'path', 'filePath', 'newPath']) {
-            if (item[key] !== undefined && !isPlainEmptyObject(item[key])) {
-                return item[key];
-            }
-        }
-    }
-    return result;
-}
-
 function getWindowState(browserWindow) {
     let state = windowStates.get(browserWindow);
     if (!state) {
         state = {
-            nativeSendPatched: false,
-            originalSend: null,
-            nativeWaiters: new Set(),
+            selfUin: '',
             peerUidByUin: new Map(),
             retriedRecords: new Map(),
             inFlightRecords: new Set(),
@@ -907,9 +994,9 @@ function resolveUinFromUid(browserWindow, uid) {
     return '';
 }
 
-function rememberPokeAccountFromRecords(records) {
+function rememberPokeAccountFromRecords(browserWindow, records) {
     for (const record of records) {
-        if (Number(record?.sendType) === 1 && registerPokeAccount(record?.senderUin)) {
+        if (Number(record?.sendType) === 1 && registerPokeAccount(browserWindow, record?.senderUin)) {
             return;
         }
     }
@@ -960,7 +1047,8 @@ function isRecentPokeRecord(record) {
     if (!Number.isFinite(msgTime) || msgTime <= 0) {
         return true;
     }
-    return Math.abs(Date.now() - msgTime * 1000) <= POKE_AUTO_REPLY_MAX_AGE_MS;
+    const timestamp = msgTime > 1e12 ? msgTime : msgTime * 1000;
+    return Math.abs(Date.now() - timestamp) <= POKE_AUTO_REPLY_MAX_AGE_MS;
 }
 
 function processPokeUpdates(browserWindow, args) {
@@ -973,7 +1061,7 @@ function processPokeUpdates(browserWindow, args) {
         collectMsgRecords(arg, records);
         collectMsgRecords(arg?.payload, records);
     }
-    rememberPokeAccountFromRecords(records);
+    rememberPokeAccountFromRecords(browserWindow, records);
     if (getEntertainmentConfig().autoPokeBack !== true) {
         return;
     }
@@ -992,10 +1080,11 @@ function processPokeUpdates(browserWindow, args) {
             resolveUinFromUid(browserWindow, record?.peerUid);
         if (chatType === 1 && peerUin && event.initiatorUin === peerUin &&
             event.targetUin && event.targetUin !== peerUin) {
-            registerPokeAccount(event.targetUin);
+            registerPokeAccount(browserWindow, event.targetUin);
         }
-        if (!event.initiatorUin || !event.targetUin || !pokeState.selfUin ||
-            event.targetUin !== pokeState.selfUin || event.initiatorUin === pokeState.selfUin) {
+        const selfUin = getWindowState(browserWindow).selfUin;
+        if (!event.initiatorUin || !event.targetUin || !selfUin ||
+            event.targetUin !== selfUin || event.initiatorUin === selfUin) {
             continue;
         }
 
@@ -1027,7 +1116,8 @@ function processPokeUpdates(browserWindow, args) {
             chatType,
             targetUin: event.initiatorUin,
             groupUin,
-            selfUin: pokeState.selfUin
+            selfUin,
+            source: 'auto-reply'
         })).then(result => {
             if (!result?.ok && pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
                 pokeState.autoReplySequences.delete(replyTargetKey);
@@ -1833,178 +1923,6 @@ async function openPreventRecallMessages() {
     return { success: true };
 }
 
-function eventHasMessageAttr(response, result, attrId, sendStatus) {
-    const records = [
-        ...collectMsgRecords(response?.payload),
-        ...collectMsgRecords(result?.payload),
-        ...collectMsgRecords(result)
-    ];
-    return records.some(record => {
-        const recordAttrId = getMsgAttrId(record);
-        if (recordAttrId === undefined || String(recordAttrId) !== String(attrId)) {
-            return false;
-        }
-        return sendStatus === undefined || Number(record.sendStatus) === Number(sendStatus);
-    });
-}
-
-function valueContainsPath(value, filePath, depth = 0) {
-    if (!filePath || value === undefined || value === null || depth > 8) {
-        return false;
-    }
-    const target = normalizeComparablePath(filePath);
-    if (typeof value === 'string') {
-        return normalizeComparablePath(value) === target;
-    }
-    if (Array.isArray(value)) {
-        return value.some(item => valueContainsPath(item, filePath, depth + 1));
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array) {
-        return false;
-    }
-    return Object.values(value).some(item => valueContainsPath(item, filePath, depth + 1));
-}
-
-function matchesNativeResponse(waitResponse, callbackId, response, result) {
-    if (waitResponse === true) {
-        return response?.callbackId === callbackId;
-    }
-    if (typeof waitResponse === 'object' && waitResponse) {
-        const cmdName = waitResponse.cmdName;
-        const cmdMatched = !cmdName || response?.cmdName === cmdName || result?.cmdName === cmdName;
-        if (!cmdMatched) {
-            return false;
-        }
-        if (waitResponse.attrId !== undefined) {
-            return eventHasMessageAttr(response, result, waitResponse.attrId, waitResponse.sendStatus);
-        }
-        if (waitResponse.filePath !== undefined) {
-            return valueContainsPath(response, waitResponse.filePath) || valueContainsPath(result, waitResponse.filePath);
-        }
-        return true;
-    }
-    if (Array.isArray(waitResponse)) {
-        return waitResponse.includes(response?.cmdName) || waitResponse.includes(result?.cmdName);
-    }
-    return response?.cmdName === waitResponse || result?.cmdName === waitResponse;
-}
-
-function notifyNativeWaiters(browserWindow, channel, args) {
-    const state = getWindowState(browserWindow);
-    for (const waiter of Array.from(state.nativeWaiters)) {
-        if (waiter.channel !== channel) {
-            continue;
-        }
-        const [response, result] = args;
-        if (!matchesNativeResponse(waiter.waitResponse, waiter.callbackId, response, result)) {
-            continue;
-        }
-        clearTimeout(waiter.timer);
-        state.nativeWaiters.delete(waiter);
-        waiter.resolve(extractNativeResult(response, result));
-    }
-}
-
-function createNativeEventWaiter(browserWindow, waitResponse, timeoutMs = 10000) {
-    installNativeSendInterceptor(browserWindow);
-    const webContentId = browserWindow.webContents.id;
-    const responseChannel = `RM_IPCFROM_MAIN${webContentId}`;
-    const state = getWindowState(browserWindow);
-    let waiter;
-    const promise = new Promise((resolve, reject) => {
-        waiter = {
-            channel: responseChannel,
-            callbackId: null,
-            cmdName: waitResponse?.cmdName || 'nativeEvent',
-            waitResponse,
-            resolve,
-            reject,
-            timer: setTimeout(() => {
-                state.nativeWaiters.delete(waiter);
-                reject(new Error(`Timed out waiting for native event: ${safeJson(waitResponse)}`));
-            }, timeoutMs)
-        };
-        state.nativeWaiters.add(waiter);
-    });
-    return {
-        promise,
-        cancel: () => {
-            if (!waiter) {
-                return;
-            }
-            clearTimeout(waiter.timer);
-            state.nativeWaiters.delete(waiter);
-        }
-    };
-}
-
-async function nativeInvoke(browserWindow, eventName, cmdName, payload = [], waitResponse = true, timeoutMs = 10000, cmdType = 'invoke') {
-    installNativeSendInterceptor(browserWindow);
-    const webContentId = browserWindow.webContents.id;
-    const callbackId = crypto.randomUUID();
-    const requestChannel = `RM_IPCFROM_RENDERER${webContentId}`;
-    const responseChannel = `RM_IPCFROM_MAIN${webContentId}`;
-    const request = {
-        peerId: webContentId,
-        callbackId,
-        type: 'request',
-        eventName
-    };
-    const command = {
-        cmdName,
-        cmdType,
-        payload
-    };
-    const listeners = ipcMain.listeners(requestChannel);
-    if (listeners.length === 0) {
-        throw new Error(`No QQNT native IPC listener was found for ${requestChannel}.`);
-    }
-
-    return await new Promise((resolve, reject) => {
-        const state = getWindowState(browserWindow);
-        let waiter;
-        if (waitResponse) {
-            waiter = {
-                channel: responseChannel,
-                callbackId,
-                cmdName,
-                waitResponse,
-                resolve,
-                reject,
-                timer: setTimeout(() => {
-                    state.nativeWaiters.delete(waiter);
-                    reject(new Error(`Timed out waiting for native response: ${cmdName}`));
-                }, timeoutMs)
-            };
-            state.nativeWaiters.add(waiter);
-        }
-
-        const fakeEvent = {
-            sender: browserWindow.webContents,
-            reply: (channel, ...args) => browserWindow.webContents.send(channel, ...args)
-        };
-
-        try {
-            for (const listener of listeners) {
-                listener(fakeEvent, request, command);
-            }
-            if (!waitResponse) {
-                resolve(null);
-            }
-        } catch (error) {
-            if (waiter) {
-                clearTimeout(waiter.timer);
-                state.nativeWaiters.delete(waiter);
-            }
-            reject(error);
-        }
-    });
-}
-
-async function qqNativeInvoke(browserWindow, eventName, cmdName, payload = [], waitResponse = true, timeoutMs = 10000) {
-    return await nativeInvoke(browserWindow, eventName, cmdName, payload, waitResponse, timeoutMs, 'invoke');
-}
-
 function isMsgInfoListUpdate(args) {
     return args.some(arg => arg?.cmdName === MSG_UPDATE_CMD || arg?.payload?.cmdName === MSG_UPDATE_CMD);
 }
@@ -2599,11 +2517,11 @@ async function copyImageToQqCache(browserWindow, filePath, picSubType) {
     };
 }
 
-async function createPicElement(browserWindow, filePath, originalPicElement = {}) {
+async function createPicElement(browserWindow, filePath, originalPicElement = {}, options = {}) {
     const picSubType = Number(originalPicElement?.picSubType) || 0;
     const copied = await copyImageToQqCache(browserWindow, filePath, picSubType);
     const originalMd5 = normalizeText(originalPicElement.md5HexStr || originalPicElement.md5).toLowerCase();
-    if (originalMd5 && copied.md5.toLowerCase() === originalMd5) {
+    if (options.allowOriginalHash !== true && originalMd5 && copied.md5.toLowerCase() === originalMd5) {
         throw new Error('QQ normalized the image variant back to the original hash.');
     }
     const sourcePath = fsSync.existsSync(copied.newPath) ? copied.newPath : filePath;
@@ -2921,6 +2839,17 @@ function normalizeRepeatPeer(browserWindow, payload = {}) {
     return peer;
 }
 
+function normalizeRepeatDestinationPeer(browserWindow, payload, sourcePeer) {
+    if (!payload?.destinationPeer) {
+        return sourcePeer;
+    }
+    const peer = extractPeerFromRecord(browserWindow, payload.destinationPeer);
+    if (!peer) {
+        throw new Error('Cannot resolve repeat destination peer.');
+    }
+    return peer;
+}
+
 function deepCloneForSend(value, depth = 0, seen = new WeakMap()) {
     if (value === null || value === undefined || depth > 12) {
         return value;
@@ -2928,21 +2857,22 @@ function deepCloneForSend(value, depth = 0, seen = new WeakMap()) {
     if (typeof value !== 'object') {
         return value;
     }
-    if (value instanceof Uint8Array) {
-        return new Uint8Array(value);
-    }
     if (Buffer.isBuffer(value)) {
         return Buffer.from(value);
     }
+    if (value instanceof Uint8Array) {
+        return new Uint8Array(value);
+    }
+    if (seen.has(value)) {
+        return seen.get(value);
+    }
     if (value instanceof Map) {
         const map = new Map();
+        seen.set(value, map);
         for (const [key, item] of value) {
             map.set(key, deepCloneForSend(item, depth + 1, seen));
         }
         return map;
-    }
-    if (seen.has(value)) {
-        return seen.get(value);
     }
     if (Array.isArray(value)) {
         const array = [];
@@ -3024,33 +2954,166 @@ async function getRepeatSourceRecord(browserWindow, peer, msgId) {
     return record;
 }
 
-function shouldForwardRepeatRecord(record = {}) {
-    const elements = Array.isArray(record.elements) ? record.elements : [];
-    const hasMention = elements.some(element =>
-        Number(element?.elementType) === 1 && Number(element?.textElement?.atType) > 0
-    );
-    if (hasMention) {
-        return false;
+async function downloadForwardDetailResource(remoteUrl, fileName, fallbackExtension) {
+    if (!remoteUrl) {
+        throw new Error('The forwarded resource has no download URL.');
     }
-    const first = elements[0];
-    return Number(first?.elementType) === 2 ||
-        Number(first?.elementType) === 3 ||
-        Number(first?.elementType) === 5 ||
-        Number(first?.elementType) === 10 ||
-        Number(first?.elementType) === 11 ||
-        Number(first?.elementType) === 13 ||
-        Number(first?.elementType) === 16 ||
-        Boolean(first?.picElement) ||
-        Boolean(first?.fileElement) ||
-        Boolean(first?.videoElement) ||
-        Boolean(first?.marketFaceElement) ||
-        Boolean(first?.structMsgElement) ||
-        Boolean(first?.structLongMsgElement) ||
-        Boolean(first?.multiForwardMsgElement) ||
-        Boolean(first?.arkElement);
+    const response = await fetch(remoteUrl);
+    if (!response.ok || !response.body) {
+        throw new Error(`Forwarded resource download failed: HTTP ${response.status}.`);
+    }
+    const baseName = path.basename(normalizeText(fileName)) || `forward-resource${fallbackExtension}`;
+    const extension = path.extname(baseName) || fallbackExtension;
+    const stem = safeFileStem(path.basename(baseName, extension)) || 'forward-resource';
+    const repairDir = await ensureRepairDir();
+    const targetPath = path.join(
+        repairDir,
+        `${stem}.forward.${Date.now()}.${crypto.randomBytes(4).toString('hex')}${extension}`
+    );
+    try {
+        await pipeline(Readable.fromWeb(response.body), fsSync.createWriteStream(targetPath));
+    } catch (error) {
+        await fs.rm(targetPath, { force: true }).catch(() => {});
+        throw error;
+    }
+    return targetPath;
 }
 
-async function repeatBySendMsg(browserWindow, peer, record = {}) {
+async function downloadForwardDetailImage(picElement) {
+    const remoteUrl = getViewerRemoteUrl(picElement?.originImageUrl, picElement?.thumbPath);
+    const nameExtension = path.extname(normalizeText(picElement?.fileName)).toLowerCase();
+    const fallbackExtension = IMAGE_EXTENSIONS.has(nameExtension) ? nameExtension : '.png';
+    return await downloadForwardDetailResource(
+        remoteUrl,
+        normalizeText(picElement?.fileName) || `forward-image${fallbackExtension}`,
+        fallbackExtension
+    );
+}
+
+async function waitForForwardDetailFile(candidates, timeoutMs = 60000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        const filePath = getExistingFilePath(candidates);
+        if (filePath) {
+            return filePath;
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return '';
+}
+
+async function downloadForwardDetailFile(browserWindow, record, element) {
+    const fileElement = element?.fileElement || element;
+    const result = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        'nodeIKernelRichMediaService/downloadRichMediaInVisit',
+        [{
+            downloadType: 1,
+            thumbSize: 0,
+            msgId: normalizeText(record?.msgId),
+            msgRandom: normalizeText(record?.msgRandom),
+            msgSeq: normalizeText(record?.msgSeq),
+            msgTime: normalizeText(record?.msgTime),
+            chatType: Number(record?.chatType),
+            senderUid: normalizeText(record?.senderUid),
+            peerUid: normalizeText(record?.peerUid),
+            guildId: normalizeText(record?.guildId),
+            ele: element,
+            useHttps: true
+        }, null],
+        true,
+        60000
+    );
+    if (isRepeatCommandFailure(result)) {
+        throw new Error(`forwarded file download failed: ${safeJson(result)}`);
+    }
+    const localPath = getViewerFileUrl(result, fileElement?.filePath);
+    if (localPath) {
+        return fileURLToPath(localPath);
+    }
+    const remoteUrl = getViewerRemoteUrl(result);
+    if (remoteUrl) {
+        return await downloadForwardDetailResource(
+            remoteUrl,
+            normalizeText(fileElement?.fileName) || 'forward-file.bin',
+            '.bin'
+        );
+    }
+    const downloadedPath = await waitForForwardDetailFile([fileElement?.filePath]);
+    if (!downloadedPath) {
+        throw new Error('QQ did not return a downloaded path for the forwarded file.');
+    }
+    return downloadedPath;
+}
+
+async function prepareForwardDetailRecord(browserWindow, record = {}) {
+    const elements = [];
+    for (const element of Array.isArray(record.elements) ? record.elements : []) {
+        if (Number(element?.elementType) === 2 || element?.picElement) {
+            const picElement = element.picElement || element;
+            const localPath = getPicSourcePath(picElement) || await downloadForwardDetailImage(picElement);
+            const rebuilt = await createPicElement(browserWindow, localPath, picElement, {
+                allowOriginalHash: true
+            });
+            rebuilt.elementGroupId = Number(element?.elementGroupId) || 0;
+            elements.push(rebuilt);
+            continue;
+        }
+        if (Number(element?.elementType) === 3 || element?.fileElement) {
+            const fileElement = element.fileElement || element;
+            const localPath = getFileSourcePath(fileElement) ||
+                await downloadForwardDetailFile(browserWindow, record, element);
+            const rebuilt = await createFileElement(
+                localPath,
+                normalizeText(fileElement?.fileName) || path.basename(localPath),
+                fileElement
+            );
+            rebuilt.elementGroupId = Number(element?.elementGroupId) || 0;
+            elements.push(rebuilt);
+            continue;
+        }
+        elements.push(element);
+    }
+    return { ...record, elements };
+}
+
+function isRepeatCommandFailure(result) {
+    const code = Number(result?.result);
+    return isNativeFailure(result) || (Number.isFinite(code) && code !== 0);
+}
+
+function createRepeatFinalWaiters(browserWindow, attrId) {
+    return {
+        success: createNativeEventWaiter(browserWindow, {
+            cmdName: MSG_UPDATE_CMD,
+            attrId,
+            sendStatus: 2
+        }, 30000),
+        failure: createNativeEventWaiter(browserWindow, {
+            cmdName: MSG_UPDATE_CMD,
+            attrId,
+            sendStatus: [SEND_STATUS_FAILED, SEND_STATUS_SUCCESS_NO_SEQ]
+        }, 30000)
+    };
+}
+
+async function waitForRepeatFinal(waiters) {
+    const confirmation = await Promise.race([
+        waiters.success.promise.then(value => ({ success: true, value })),
+        waiters.failure.promise.then(value => ({ success: false, value }))
+    ]);
+    if (!confirmation.success) {
+        throw new Error(`repeat send was rejected by QQ: ${safeJson(confirmation.value)}`);
+    }
+}
+
+function cancelRepeatFinalWaiters(waiters) {
+    waiters?.success.cancel();
+    waiters?.failure.cancel();
+}
+
+async function repeatBySendMsg(browserWindow, peer, record = {}, confirm = false) {
     const msgElements = deepCloneForSend(record.elements || []);
     if (!Array.isArray(msgElements) || !msgElements.length) {
         throw new Error('The source message has no repeatable elements.');
@@ -3061,26 +3124,61 @@ async function repeatBySendMsg(browserWindow, peer, record = {}) {
         }
     }
     const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
-    const result = await qqNativeInvoke(
-        browserWindow,
-        'ntApi',
-        'nodeIKernelMsgService/sendMsg',
-        [{
-            msgId: '0',
-            peer,
-            msgElements,
-            msgAttributeInfos: makeSendAttributeInfos(attrId)
-        }, null],
-        true,
-        15000
+    const waiters = confirm ? createRepeatFinalWaiters(browserWindow, attrId) : null;
+    try {
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendMsg',
+            [{
+                msgId: '0',
+                peer,
+                msgElements,
+                msgAttributeInfos: makeSendAttributeInfos(attrId)
+            }, null],
+            true,
+            15000
+        );
+        if (isRepeatCommandFailure(result)) {
+            throw new Error(`repeat sendMsg failed: ${safeJson(result)}`);
+        }
+        if (confirm) {
+            await waitForRepeatFinal(waiters);
+        }
+        return result;
+    } finally {
+        cancelRepeatFinalWaiters(waiters);
+    }
+}
+
+async function repeatNestedForwardCard(browserWindow, destinationPeer, record, forwardContext) {
+    const rootMsg = forwardContext?.rootMsg;
+    const rootPeer = extractPeerFromRecord(browserWindow, rootMsg);
+    const rootMsgId = normalizeText(rootMsg?.msgId);
+    const subMsgId = normalizeText(record?.msgId);
+    if (!rootPeer || !rootMsgId || !subMsgId) {
+        throw new Error('The nested chat record route context is incomplete.');
+    }
+    const service = getQqWrapperSession()?.getMsgService?.();
+    if (typeof service?.forwardSubMsgWithComment !== 'function') {
+        throw new Error('QQ does not expose forwardSubMsgWithComment.');
+    }
+    const attrId = await generateMsgUniqueId(browserWindow, destinationPeer.chatType);
+    const result = await service.forwardSubMsgWithComment(
+        [rootMsgId],
+        [subMsgId],
+        rootPeer,
+        [destinationPeer],
+        [],
+        makeSendAttributeInfos(attrId)
     );
-    if (isNativeFailure(result)) {
-        throw new Error(`repeat sendMsg failed: ${safeJson(result)}`);
+    if (isRepeatCommandFailure(result)) {
+        throw new Error(`forwardSubMsgWithComment failed: ${safeJson(result)}`);
     }
     return result;
 }
 
-async function repeatByNativeForward(browserWindow, peer, record = {}) {
+async function repeatByNativeForward(browserWindow, sourcePeer, destinationPeer, record = {}) {
     const msgId = normalizeText(record.msgId);
     if (!msgId || msgId === '0') {
         throw new Error('The source message has no valid message ID.');
@@ -3091,48 +3189,32 @@ async function repeatByNativeForward(browserWindow, peer, record = {}) {
         'nodeIKernelMsgService/forwardMsgWithComment',
         [{
             commentElements: [],
-            dstContacts: [peer],
+            dstContacts: [destinationPeer],
             msgAttributeInfos: new Map(),
             msgIds: [msgId],
-            srcContact: peer
+            srcContact: sourcePeer
         }, null],
         true,
         15000
     );
-    if (isNativeFailure(result)) {
+    if (isRepeatCommandFailure(result)) {
         throw new Error(`repeat forwardMsgWithComment failed: ${safeJson(result)}`);
     }
     return result;
 }
 
-async function repeatMessageFromRenderer(browserWindow, payload = {}) {
-    if (!isRepeatMessageEnabled()) {
-        throw new Error('Repeat message is disabled.');
-    }
-    const peer = normalizeRepeatPeer(browserWindow, payload);
-    const msgId = normalizeText(payload.msgId || payload.record?.msgId);
-    if (!msgId) {
-        throw new Error('The source message has no valid message ID.');
-    }
-    const record = await getRepeatSourceRecord(browserWindow, peer, msgId);
-    const pttResult = await repeatPttRecord(browserWindow, peer, record);
-    if (pttResult) {
-        return {
-            method: 'ptt',
-            result: pttResult
-        };
-    }
-    if (!shouldForwardRepeatRecord(record)) {
-        return {
-            method: 'sendMsg',
-            result: await repeatBySendMsg(browserWindow, peer, record)
-        };
-    }
-    return {
-        method: 'forwardMsgWithComment',
-        result: await repeatByNativeForward(browserWindow, peer, record)
-    };
-}
+const repeatMessageFromRenderer = createRepeatMessageHandler({
+    isEnabled: isRepeatMessageEnabled,
+    normalizeText,
+    resolveSourcePeer: normalizeRepeatPeer,
+    resolveDestinationPeer: normalizeRepeatDestinationPeer,
+    loadSourceRecord: getRepeatSourceRecord,
+    repeatVoice: repeatPttRecord,
+    repeatNestedForward: repeatNestedForwardCard,
+    prepareForwardDetail: prepareForwardDetailRecord,
+    repeatBySend: repeatBySendMsg,
+    repeatByNativeForward
+});
 
 async function createRepairedElement(browserWindow, descriptor, archivePassword) {
     const { element, kind, sourcePath } = descriptor;
@@ -3197,7 +3279,6 @@ function handleNativeSend(browserWindow, channel, args) {
         return true;
     }
     rememberNativePeerAliases(browserWindow, args);
-    notifyNativeWaiters(browserWindow, channel, args);
     processDeleteBubbleSkin(args);
     processPreventRecall(args);
     processPokeUpdates(browserWindow, args);
@@ -3207,34 +3288,20 @@ function handleNativeSend(browserWindow, channel, args) {
     return false;
 }
 
-function installNativeSendInterceptor(browserWindow) {
+function installNativeSendHandler(browserWindow) {
     if (!browserWindow || browserWindow.isDestroyed()) {
         return;
     }
-    const state = getWindowState(browserWindow);
-    if (state.nativeSendPatched) {
-        return;
-    }
-    const webContents = browserWindow.webContents;
-    state.originalSend = webContents.send.bind(webContents);
-    webContents.send = function(channel, ...args) {
-        let blocked = false;
-        try {
-            blocked = handleNativeSend(browserWindow, channel, args);
-        } catch (error) {
-            warn('native send interceptor failed:', error?.message || error);
-        }
-        if (blocked) {
-            return undefined;
-        }
-        return state.originalSend(channel, ...args);
-    };
-    state.nativeSendPatched = true;
+    addNativeSendHandler(
+        browserWindow,
+        handleNativeSend,
+        error => warn('native send interceptor failed:', error?.message || error)
+    );
 }
 
 function installForAllWindows() {
     for (const browserWindow of BrowserWindow.getAllWindows()) {
-        installNativeSendInterceptor(browserWindow);
+        installNativeSendHandler(browserWindow);
     }
 }
 
@@ -3247,7 +3314,7 @@ function start() {
     applyVoiceMessageConfig();
     cleanupOldRepairFiles(true).catch(() => {});
     app?.on?.('browser-window-created', (_event, browserWindow) => {
-        installNativeSendInterceptor(browserWindow);
+        installNativeSendHandler(browserWindow);
         if (isVoiceMessageEnabled()) {
             voiceFileSender?.onBrowserWindowCreated?.(browserWindow);
         }

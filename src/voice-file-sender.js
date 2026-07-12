@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog } = require("electron");
 
 const util = require('util');
 const execFile = util.promisify(require("child_process").execFile);
@@ -10,6 +10,13 @@ const path = require('path');
 const crypto = require('crypto');
 
 const { decode, encode } = require('silk-wasm');
+const {
+    addNativeSendHandler,
+    createNativeEventWaiter,
+    isNativeFailure,
+    qqNativeInvoke,
+    unwrapNativeValue
+} = require('./native-ipc');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
@@ -1360,152 +1367,8 @@ async function encodeMediaFileToSilk(mediaPath, options = {}) {
     };
 }
 
-function unwrapNativeValue(value) {
-    if (!value || typeof value !== 'object' || value instanceof Map || value instanceof Uint8Array) {
-        return value;
-    }
-    for (const key of ['result', 'data', 'value', 'id']) {
-        if (value[key] !== undefined) {
-            return value[key];
-        }
-    }
-    return value;
-}
-
-function getMsgAttrId(msgRecord) {
-    const attrs = msgRecord?.msgAttrs;
-    if (!attrs) {
-        return undefined;
-    }
-    if (attrs instanceof Map) {
-        return attrs.get(0)?.attrId;
-    }
-    return attrs[0]?.attrId || attrs['0']?.attrId;
-}
-
-function collectMsgRecords(value, records = [], depth = 0) {
-    if (!value || depth > 4) {
-        return records;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            collectMsgRecords(item, records, depth + 1);
-        }
-        return records;
-    }
-    if (typeof value !== 'object') {
-        return records;
-    }
-    if (value.msgId !== undefined && value.msgAttrs !== undefined) {
-        records.push(value);
-        return records;
-    }
-    for (const key of ['payload', 'msgList', 'records', 'data', 'result']) {
-        collectMsgRecords(value[key], records, depth + 1);
-    }
-    return records;
-}
-
 function normalizeComparablePath(filePath) {
     return String(filePath || '').replace(/\//g, '\\').toLowerCase();
-}
-
-function valueContainsPath(value, filePath, depth = 0) {
-    if (!filePath || value === undefined || value === null || depth > 8) {
-        return false;
-    }
-    const target = normalizeComparablePath(filePath);
-    if (typeof value === 'string') {
-        return normalizeComparablePath(value) === target;
-    }
-    if (Array.isArray(value)) {
-        return value.some(item => valueContainsPath(item, filePath, depth + 1));
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array) {
-        return false;
-    }
-    return Object.values(value).some(item => valueContainsPath(item, filePath, depth + 1));
-}
-
-function eventHasFilePath(response, result, filePath) {
-    return valueContainsPath(response, filePath) || valueContainsPath(result, filePath);
-}
-
-function eventHasMessageAttr(response, result, attrId, sendStatus) {
-    const records = [
-        ...collectMsgRecords(response?.payload),
-        ...collectMsgRecords(result?.payload),
-        ...collectMsgRecords(result)
-    ];
-    return records.some(record => {
-        const recordAttrId = getMsgAttrId(record);
-        if (recordAttrId === undefined || String(recordAttrId) !== String(attrId)) {
-            return false;
-        }
-        return sendStatus === undefined || Number(record.sendStatus) === Number(sendStatus);
-    });
-}
-
-function matchesNativeResponse(waitResponse, callbackId, response, result) {
-    if (waitResponse === true) {
-        return response?.callbackId === callbackId;
-    }
-    if (typeof waitResponse === 'object' && waitResponse) {
-        const cmdName = waitResponse.cmdName;
-        const cmdMatched = !cmdName || response?.cmdName === cmdName || result?.cmdName === cmdName;
-        if (!cmdMatched) {
-            return false;
-        }
-        if (waitResponse.attrId !== undefined) {
-            return eventHasMessageAttr(response, result, waitResponse.attrId, waitResponse.sendStatus);
-        }
-        if (waitResponse.filePath !== undefined) {
-            return eventHasFilePath(response, result, waitResponse.filePath);
-        }
-        return true;
-    }
-    if (Array.isArray(waitResponse)) {
-        return waitResponse.includes(response?.cmdName) || waitResponse.includes(result?.cmdName);
-    }
-    return response?.cmdName === waitResponse || result?.cmdName === waitResponse;
-}
-
-function isPlainEmptyObject(value) {
-    return Boolean(value) &&
-        typeof value === 'object' &&
-        !Array.isArray(value) &&
-        !(value instanceof Map) &&
-        !(value instanceof Uint8Array) &&
-        Object.keys(value).length === 0;
-}
-
-function isNativeFailure(value) {
-    return value?.promiseStatue === 'fail' ||
-        value?.promiseStatus === 'fail' ||
-        value?.result === false ||
-        Number(value?.result) < 0 ||
-        Number(value?.retCode) < 0 ||
-        Number(value?.errCode) < 0;
-}
-
-function extractNativeResult(response, result) {
-    if (isNativeFailure(response)) {
-        return response;
-    }
-    if (result !== undefined && !isPlainEmptyObject(result)) {
-        return result;
-    }
-    for (const item of [result, response]) {
-        if (!item || typeof item !== 'object') {
-            continue;
-        }
-        for (const key of ['payload', 'result', 'data', 'value', 'path', 'filePath', 'newPath']) {
-            if (item[key] !== undefined) {
-                return item[key];
-            }
-        }
-    }
-    return result;
 }
 
 function makeSendAttributeInfos(attrId) {
@@ -3800,9 +3663,6 @@ function getWindowState(browserWindow) {
     let state = windowStates.get(browserWindow);
     if (!state) {
         state = {
-            nativeWaiters: new Set(),
-            nativeSendPatched: false,
-            originalSend: null,
             uiLoopRunning: false,
             peerUidByUin: new Map()
         };
@@ -3891,135 +3751,9 @@ function rememberNativePeerAliases(browserWindow, args) {
     }
 }
 
-function notifyNativeWaiters(browserWindow, channel, args) {
+function handleVoiceNativeSend(browserWindow, _channel, args) {
     rememberNativePeerAliases(browserWindow, args);
-    const state = getWindowState(browserWindow);
-    for (const waiter of Array.from(state.nativeWaiters)) {
-        if (waiter.channel !== channel) {
-            continue;
-        }
-        const [response, result] = args;
-        if (!matchesNativeResponse(waiter.waitResponse, waiter.callbackId, response, result)) {
-            continue;
-        }
-        clearTimeout(waiter.timer);
-        state.nativeWaiters.delete(waiter);
-        waiter.resolve(extractNativeResult(response, result));
-    }
-}
-
-function installNativeSendInterceptor(browserWindow) {
-    const state = getWindowState(browserWindow);
-    if (state.nativeSendPatched || browserWindow.isDestroyed()) {
-        return;
-    }
-    const webContents = browserWindow.webContents;
-    state.originalSend = webContents.send.bind(webContents);
-    webContents.send = function(channel, ...args) {
-        notifyNativeWaiters(browserWindow, channel, args);
-        return state.originalSend(channel, ...args);
-    };
-    state.nativeSendPatched = true;
-}
-
-function createNativeEventWaiter(browserWindow, waitResponse, timeoutMs = 10000) {
-    installNativeSendInterceptor(browserWindow);
-    const webContentId = browserWindow.webContents.id;
-    const responseChannel = `RM_IPCFROM_MAIN${webContentId}`;
-    const state = getWindowState(browserWindow);
-    let waiter;
-    const promise = new Promise((resolve, reject) => {
-        waiter = {
-            channel: responseChannel,
-            callbackId: null,
-            cmdName: waitResponse?.cmdName || 'nativeEvent',
-            waitResponse,
-            resolve,
-            reject,
-            timer: setTimeout(() => {
-                state.nativeWaiters.delete(waiter);
-                reject(new Error(`Timed out waiting for native event: ${safeJson(waitResponse)}`));
-            }, timeoutMs)
-        };
-        state.nativeWaiters.add(waiter);
-    });
-    return {
-        promise,
-        cancel: () => {
-            if (!waiter) {
-                return;
-            }
-            clearTimeout(waiter.timer);
-            state.nativeWaiters.delete(waiter);
-        }
-    };
-}
-
-async function nativeInvoke(browserWindow, eventName, cmdName, payload = [], waitResponse = true, timeoutMs = 10000) {
-    installNativeSendInterceptor(browserWindow);
-    const webContentId = browserWindow.webContents.id;
-    const callbackId = crypto.randomUUID();
-    const requestChannel = `RM_IPCFROM_RENDERER${webContentId}`;
-    const responseChannel = `RM_IPCFROM_MAIN${webContentId}`;
-    const request = {
-        peerId: webContentId,
-        callbackId,
-        type: 'request',
-        eventName
-    };
-    const command = {
-        cmdName,
-        cmdType: 'invoke',
-        payload
-    };
-    const listeners = ipcMain.listeners(requestChannel);
-    if (listeners.length === 0) {
-        throw new Error(`No QQNT native IPC listener was found for ${requestChannel}.`);
-    }
-
-    return await new Promise((resolve, reject) => {
-        const state = getWindowState(browserWindow);
-        let waiter;
-        if (waitResponse) {
-            waiter = {
-                channel: responseChannel,
-                callbackId,
-                cmdName,
-                waitResponse,
-                resolve,
-                reject,
-                timer: setTimeout(() => {
-                    state.nativeWaiters.delete(waiter);
-                    reject(new Error(`Timed out waiting for native response: ${cmdName}`));
-                }, timeoutMs)
-            };
-            state.nativeWaiters.add(waiter);
-        }
-
-        const fakeEvent = {
-            sender: browserWindow.webContents,
-            reply: (channel, ...args) => browserWindow.webContents.send(channel, ...args)
-        };
-
-        try {
-            for (const listener of listeners) {
-                listener(fakeEvent, request, command);
-            }
-            if (!waitResponse) {
-                resolve(null);
-            }
-        } catch (error) {
-            if (waiter) {
-                clearTimeout(waiter.timer);
-                state.nativeWaiters.delete(waiter);
-            }
-            reject(error);
-        }
-    });
-}
-
-async function qqNativeInvoke(browserWindow, eventName, cmdName, payload = [], waitResponse = true, timeoutMs = 10000) {
-    return await nativeInvoke(browserWindow, eventName, cmdName, payload, waitResponse, timeoutMs);
+    return false;
 }
 
 async function generateMsgUniqueId(browserWindow, chatType) {
@@ -4386,7 +4120,7 @@ function setupBrowserWindow(browserWindow) {
     if (!voiceFeatureEnabled || !browserWindow || browserWindow.isDestroyed()) {
         return;
     }
-    installNativeSendInterceptor(browserWindow);
+    addNativeSendHandler(browserWindow, handleVoiceNativeSend);
     const start = () => runInjectedUiLoop(browserWindow).catch(() => {});
     browserWindow.webContents.once('dom-ready', () => setTimeout(start, 500));
     browserWindow.webContents.on('did-finish-load', () => setTimeout(start, 500));

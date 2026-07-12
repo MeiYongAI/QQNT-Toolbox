@@ -5,6 +5,7 @@ const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
+const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
 const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
 const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
 const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
@@ -16,6 +17,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     setConfig: config => ipcRenderer.invoke(CHANNEL_SET_CONFIG, config),
     repeatMessage: payload => ipcRenderer.invoke(CHANNEL_REPEAT_MESSAGE, payload),
     sendPoke: payload => ipcRenderer.invoke(CHANNEL_SEND_POKE, payload),
+    recallPoke: payload => ipcRenderer.invoke(CHANNEL_RECALL_POKE, payload),
     registerPokeAccount: selfUin => ipcRenderer.invoke(CHANNEL_REGISTER_POKE_ACCOUNT, selfUin),
     clearRecallCache: () => ipcRenderer.invoke(CHANNEL_CLEAR_RECALL_CACHE),
     openRecallDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_DIR),
