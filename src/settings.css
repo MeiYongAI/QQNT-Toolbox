@@ -1,0 +1,309 @@
+#qqnt-toolbox-settings {
+    width: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+    color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    font: 14px/1.45 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    letter-spacing: 0;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-settings-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 48px;
+    margin-bottom: 20px;
+    padding: 0 16px;
+    border-radius: 8px;
+    background: var(--fill_light_primary, var(--background-02, #ffffff));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-settings-name {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-settings-version,
+#qqnt-toolbox-settings .qqnt-toolbox-item-meta,
+#qqnt-toolbox-settings .qqnt-toolbox-number-control {
+    color: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    font-size: 12px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-category-title {
+    margin: 10px 0 0;
+    padding: 0 16px;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 28px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-category-title:first-child {
+    margin-top: 0;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section {
+    display: grid;
+    min-width: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--fill_light_primary, var(--background-02, #ffffff));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 48px;
+    padding: 0 16px;
+    border: 0;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-header:hover {
+    background: var(--overlay_hover, rgba(127, 127, 127, 0.08));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-title {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-icon {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin-left: 12px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    opacity: 0.7;
+    transform: rotate(45deg);
+    transition: transform 160ms ease;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section[data-collapsed="true"] .qqnt-toolbox-section-icon {
+    transform: rotate(-45deg);
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-content {
+    display: grid;
+    padding: 0 16px 8px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-content[hidden] {
+    display: none;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    min-height: 52px;
+    gap: 16px;
+    padding: 9px 0;
+    box-sizing: border-box;
+    border-top: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, 0.12)));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-section-content .qqnt-toolbox-item:first-child {
+    border-top: 0;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-item[data-child="true"] {
+    width: calc(100% - 32px);
+    margin-left: 32px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-item[data-child-level="2"] {
+    width: calc(100% - 64px);
+    margin-left: 64px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-item[data-disabled="true"] {
+    opacity: 0.55;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-item-main {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-item-name {
+    overflow-wrap: anywhere;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-switch {
+    position: relative;
+    flex: none;
+    width: 40px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    outline: 0;
+    background: var(--fill_standard_secondary, rgba(127, 127, 127, 0.35));
+    cursor: pointer;
+    transition: background-color 160ms ease;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-switch::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+    transition: transform 160ms ease;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-switch[data-checked="true"] {
+    background: var(--brand_standard, var(--brand-primary, #2f6bff));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-switch[data-checked="true"]::before {
+    transform: translateX(18px);
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-switch:disabled,
+#qqnt-toolbox-settings .qqnt-toolbox-password-input:disabled,
+#qqnt-toolbox-settings .qqnt-toolbox-number-input:disabled,
+#qqnt-toolbox-settings .qqnt-toolbox-shortcut-button:disabled {
+    cursor: default;
+    opacity: 0.58;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-action,
+#qqnt-toolbox-settings .qqnt-toolbox-shortcut-button {
+    flex: none;
+    min-width: 72px;
+    height: 30px;
+    padding: 0 12px;
+    overflow: hidden;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, 0.22)));
+    border-radius: 6px;
+    color: inherit;
+    background: var(--background-02, rgba(127, 127, 127, 0.08));
+    font: inherit;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-shortcut-button {
+    min-width: 110px;
+    max-width: 190px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-action:hover,
+#qqnt-toolbox-settings .qqnt-toolbox-shortcut-button:hover,
+#qqnt-toolbox-settings .qqnt-toolbox-shortcut-button[data-capturing="true"] {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    background: var(--overlay_hover, rgba(127, 127, 127, 0.14));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-action[data-danger="true"] {
+    color: #ff5a5f;
+    border-color: rgba(255, 90, 95, 0.35);
+    background: rgba(255, 90, 95, 0.1);
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-password-input,
+#qqnt-toolbox-settings .qqnt-toolbox-number-input {
+    flex: none;
+    height: 30px;
+    padding: 0 9px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, 0.22)));
+    border-radius: 6px;
+    outline: 0;
+    color: inherit !important;
+    -webkit-text-fill-color: currentColor !important;
+    caret-color: currentColor;
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, 0.12))) !important;
+    font: inherit;
+    user-select: text;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-password-input {
+    width: min(180px, 32vw);
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-number-input {
+    width: 58px;
+    padding: 0 5px;
+    font-weight: 600;
+    text-align: center;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-password-input:focus,
+#qqnt-toolbox-settings .qqnt-toolbox-number-input:focus {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-number-control {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-color-pair {
+    display: flex;
+    flex: none;
+    width: 66px;
+    height: 28px;
+    overflow: hidden;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, 0.22)));
+    border-radius: 6px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-color-input {
+    width: 33px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-color-input::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-color-input::-webkit-color-swatch {
+    border: 0;
+}
+
+@media (max-width: 620px) {
+    #qqnt-toolbox-settings {
+        padding: 12px;
+    }
+
+    #qqnt-toolbox-settings .qqnt-toolbox-item {
+        gap: 10px;
+    }
+
+    #qqnt-toolbox-settings .qqnt-toolbox-item-meta {
+        display: none;
+    }
+}

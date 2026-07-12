@@ -1,6 +1,10 @@
+let initializeToolboxSettings = async () => {};
+
 (() => {
     const PANEL_ID = 'qqnt-toolbox-panel';
+    const SETTINGS_ID = 'qqnt-toolbox-settings';
     const STYLE_ID = 'qqnt-toolbox-style';
+    const SETTINGS_STYLE_ID = 'qqnt-toolbox-settings-style';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
     const MSG_TYPE_GRAY_TIPS = 5;
     const SEND_STATUS_SUCCESS_NO_SEQ = 3;
@@ -27,6 +31,7 @@
             messages: false,
             preventRecall: false,
             entertainment: false,
+            floatingPanel: false,
             simplifySidebar: false,
             simplifyTop: false,
             simplifyChat: false,
@@ -61,7 +66,12 @@
         entertainment: {
             autoPokeBack: false,
             autoPokeBackLimit: 1,
-            doubleClickAvatarPoke: false
+            doubleClickAvatarPoke: false,
+            rightClickAvatarPoke: true
+        },
+        floatingPanel: {
+            enabled: true,
+            shortcut: 'ControlRight'
         },
         preventRecall: {
             enabled: false,
@@ -76,6 +86,8 @@
         },
         interfaceTweaks: {
             imageViewerOptimization: false,
+            disableImageQrScan: false,
+            singleImageViewer: false,
             goBackMainList: false,
             preventMessageDrag: false,
             preventRecentContactDrag: false,
@@ -104,6 +116,7 @@
     let repeatObserver = null;
     let repeatRefreshTimer = 0;
     let repeatMenuRequestId = 0;
+    let pokeMenuRequestId = 0;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let preventDragActive = false;
@@ -120,6 +133,7 @@
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
     let simplifyConfigSaveTimer = 0;
+    let activeShortcutCapture = null;
     const discoveredSimplifyItems = {
         sideTop: new Map(),
         sideBottom: new Map(),
@@ -611,28 +625,53 @@
     cursor: default;
     opacity: .58;
 }
-body.qqnt-toolbox-side-repeat .message .message-content__wrapper > .qqnt-toolbox-repeat-slot.plus-one-btn {
-    display: none !important;
+#${PANEL_ID} .qqnt-toolbox-shortcut-button {
+    flex: none;
+    min-width: 96px;
+    max-width: 150px;
+    height: 30px;
+    padding: 0 10px;
+    overflow: hidden;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .22)));
+    border-radius: 6px;
+    color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .12)));
+    font: inherit;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     cursor: pointer;
 }
-body.qqnt-toolbox-side-repeat .message:hover .message-content__wrapper > .qqnt-toolbox-repeat-slot.plus-one-btn {
-    display: flex !important;
+#${PANEL_ID} .qqnt-toolbox-shortcut-button:hover,
+#${PANEL_ID} .qqnt-toolbox-shortcut-button[data-capturing="true"] {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    background: var(--overlay_hover, rgba(127, 127, 127, .18));
 }
-body.qqnt-toolbox-side-repeat .message .message-content__wrapper > .qqnt-toolbox-repeat-slot.plus-one-btn::before,
-.qqnt-toolbox-repeat-menu-plus-one::before {
-    content: "+1";
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    color: currentColor;
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 1;
-    letter-spacing: 0;
+#${PANEL_ID} .qqnt-toolbox-shortcut-button:disabled {
+    cursor: default;
+    opacity: .58;
+}
+body.qqnt-toolbox-side-repeat .message .qqnt-toolbox-repeat-slot.plus-one-btn,
+body.qqnt-toolbox-side-repeat .ml-item .qqnt-toolbox-repeat-slot.plus-one-btn {
+    position: absolute !important;
+    right: auto !important;
+    bottom: auto !important;
+    z-index: 3;
+    display: flex !important;
+    margin: 0 !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    cursor: pointer;
+    transform: translateY(-50%) !important;
+}
+body.qqnt-toolbox-side-repeat .message:hover .qqnt-toolbox-repeat-slot.plus-one-btn,
+body.qqnt-toolbox-side-repeat .ml-item:hover .qqnt-toolbox-repeat-slot.plus-one-btn {
+    visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
 }
 body.qqnt-toolbox-context-repeat .message .plus-one-btn:not(.qqnt-toolbox-repeat-menu-plus-one),
+body.qqnt-toolbox-context-repeat .ml-item .plus-one-btn:not(.qqnt-toolbox-repeat-menu-plus-one),
 body.qqnt-toolbox-context-repeat .qqnt-toolbox-repeat-slot {
     display: none !important;
 }
@@ -642,7 +681,7 @@ body.qqnt-toolbox-context-repeat .qqnt-toolbox-repeat-slot {
     transform-origin: center;
     color: currentColor;
 }
-body.qqnt-toolbox-hide-weather .user-profile-card__widgets .weather-widget,
+body.qqnt-toolbox-hide-weather .weather-widget,
 body.qqnt-toolbox-hide-classic .window-control-area .narrow-toggler,
 body.qqnt-toolbox-hide-update [class*="update-notice"],
 body.qqnt-toolbox-hide-update [class*="updateNotice"],
@@ -711,8 +750,31 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 [data-qqnt-toolbox-status-anchor="true"] {
     position: relative !important;
 }
+[data-qqnt-toolbox-repeat-anchor="true"] {
+    position: relative !important;
+}
 `;
         document.head.appendChild(style);
+    }
+
+    async function injectSettingsStyle() {
+        let link = document.getElementById(SETTINGS_STYLE_ID);
+        if (!link) {
+            link = document.createElement('link');
+            link.id = SETTINGS_STYLE_ID;
+            link.rel = 'stylesheet';
+            link.href = new URL('./settings.css', import.meta.url).href;
+            document.head.appendChild(link);
+        }
+        if (link.sheet) {
+            return;
+        }
+        await new Promise(resolve => {
+            const done = () => resolve();
+            link.addEventListener('load', done, { once: true });
+            link.addEventListener('error', done, { once: true });
+            setTimeout(done, 1000);
+        });
     }
 
     function createElement(tagName, className, textContent) {
@@ -726,10 +788,107 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return element;
     }
 
+    function parseShortcut(value) {
+        const parts = String(value || DEFAULT_CONFIG.floatingPanel.shortcut)
+            .split('+')
+            .map(part => part.trim())
+            .filter(Boolean);
+        const code = parts.pop() || DEFAULT_CONFIG.floatingPanel.shortcut;
+        return {
+            code,
+            ctrl: parts.includes('Ctrl'),
+            shift: parts.includes('Shift'),
+            alt: parts.includes('Alt'),
+            meta: parts.includes('Meta')
+        };
+    }
+
+    function shortcutFromEvent(event) {
+        const code = String(event.code || '');
+        if (!code || code === 'Unidentified') {
+            return '';
+        }
+        const parts = [];
+        if (event.ctrlKey && !code.startsWith('Control')) {
+            parts.push('Ctrl');
+        }
+        if (event.shiftKey && !code.startsWith('Shift')) {
+            parts.push('Shift');
+        }
+        if (event.altKey && !code.startsWith('Alt')) {
+            parts.push('Alt');
+        }
+        if (event.metaKey && !code.startsWith('Meta')) {
+            parts.push('Meta');
+        }
+        parts.push(code);
+        return parts.join('+');
+    }
+
+    function isModifierCode(code) {
+        return /^(Control|Shift|Alt|Meta)(Left|Right)$/.test(String(code || ''));
+    }
+
+    function formatShortcut(value) {
+        const shortcut = parseShortcut(value);
+        const labels = {
+            ControlLeft: '左 Ctrl',
+            ControlRight: '右 Ctrl',
+            ShiftLeft: '左 Shift',
+            ShiftRight: '右 Shift',
+            AltLeft: '左 Alt',
+            AltRight: '右 Alt',
+            MetaLeft: '左 Win',
+            MetaRight: '右 Win',
+            Space: '空格',
+            Enter: 'Enter',
+            Escape: 'Esc',
+            Tab: 'Tab',
+            Backspace: 'Backspace',
+            Delete: 'Delete',
+            Insert: 'Insert',
+            Home: 'Home',
+            End: 'End',
+            PageUp: 'PageUp',
+            PageDown: 'PageDown',
+            ArrowUp: '↑',
+            ArrowDown: '↓',
+            ArrowLeft: '←',
+            ArrowRight: '→'
+        };
+        let codeLabel = labels[shortcut.code] || shortcut.code;
+        if (/^Key[A-Z]$/.test(shortcut.code)) {
+            codeLabel = shortcut.code.slice(3);
+        } else if (/^Digit\d$/.test(shortcut.code)) {
+            codeLabel = shortcut.code.slice(5);
+        }
+        return [
+            shortcut.ctrl && 'Ctrl',
+            shortcut.shift && 'Shift',
+            shortcut.alt && 'Alt',
+            shortcut.meta && 'Win',
+            codeLabel
+        ].filter(Boolean).join(' + ');
+    }
+
+    function matchesShortcut(event, value) {
+        const shortcut = parseShortcut(value);
+        if (event.code !== shortcut.code) {
+            return false;
+        }
+        return (shortcut.code.startsWith('Control') || event.ctrlKey === shortcut.ctrl) &&
+            (shortcut.code.startsWith('Shift') || event.shiftKey === shortcut.shift) &&
+            (shortcut.code.startsWith('Alt') || event.altKey === shortcut.alt) &&
+            (shortcut.code.startsWith('Meta') || event.metaKey === shortcut.meta);
+    }
+
     function applyItemOptions(item, options = {}) {
         if (options.requires) {
             const requirements = Array.isArray(options.requires) ? options.requires : [options.requires];
             item.dataset.requires = requirements.join('|');
+        }
+        if (options.inverted) {
+            item.dataset.inverted = 'true';
         }
         const childLevel = Number(options.childLevel) || (options.child ? 1 : 0);
         if (childLevel > 0) {
@@ -802,6 +961,24 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             control.append(createElement('span', 'qqnt-toolbox-number-suffix', options.suffix));
         }
         item.append(itemMain, control);
+        return item;
+    }
+
+    function createShortcutItem(name, meta, configPath, options = {}) {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.configPath = configPath;
+        item.dataset.shortcutItem = 'true';
+        applyItemOptions(item, options);
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(createElement('div', 'qqnt-toolbox-item-name', name));
+        if (meta) {
+            itemMain.append(createElement('div', 'qqnt-toolbox-item-meta', meta));
+        }
+        const button = createElement('button', 'qqnt-toolbox-shortcut-button');
+        button.type = 'button';
+        button.dataset.configPath = configPath;
+        button.setAttribute('aria-label', name);
+        item.append(itemMain, button);
         return item;
     }
 
@@ -933,8 +1110,25 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
     }
 
-    function createPanel() {
-        let panel = document.getElementById(PANEL_ID);
+    function getConfigRoots() {
+        return [document.getElementById(PANEL_ID), document.getElementById(SETTINGS_ID)].filter(Boolean);
+    }
+
+    function refreshConfigViews() {
+        for (const root of getConfigRoots()) {
+            renderSimplifySections(root);
+            updateConfigUi(root);
+        }
+        const panel = document.getElementById(PANEL_ID);
+        if (panel && !panel.hidden && !isConfigEnabled('floatingPanel.enabled')) {
+            setVisible(panel, false);
+        }
+    }
+
+    function createPanel(options = {}) {
+        const settingsMode = options.settings === true;
+        const rootId = settingsMode ? SETTINGS_ID : PANEL_ID;
+        let panel = document.getElementById(rootId);
         if (panel) {
             renderSimplifySections(panel);
             updateConfigUi(panel);
@@ -943,8 +1137,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         injectStyle();
 
         panel = document.createElement('div');
-        panel.id = PANEL_ID;
-        panel.hidden = true;
+        panel.id = rootId;
+        panel.hidden = !settingsMode;
+        if (settingsMode) {
+            panel.className = 'qqnt-toolbox-settings-root';
+        }
 
         const titlebar = createElement('div', 'qqnt-toolbox-titlebar');
         titlebar.append(
@@ -960,6 +1157,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             createCategoryTitle(text('功能')),
             createSection('interface', text('界面调整'), [
                 createSwitchItem(text('图片查看器优化'), text('点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
+                createSwitchItem(text('图片自动二维码识别'), text('关闭可避免加载本地识码模型'), 'interfaceTweaks.disableImageQrScan', {
+                    inverted: true
+                }),
+                createSwitchItem(text('图片预览仅保留一个窗口'), text('打开新图片时关闭旧预览'), 'interfaceTweaks.singleImageViewer'),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
                 createSwitchItem(text('阻止消息列表拖拽'), text('防止拖出独立聊天窗口'), 'interfaceTweaks.preventRecentContactDrag'),
@@ -1067,25 +1268,57 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'entertainment.autoPokeBack',
                     child: true
                 }),
-                createSwitchItem(text('双击头像拍一拍'), text('替代双击头像打开私聊'), 'entertainment.doubleClickAvatarPoke')
+                createSwitchItem(text('双击头像拍一拍'), text('替代双击头像打开私聊'), 'entertainment.doubleClickAvatarPoke'),
+                createSwitchItem(text('右键头像戳一戳'), text('控制头像右键菜单中的戳一戳入口'), 'entertainment.rightClickAvatarPoke')
             ]),
             createCategoryTitle(text('精简')),
             createSection('simplifySidebar', text('侧边栏'), []),
             createSection('simplifyTop', text('顶部功能栏'), []),
             createSection('simplifyChat', text('聊天功能栏'), []),
             createCategoryTitle(text('其他')),
+            createSection('floatingPanel', text('悬浮窗'), [
+                createSwitchItem(text('启用悬浮窗'), text('允许通过快捷键打开工具箱'), 'floatingPanel.enabled'),
+                createShortcutItem(text('唤出快捷键'), text('点击后按下新的快捷键'), 'floatingPanel.shortcut', {
+                    requires: 'floatingPanel.enabled',
+                    child: true
+                })
+            ]),
             createSection('debug', text('调试功能'), [
                 createSwitchItem(text('调试日志'), text('仅开启后输出诊断信息'), 'debug.enabled')
             ])
         );
-        panel.append(titlebar, body);
-
-        document.body.appendChild(panel);
+        panel.querySelectorAll('.qqnt-toolbox-section[data-group-id]').forEach(section => {
+            const content = section.querySelector('.qqnt-toolbox-section-content');
+            const header = section.querySelector('.qqnt-toolbox-section-header');
+            const contentId = `${rootId}-${section.dataset.groupId}`;
+            if (content) {
+                content.id = contentId;
+            }
+            header?.setAttribute('aria-controls', contentId);
+        });
+        if (settingsMode) {
+            const meta = createElement('div', 'qqnt-toolbox-settings-meta');
+            const plugin = Object.values(window.LiteLoader?.plugins || {})
+                .find(item => item?.manifest?.slug === 'qqnt_toolbox');
+            meta.append(
+                createElement('span', 'qqnt-toolbox-settings-name', 'QQNT Toolbox'),
+                createElement('span', 'qqnt-toolbox-settings-version', `v${plugin?.manifest?.version || '0.6.3'}`)
+            );
+            panel.append(meta, body);
+            options.mount?.appendChild(panel);
+        } else {
+            panel.append(titlebar, body);
+            document.body.appendChild(panel);
+        }
         renderSimplifySections(panel);
-        installPanelEvents(panel);
         installGroupEvents(panel);
         installFeatureEvents(panel);
         updateConfigUi(panel);
+
+        if (settingsMode) {
+            return panel;
+        }
+        installPanelEvents(panel);
 
         const state = getPanelState();
         requestAnimationFrame(() => {
@@ -1118,7 +1351,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (!switchButton) {
                 return;
             }
-            const enabled = isFeatureEnabled(configPath);
+            const configEnabled = isFeatureEnabled(configPath);
+            const enabled = item.dataset.inverted === 'true' ? !configEnabled : configEnabled;
             switchButton.dataset.checked = String(enabled);
             switchButton.setAttribute('aria-checked', String(enabled));
             switchButton.title = enabled ? text('已开启') : text('已关闭');
@@ -1152,6 +1386,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             input.value = String(Number.isFinite(value) ? clamp(value, Number(input.min), Number(input.max)) : fallback);
             input.disabled = !areRequirementsEnabled(item.dataset.requires) || (!configReady && Boolean(getBridge()));
         });
+        panel.querySelectorAll('.qqnt-toolbox-item[data-shortcut-item="true"]').forEach(item => {
+            const button = item.querySelector('.qqnt-toolbox-shortcut-button[data-config-path]');
+            if (!button) {
+                return;
+            }
+            const disabled = !areRequirementsEnabled(item.dataset.requires) || (!configReady && Boolean(getBridge()));
+            item.dataset.disabled = String(disabled);
+            button.disabled = disabled;
+            if (button.dataset.capturing !== 'true') {
+                button.textContent = formatShortcut(getByPath(currentConfig, button.dataset.configPath));
+            }
+        });
         updateGroupUi(panel);
     }
 
@@ -1159,7 +1405,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const nextConfig = clonePlain(currentConfig);
         setByPath(nextConfig, configPath, value);
         currentConfig = mergeConfig(nextConfig);
-        updateConfigUi();
+        refreshConfigViews();
         scheduleRepeatEntrypointRefresh();
         scheduleInterfaceTweaksRefresh();
         const bridge = getBridge();
@@ -1171,8 +1417,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
-            renderSimplifySections();
-            updateConfigUi();
+            refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
         }
@@ -1182,8 +1427,80 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return setConfigValue(configPath, enabled);
     }
 
+    function stopShortcutCapture(value = '') {
+        if (!activeShortcutCapture) {
+            return;
+        }
+        const capture = activeShortcutCapture;
+        activeShortcutCapture = null;
+        window.removeEventListener('keydown', capture.onKeyDown, true);
+        window.removeEventListener('keyup', capture.onKeyUp, true);
+        window.removeEventListener('blur', capture.onBlur, true);
+        capture.button.dataset.capturing = 'false';
+        if (value) {
+            setConfigValue(capture.button.dataset.configPath, value);
+        } else {
+            refreshConfigViews();
+        }
+    }
+
+    function beginShortcutCapture(button) {
+        stopShortcutCapture();
+        let modifierCandidate = '';
+        const consumeEvent = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        };
+        const onKeyDown = event => {
+            consumeEvent(event);
+            if (event.code === 'Escape') {
+                stopShortcutCapture();
+                return;
+            }
+            if (event.repeat) {
+                return;
+            }
+            const value = shortcutFromEvent(event);
+            if (!value) {
+                return;
+            }
+            if (isModifierCode(event.code)) {
+                modifierCandidate = value;
+                return;
+            }
+            stopShortcutCapture(value);
+        };
+        const onKeyUp = event => {
+            consumeEvent(event);
+            if (!modifierCandidate || !isModifierCode(event.code)) {
+                return;
+            }
+            if (!event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+                stopShortcutCapture(modifierCandidate);
+            }
+        };
+        const onBlur = () => stopShortcutCapture();
+        activeShortcutCapture = { button, onKeyDown, onKeyUp, onBlur };
+        button.dataset.capturing = 'true';
+        button.textContent = text('请按下快捷键');
+        button.focus();
+        window.addEventListener('keydown', onKeyDown, true);
+        window.addEventListener('keyup', onKeyUp, true);
+        window.addEventListener('blur', onBlur, true);
+    }
+
     function installFeatureEvents(panel) {
         panel.addEventListener('click', event => {
+            const shortcutButton = event.target.closest?.('.qqnt-toolbox-shortcut-button[data-config-path]');
+            if (shortcutButton && panel.contains(shortcutButton)) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!shortcutButton.disabled) {
+                    beginShortcutCapture(shortcutButton);
+                }
+                return;
+            }
             const actionButton = event.target.closest?.('.qqnt-toolbox-action[data-action]');
             if (actionButton && panel.contains(actionButton)) {
                 event.preventDefault();
@@ -1202,7 +1519,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }
             const configPath = switchButton.dataset.configPath;
             const nextChecked = switchButton.dataset.checked !== 'true';
-            setConfigBoolean(configPath, nextChecked);
+            const item = switchButton.closest('.qqnt-toolbox-item');
+            setConfigBoolean(configPath, item?.dataset.inverted === 'true' ? !nextChecked : nextChecked);
         });
         panel.addEventListener('change', event => {
             const numberInput = event.target.closest?.('.qqnt-toolbox-number-input[data-config-path]');
@@ -1278,11 +1596,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const groupId = header.dataset.groupId;
             setPanelGroupExpanded(groupId, !isPanelGroupExpanded(groupId));
             updateGroupUi(panel);
-            requestAnimationFrame(() => {
-                const rect = panel.getBoundingClientRect();
-                const position = applyPosition(panel, rect.left, rect.top);
-                setPanelState(position);
-            });
+            if (panel.id === PANEL_ID) {
+                requestAnimationFrame(() => {
+                    const rect = panel.getBoundingClientRect();
+                    const position = applyPosition(panel, rect.left, rect.top);
+                    setPanelState(position);
+                });
+            }
         });
     }
 
@@ -1404,10 +1724,23 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return values.some(value => normalizedLabels.some(label => value === label || value.includes(label)));
     }
 
+    function getLabeledControlTarget(element) {
+        const menuItem = element.closest?.('.q-context-menu-item, [role="menuitem"], .func-menu__item_wrap');
+        if (menuItem) {
+            return menuItem;
+        }
+        let contextItem = element.closest?.('[class*="context-menu-item"]');
+        while (contextItem?.parentElement?.matches?.('[class*="context-menu-item"]')) {
+            contextItem = contextItem.parentElement;
+        }
+        return contextItem || element.closest?.('button') || element;
+    }
+
     function setLabeledControlsHidden(labels, hidden) {
-        const panel = document.getElementById(PANEL_ID);
-        panel?.querySelectorAll('[data-qqnt-toolbox-hidden="true"]')
-            .forEach(element => setToolboxHidden(element, false));
+        for (const root of getConfigRoots()) {
+            root.querySelectorAll('[data-qqnt-toolbox-hidden="true"]')
+                .forEach(element => setToolboxHidden(element, false));
+        }
 
         const selector = [
             '.func-menu__item_wrap',
@@ -1420,16 +1753,23 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         ].join(',');
         const targets = new Set();
         document.querySelectorAll(selector).forEach(element => {
-            if (element.closest(`#${PANEL_ID}`)) {
+            if (element.closest(`#${PANEL_ID}, #${SETTINGS_ID}`)) {
                 return;
             }
             if (elementMatchesAnyLabel(element, labels)) {
-                targets.add(element.closest(
-                    '.func-menu__item_wrap, .q-context-menu-item, [class*="context-menu-item"], [role="menuitem"], button'
-                ) || element);
+                targets.add(getLabeledControlTarget(element));
             }
         });
-        targets.forEach(element => setToolboxHidden(element, hidden));
+        const deepestTargets = Array.from(targets).filter(target =>
+            !Array.from(targets).some(other => other !== target && target.contains(other))
+        );
+        deepestTargets.forEach(element => setToolboxHidden(element, hidden));
+    }
+
+    function normalizeSimplifyItemName(value) {
+        return normalizeText(value)
+            .replace(/\s*[（(]?(?:99\+|\d+)\s*(?:条未读(?:消息)?|条新消息|个未读(?:消息)?)[）)]?\s*$/u, '')
+            .trim();
     }
 
     function getSimplifyItemName(element) {
@@ -1442,13 +1782,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         ].filter(Boolean);
         for (const candidate of candidates) {
             for (const attribute of ['aria-label', 'title', 'data-title', 'data-text']) {
-                const value = normalizeText(candidate.getAttribute?.(attribute));
+                const value = normalizeSimplifyItemName(candidate.getAttribute?.(attribute));
                 if (value) {
                     return value;
                 }
             }
         }
-        return normalizeText(element.textContent);
+        return normalizeSimplifyItemName(element.textContent);
     }
 
     function getSimplifyItemId(element, prefix, name) {
@@ -1470,7 +1810,23 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function mergeSimplifyItemList(currentItems, discoveredItems) {
-        const current = Array.isArray(currentItems) ? currentItems : [];
+        const normalizedCurrent = new Map();
+        for (const source of Array.isArray(currentItems) ? currentItems : []) {
+            const name = normalizeSimplifyItemName(source?.name) || normalizeSimplifyItemName(source?.id);
+            if (!name) {
+                continue;
+            }
+            const rawId = String(source?.id ?? '');
+            const prefix = rawId.match(/^(sidebar-top|sidebar-bottom|top-func|chat-func):/)?.[1];
+            const id = prefix ? `${prefix}:${compactText(name)}` : rawId;
+            const previous = normalizedCurrent.get(id);
+            normalizedCurrent.set(id, {
+                id,
+                name,
+                enabled: (previous?.enabled !== false) && source?.enabled !== false
+            });
+        }
+        const current = Array.from(normalizedCurrent.values());
         const byId = new Map(current.map(item => [String(item?.id), item]));
         const byName = new Map(current.map(item => [compactText(item?.name), item]));
         const next = [];
@@ -1512,8 +1868,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }
             try {
                 currentConfig = mergeConfig(await bridge.setConfig(clonePlain(currentConfig)));
-                renderSimplifySections();
-                updateConfigUi();
+                refreshConfigViews();
             } catch {
             }
         }, 180);
@@ -1544,8 +1899,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         currentConfig.sideBar = next.sideBar;
         currentConfig.topFuncBar = next.topFuncBar;
         currentConfig.chatFuncBar = next.chatFuncBar;
-        renderSimplifySections();
-        updateConfigUi();
+        refreshConfigViews();
         scheduleSimplifyConfigSave();
     }
 
@@ -1628,7 +1982,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         document.body.classList.toggle('qqnt-toolbox-hide-update', isConfigEnabled('interfaceTweaks.hiddenUpdateBtnAndNotice'));
         document.body.classList.toggle('qqnt-toolbox-remove-vip-color', isConfigEnabled('interfaceTweaks.removeVipColor'));
 
-        setSelectorHidden('.user-profile-card__widgets .weather-widget', isConfigEnabled('interfaceTweaks.hiddenWeatherBtn'));
+        setSelectorHidden('.weather-widget', isConfigEnabled('interfaceTweaks.hiddenWeatherBtn'));
         setSelectorHidden('.window-control-area .narrow-toggler', isConfigEnabled('interfaceTweaks.hiddenClassicBtn'));
         setLabeledControlsHidden([text('\u9501\u5b9a')], isConfigEnabled('interfaceTweaks.hiddenLockBtn'));
         setLabeledControlsHidden([text('\u9000\u51fa\u8d26\u53f7'), text('\u9000\u51fa\u767b\u5f55')], isConfigEnabled('interfaceTweaks.hiddenLogoutBtn'));
@@ -1931,14 +2285,20 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     function getMessageBadgeTarget(messageElement, record) {
         const wrapper = messageElement.querySelector('.message-content__wrapper');
+        const pttBubble = wrapper?.querySelector(
+            '.ptt-message__container.ptt-message > .ptt-message__inner > .ptt-element'
+        );
+        if (pttBubble) {
+            return pttBubble;
+        }
         const elementTypes = new Set((Array.isArray(record?.elements) ? record.elements : [])
             .map(element => Number(element?.elementType)));
         const selectors = [];
         if (elementTypes.has(4)) {
-            selectors.push('.ptt-message__container.ptt-message', '.ptt-message__container');
+            selectors.push('.ptt-message__container');
         }
         if (elementTypes.has(2)) {
-            selectors.push('.mix-message__container--pic', '.message-content.mix-message__inner .pic-element', '.pic-element');
+            selectors.push('.pic-element', '.message-content.mix-message__inner .pic-element', '.mix-message__container--pic');
         }
         if (elementTypes.has(5)) {
             selectors.push('.video-element', '[class*="video-message"]');
@@ -1959,6 +2319,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }
         }
         return wrapper || messageElement;
+    }
+
+    function getMessageLayoutHost(messageElement) {
+        return messageElement.querySelector('.message-container') ||
+            messageElement.querySelector('.message-content__wrapper') ||
+            messageElement;
     }
 
     function positionMessageBadge(badge, host, target, slot) {
@@ -2014,9 +2380,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         const target = getMessageBadgeTarget(messageElement, record);
-        const host = messageElement.querySelector('.message-container') ||
-            messageElement.querySelector('.message-content__wrapper') ||
-            messageElement;
+        const host = getMessageLayoutHost(messageElement);
         anchors.forEach(anchor => {
             if (anchor !== host) {
                 anchor.removeAttribute('data-qqnt-toolbox-status-anchor');
@@ -2181,6 +2545,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return /^\d+$/.test(content) && content !== '0' ? content : '';
     }
 
+    function supportsNativeNudge() {
+        const actual = (String(window.LiteLoader?.package?.qqnt?.version || '').match(/\d+/g) || [])
+            .slice(0, 3)
+            .map(Number);
+        const required = [9, 9, 32];
+        if (actual.length < required.length) {
+            return false;
+        }
+        for (let index = 0; index < required.length; index++) {
+            if (actual[index] !== required[index]) {
+                return actual[index] > required[index];
+            }
+        }
+        return true;
+    }
+
     function findSelfUinFromPage() {
         const paths = [
             'proxy.selfUin',
@@ -2232,11 +2612,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function getPokeAvatarFromEvent(event) {
         const path = event?.composedPath?.() || [event?.target];
         for (const item of path) {
-            if (!(item instanceof Element) ||
-                !item.matches('.avatar-span .avatar, .avatar.message-container__avatar')) {
+            if (!(item instanceof Element) || !item.matches([
+                '.avatar-span .avatar',
+                '.avatar.message-container__avatar',
+                '[class*="avatar" i]',
+                '[data-testid*="avatar" i]',
+                '[data-type*="avatar" i]'
+            ].join(','))) {
                 continue;
             }
-            if (getMessageElementFromElement(item)) {
+            if (findMessageRecordFromElement(item)) {
                 return item;
             }
         }
@@ -2248,10 +2633,20 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const aioData = getCurrentAioData() || {};
         const header = aioData.header || {};
         const chatType = Number(record?.chatType || aioData.chatType || header.chatType || 0);
+        const peerUid = normalizeText(
+            record?.peerUid ||
+            record?.peer?.peerUid ||
+            aioData.peerUid ||
+            aioData.peer?.peerUid ||
+            header.peerUid ||
+            header.uid
+        );
         const peerUin = [
             record?.peerUin,
+            record?.peer?.peerUin,
             record?.peerUid,
             aioData.peerUin,
+            aioData.peer?.peerUin,
             aioData.peerUid,
             header.uin,
             header.peerUin,
@@ -2260,10 +2655,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         ].map(normalizeUin).find(Boolean) || '';
         if (chatType === 2) {
             const targetUin = normalizeUin(record?.senderUin || record?.sender?.uin);
-            return targetUin && peerUin ? { chatType, targetUin, groupUin: peerUin } : null;
+            const groupUin = peerUin || normalizeUin(peerUid);
+            return targetUin && groupUin ? { chatType, targetUin, groupUin, peerUid: groupUin } : null;
         }
         if (chatType === 1) {
-            return peerUin ? { chatType, targetUin: peerUin, groupUin: '' } : null;
+            return peerUin ? { chatType, targetUin: peerUin, groupUin: '', peerUid } : null;
         }
         return null;
     }
@@ -2303,10 +2699,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         animation.addEventListener('cancel', clearAnimation, { once: true });
     }
 
-    function sendAvatarPoke(payload, avatar) {
+    function sendAvatarPoke(payload, avatar, source = 'double-click') {
         const request = {
             ...(payload || { chatType: 0, targetUin: '', groupUin: '' }),
-            selfUin: registerPokeAccountFromPage(true)
+            selfUin: registerPokeAccountFromPage(true),
+            source
         };
         Promise.resolve(getBridge()?.sendPoke?.(request)).then(result => {
             if (result?.ok === true) {
@@ -2360,10 +2757,29 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
     }
 
+    function handleAvatarDoubleClick(event) {
+        if (!isFeatureEnabled('entertainment.doubleClickAvatarPoke') || event.button !== 0) {
+            return;
+        }
+        if (performance.now() <= suppressAvatarClicksUntil) {
+            stopAvatarEvent(event);
+            return;
+        }
+        const avatar = getPokeAvatarFromEvent(event);
+        const payload = avatar && getPokePayload(avatar);
+        if (!payload) {
+            return;
+        }
+        stopAvatarEvent(event);
+        suppressAvatarClicksUntil = performance.now() + 650;
+        pendingAvatarPoke = null;
+        sendAvatarPoke(payload, avatar);
+    }
+
     function installPokeInteractions() {
         document.addEventListener('pointerdown', handleAvatarPointerDown, true);
         document.addEventListener('click', suppressAvatarClick, true);
-        document.addEventListener('dblclick', suppressAvatarClick, true);
+        document.addEventListener('dblclick', handleAvatarDoubleClick, true);
         registerPokeAccountFromPage(true);
     }
 
@@ -2389,41 +2805,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         };
     }
 
-    function cloneForIpc(value, depth = 0, seen = new WeakMap()) {
-        if (value === null || value === undefined || depth > 8) {
-            return value;
-        }
-        if (typeof value !== 'object') {
-            return value;
-        }
-        if (ArrayBuffer.isView(value)) {
-            return Array.from(value);
-        }
-        if (value instanceof Map) {
-            return Object.fromEntries(Array.from(value, ([key, item]) => [key, cloneForIpc(item, depth + 1, seen)]));
-        }
-        if (seen.has(value)) {
-            return seen.get(value);
-        }
-        if (Array.isArray(value)) {
-            const array = [];
-            seen.set(value, array);
-            for (const item of value) {
-                array.push(cloneForIpc(item, depth + 1, seen));
-            }
-            return array;
-        }
-        const object = {};
-        seen.set(value, object);
-        for (const [key, item] of Object.entries(value)) {
-            if (typeof item === 'function') {
-                continue;
-            }
-            object[key] = cloneForIpc(item, depth + 1, seen);
-        }
-        return object;
-    }
-
     function buildRepeatPayload(record) {
         const msgId = normalizeText(record?.msgId);
         const peer = getPeerFromRecord(record);
@@ -2432,17 +2813,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         return {
             msgId,
-            peer,
-            record: {
-                msgId,
-                msgSeq: normalizeText(record?.msgSeq),
-                msgRandom: normalizeText(record?.msgRandom),
-                chatType: Number(record?.chatType || peer.chatType),
-                peerUid: normalizeText(record?.peerUid || peer.peerUid),
-                peerUin: normalizeText(record?.peerUin),
-                guildId: normalizeText(record?.guildId || peer.guildId),
-                elements: cloneForIpc(record?.elements || [])
-            }
+            peer
         };
     }
 
@@ -2531,7 +2902,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function removeRepeatSlot(slot) {
+        const host = slot.parentElement;
         slot.remove();
+        if (host && !host.querySelector('.qqnt-toolbox-repeat-slot')) {
+            host.removeAttribute('data-qqnt-toolbox-repeat-anchor');
+        }
     }
 
     function removeSideRepeatEntrypoints(root = document) {
@@ -2550,12 +2925,47 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return document.querySelector(`.message-content__wrapper > ${selector}`) || document.querySelector(`.message ${selector}`) || document.querySelector(selector);
     }
 
+    function createQqPlusOneIcon() {
+        const namespace = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(namespace, 'svg');
+        for (const [name, value] of Object.entries({
+            width: '23',
+            height: '23',
+            viewBox: '0 0 26 26',
+            fill: 'none'
+        })) {
+            svg.setAttribute(name, value);
+        }
+        const circle = document.createElementNS(namespace, 'circle');
+        for (const [name, value] of Object.entries({
+            cx: '14',
+            cy: '14',
+            r: '11.25',
+            stroke: 'var(--brand_standard)',
+            'stroke-width': '1.5'
+        })) {
+            circle.setAttribute(name, value);
+        }
+        const paths = [
+            'M6.81348 14.7051V13.3447H14.2168V14.7051H6.81348ZM9.83496 17.7402V10.3096H11.1953V17.7402H9.83496Z',
+            'M17.4727 18V9.71484H17.3633L14.8818 11.4854V9.98145L17.4795 8.13574H19.0107V18H17.4727Z'
+        ];
+        svg.append(circle, ...paths.map(data => {
+            const path = document.createElementNS(namespace, 'path');
+            path.setAttribute('d', data);
+            path.setAttribute('fill', 'var(--brand_standard)');
+            return path;
+        }));
+        return svg;
+    }
+
     function createNativePlusOneButton() {
         const template = getNativePlusOneTemplate();
         const button = template?.cloneNode(true) || document.createElement('div');
+        const icon = template?.querySelector('svg')?.cloneNode(true) || createQqPlusOneIcon();
         button.removeAttribute('id');
         button.removeAttribute('data-event');
-        button.textContent = '';
+        button.replaceChildren(icon);
         button.classList.add('plus-one-btn', 'no-copy');
         button.classList.remove('qqnt-toolbox-repeat-slot', 'qqnt-toolbox-repeat-menu-plus-one');
         if (button instanceof HTMLButtonElement) {
@@ -2577,6 +2987,32 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         button.setAttribute('tabindex', '-1');
         repeatButtonRecords.set(button, record);
         return button;
+    }
+
+    function positionSideRepeatButton(button, messageElement, record) {
+        const target = getMessageBadgeTarget(messageElement, record);
+        const host = getMessageLayoutHost(messageElement);
+        const hostRect = host.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const buttonWidth = button.getBoundingClientRect().width || 26;
+        if (!hostRect.width || !hostRect.height || !targetRect.width || !targetRect.height) {
+            return;
+        }
+        const avatar = messageElement.querySelector('.avatar-span') ||
+            messageElement.querySelector('.avatar.message-container__avatar');
+        const avatarRect = avatar?.getBoundingClientRect();
+        const outgoing = avatarRect?.width
+            ? avatarRect.left + avatarRect.width / 2 > targetRect.left + targetRect.width / 2
+            : Number(record?.sendType) === 1;
+        const gap = 8;
+        const left = outgoing
+            ? targetRect.left - hostRect.left - buttonWidth - gap
+            : targetRect.right - hostRect.left + gap;
+        button.style.top = `${Math.round(targetRect.top - hostRect.top + targetRect.height / 2)}px`;
+        button.style.left = `${Math.round(left)}px`;
+        button.style.right = 'auto';
+        button.style.bottom = 'auto';
+        host.dataset.qqntToolboxRepeatAnchor = 'true';
     }
 
     function getRepeatPlusOneFromEvent(event) {
@@ -2640,10 +3076,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         handleRepeatButtonEvent(target.button, target.record, event);
     }
 
+    function handleRepeatMessagePointerOver(event) {
+        if (!shouldUseSideRepeat()) {
+            return;
+        }
+        const target = event.target instanceof Element ? event.target : null;
+        const messageElement = target && getMessageElementFromElement(target);
+        const record = messageElement && findMessageRecordFromElement(messageElement);
+        if (messageElement && isRepeatableRecord(record)) {
+            ensureSideRepeatEntrypoint(messageElement, record);
+        }
+    }
+
     function ensureSideRepeatEntrypoint(messageElement, record) {
         const msgId = normalizeText(record?.msgId);
         const wrapper = messageElement.querySelector('.message-content__wrapper');
-        const existing = wrapper?.querySelector(':scope > .qqnt-toolbox-repeat-slot');
+        const existing = messageElement.querySelector('.qqnt-toolbox-repeat-slot');
         if (!shouldUseSideRepeat() || !isRepeatableRecord(record)) {
             if (existing) {
                 removeRepeatSlot(existing);
@@ -2652,6 +3100,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         if (existing?.dataset.msgId === msgId) {
             repeatButtonRecords.set(existing, record);
+            positionSideRepeatButton(existing, messageElement, record);
             return;
         }
         if (existing) {
@@ -2664,7 +3113,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (nativePlusOne) {
             return;
         }
-        wrapper.append(createSideRepeatButton(record));
+        const button = createSideRepeatButton(record);
+        getMessageLayoutHost(messageElement).append(button);
+        positionSideRepeatButton(button, messageElement, record);
     }
 
     function refreshRepeatEntrypoints() {
@@ -2709,7 +3160,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         repeatObserver = new MutationObserver(scheduleRepeatEntrypointRefresh);
         repeatObserver.observe(document.body, {
             childList: true,
-            subtree: true
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class']
         });
         scheduleRepeatEntrypointRefresh();
     }
@@ -2744,7 +3197,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const seen = new Set();
         return candidates
             .filter(item => {
-                if (!item || seen.has(item) || item.classList?.contains('qqnt-toolbox-repeat-menu-item')) {
+                if (!item || seen.has(item) ||
+                    item.classList?.contains('qqnt-toolbox-repeat-menu-item') ||
+                    item.classList?.contains('qqnt-toolbox-poke-menu-item')) {
                     return false;
                 }
                 seen.add(item);
@@ -2810,6 +3265,91 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         icon.style.webkitMaskImage = 'none';
     }
 
+    function setNativeMenuItemPokeIcon(item) {
+        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
+        if (!icon) {
+            return;
+        }
+        icon.replaceChildren();
+        icon.style.background = 'transparent';
+        icon.style.backgroundImage = 'none';
+        icon.style.maskImage = 'none';
+        icon.style.webkitMaskImage = 'none';
+        icon.style.visibility = 'hidden';
+    }
+
+    function createPokeMenuItem(menu, payload, avatar) {
+        const template = getNativeMenuItemElements(menu)[0];
+        const item = template?.cloneNode(true) || document.createElement('div');
+        item.classList?.add('qqnt-toolbox-poke-menu-item');
+        item.removeAttribute('id');
+        item.setAttribute('role', item.getAttribute('role') || 'menuitem');
+        item.setAttribute('tabindex', '-1');
+        setNativeMenuItemLabel(item, text('\u6233\u4e00\u6233'));
+        setNativeMenuItemPokeIcon(item);
+        const stop = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        };
+        item.addEventListener('pointerdown', stop, true);
+        item.addEventListener('mousedown', stop, true);
+        item.addEventListener('click', event => {
+            stop(event);
+            sendAvatarPoke(payload, avatar, 'context-menu');
+            menu.remove();
+        }, true);
+        return item;
+    }
+
+    function syncPokeMenuItem(point, payload, avatar, menu = null) {
+        menu = menu || findNativeContextMenuNear(point);
+        if (!menu) {
+            return false;
+        }
+        const enabled = isFeatureEnabled('entertainment.rightClickAvatarPoke');
+        const nativeItems = getNativeMenuItemElements(menu)
+            .filter(item => compactText(item).includes('\u6233\u4e00\u6233'));
+        if (nativeItems.length) {
+            nativeItems.forEach(item => setToolboxHidden(item, !enabled));
+            return true;
+        }
+        if (!enabled || supportsNativeNudge()) {
+            return false;
+        }
+        if (menu.querySelector('.qqnt-toolbox-poke-menu-item')) {
+            return true;
+        }
+        const items = getNativeMenuItemElements(menu);
+        const pokeItem = createPokeMenuItem(menu, payload, avatar);
+        if (items[0]?.parentElement) {
+            items[0].parentElement.insertBefore(pokeItem, items[0]);
+        } else {
+            menu.insertBefore(pokeItem, menu.firstChild);
+        }
+        return true;
+    }
+
+    function schedulePokeContextMenu(event, payload, avatar, requestId) {
+        const point = { x: event.clientX, y: event.clientY };
+        const run = () => requestId === pokeMenuRequestId && syncPokeMenuItem(point, payload, avatar);
+        [24, 72, 160, 300, 480].forEach(delay => setTimeout(run, delay));
+        const observer = new MutationObserver(() => {
+            if (requestId !== pokeMenuRequestId) {
+                observer.disconnect();
+                return;
+            }
+            if (run()) {
+                observer.disconnect();
+            }
+        });
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+        setTimeout(() => observer.disconnect(), 900);
+    }
+
     function createRepeatMenuItem(menu, record) {
         const template = getNativeMenuItemElements(menu)[0];
         const item = template?.cloneNode(true) || document.createElement('div');
@@ -2869,8 +3409,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         setTimeout(() => observer.disconnect(), 900);
     }
 
-    function isRightCtrl(event) {
-        return event.code === 'ControlRight' || (event.key === 'Control' && event.location === KeyboardEvent.DOM_KEY_LOCATION_RIGHT);
+    function isPanelShortcut(event) {
+        return isConfigEnabled('floatingPanel.enabled') &&
+            matchesShortcut(event, getByPath(currentConfig, 'floatingPanel.shortcut'));
     }
 
     async function loadConfig() {
@@ -2884,8 +3425,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
-            renderSimplifySections();
-            updateConfigUi();
+            refreshConfigViews();
+            refreshRepeatEntrypoints();
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
         }
@@ -2899,15 +3440,27 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         bridge.onConfigChanged(config => {
             currentConfig = mergeConfig(config);
             configReady = true;
-            renderSimplifySections();
-            updateConfigUi();
+            refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
         });
     }
 
+    async function initSettingWindow(view) {
+        if (!(view instanceof HTMLElement)) {
+            return;
+        }
+        await Promise.all([loadConfig(), injectSettingsStyle()]);
+        stopShortcutCapture();
+        document.getElementById(SETTINGS_ID)?.remove();
+        createPanel({ settings: true, mount: view });
+        refreshConfigViews();
+    }
+
+    initializeToolboxSettings = initSettingWindow;
+
     document.addEventListener('keydown', event => {
-        if (!isRightCtrl(event) || event.repeat) {
+        if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {
             return;
         }
         event.preventDefault();
@@ -2916,7 +3469,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }, true);
 
     document.addEventListener('keyup', event => {
-        if (!isRightCtrl(event)) {
+        if (!configReady || !isPanelShortcut(event)) {
             return;
         }
         event.stopPropagation();
@@ -2925,6 +3478,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('pointerdown', handleRepeatPlusOneEvent, true);
     document.addEventListener('mousedown', handleRepeatPlusOneEvent, true);
     document.addEventListener('click', handleRepeatPlusOneEvent, true);
+    document.addEventListener('pointerover', handleRepeatMessagePointerOver, true);
     document.addEventListener('mouseup', handleSideBackMouseUp, true);
     document.addEventListener('dragstart', handleRecentContactDragStart, true);
     document.addEventListener('pointerdown', handlePreventMessageDragPointerDown, true);
@@ -2935,8 +3489,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('pointerup', handleImageViewerPointerUp, true);
 
     document.addEventListener('contextmenu', event => {
-        const requestId = ++repeatMenuRequestId;
+        const repeatRequestId = ++repeatMenuRequestId;
+        const pokeRequestId = ++pokeMenuRequestId;
         document.querySelectorAll('.qqnt-toolbox-repeat-menu-item').forEach(item => item.remove());
+        document.querySelectorAll('.qqnt-toolbox-poke-menu-item').forEach(item => item.remove());
+        const avatar = getPokeAvatarFromEvent(event);
+        const payload = avatar && getPokePayload(avatar);
+        if (payload) {
+            schedulePokeContextMenu(event, payload, avatar, pokeRequestId);
+        }
         if (!shouldUseContextRepeat()) {
             return;
         }
@@ -2945,7 +3506,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!isRepeatableRecord(record)) {
             return;
         }
-        scheduleRepeatContextMenu(event, record, requestId);
+        scheduleRepeatContextMenu(event, record, repeatRequestId);
     }, true);
 
     window.addEventListener('resize', () => {
@@ -2970,3 +3531,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     installInterfaceTweaksObserver();
     installMessageBadgeObserver();
 })();
+
+export async function onSettingWindowCreated(view) {
+    return initializeToolboxSettings(view);
+}

@@ -35,6 +35,9 @@ const CHANNEL_GET_RECALL_VIEWER_DATA = 'qqnt-toolbox:get-recall-viewer-data';
 const CHANNEL_GET_RECALL_AUDIO_PREVIEW = 'qqnt-toolbox:get-recall-audio-preview';
 const CHANNEL_JUMP_RECALL_MESSAGE = 'qqnt-toolbox:jump-recall-message';
 const CHANNEL_COPY_RECALL_TEXT = 'qqnt-toolbox:copy-recall-text';
+const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
+const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
+const NUDGE_SEND_COMMAND = 'nodeIKernelMsgService/sendNudge';
 const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
 const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
 const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
@@ -86,7 +89,12 @@ const DEFAULT_CONFIG = {
     entertainment: {
         autoPokeBack: false,
         autoPokeBackLimit: 1,
-        doubleClickAvatarPoke: false
+        doubleClickAvatarPoke: false,
+        rightClickAvatarPoke: true
+    },
+    floatingPanel: {
+        enabled: true,
+        shortcut: 'ControlRight'
     },
     preventRecall: {
         enabled: false,
@@ -101,6 +109,8 @@ const DEFAULT_CONFIG = {
     },
     interfaceTweaks: {
         imageViewerOptimization: false,
+        disableImageQrScan: false,
+        singleImageViewer: false,
         goBackMainList: false,
         preventMessageDrag: false,
         preventRecentContactDrag: false,
@@ -246,6 +256,42 @@ function mergeConfig(value, defaults = DEFAULT_CONFIG) {
     return result;
 }
 
+function normalizeSimplifyItemName(value) {
+    return String(value ?? '')
+        .trim()
+        .replace(/\s*[（(]?(?:99\+|\d+)\s*(?:条未读(?:消息)?|条新消息|个未读(?:消息)?)[）)]?\s*$/u, '')
+        .trim();
+}
+
+function normalizeSimplifyItemList(items, prefix) {
+    const normalized = new Map();
+    for (const source of Array.isArray(items) ? items : []) {
+        const rawId = String(source?.id ?? '').trim();
+        const name = normalizeSimplifyItemName(source?.name) || normalizeSimplifyItemName(rawId);
+        if (!name) {
+            continue;
+        }
+        const id = !rawId || rawId.startsWith(`${prefix}:`)
+            ? `${prefix}:${name.replace(/\s+/g, '')}`
+            : rawId;
+        const previous = normalized.get(id);
+        normalized.set(id, {
+            id,
+            name,
+            enabled: (previous?.enabled !== false) && source?.enabled !== false
+        });
+    }
+    return Array.from(normalized.values());
+}
+
+function normalizeSimplifyConfig(config) {
+    config.sideBar.top = normalizeSimplifyItemList(config.sideBar.top, 'sidebar-top');
+    config.sideBar.bottom = normalizeSimplifyItemList(config.sideBar.bottom, 'sidebar-bottom');
+    config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
+    config.chatFuncBar = normalizeSimplifyItemList(config.chatFuncBar, 'chat-func');
+    return config;
+}
+
 function loadConfig() {
     if (configCache) {
         return clonePlain(configCache);
@@ -258,7 +304,7 @@ function loadConfig() {
             fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
             return clonePlain(configCache);
         }
-        configCache = mergeConfig(JSON.parse(fsSync.readFileSync(configPath, 'utf8')));
+        configCache = normalizeSimplifyConfig(mergeConfig(JSON.parse(fsSync.readFileSync(configPath, 'utf8'))));
         fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
         return clonePlain(configCache);
     } catch (error) {
@@ -270,7 +316,7 @@ function loadConfig() {
 
 async function saveConfig(nextConfig) {
     const configPath = getConfigPath();
-    configCache = mergeConfig(nextConfig);
+    configCache = normalizeSimplifyConfig(mergeConfig(nextConfig));
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify(configCache, null, 2), 'utf8');
     applyVoiceMessageConfig();
@@ -336,6 +382,36 @@ function registerPokeAccount(value) {
         pokeState.selfUin = selfUin;
     }
     return Boolean(selfUin);
+}
+
+function getQqVersion() {
+    const version = globalThis.LiteLoader?.package?.qqnt?.version;
+    if (version) {
+        return String(version);
+    }
+    try {
+        return String(require(path.join(process.resourcesPath, 'app', 'package.json')).version || '');
+    } catch {
+        return '';
+    }
+}
+
+function isQqVersionAtLeast(major, minor, patch) {
+    const actual = (getQqVersion().match(/\d+/g) || []).slice(0, 3).map(Number);
+    if (actual.length < 3) {
+        return false;
+    }
+    const required = [major, minor, patch];
+    for (let index = 0; index < required.length; index++) {
+        if (actual[index] !== required[index]) {
+            return actual[index] > required[index];
+        }
+    }
+    return true;
+}
+
+function supportsNativeNudge() {
+    return isQqVersionAtLeast(9, 9, 32);
 }
 
 function getQqWrapperApi() {
@@ -407,38 +483,96 @@ async function sendPokeThroughWrapperSession(packet) {
     };
 }
 
-async function sendPoke(browserWindow, payload) {
-    const targetUin = normalizeUin(payload?.targetUin);
-    const groupUin = Number(payload?.chatType) === 2 ? normalizeUin(payload?.groupUin) : '';
-    registerPokeAccount(payload?.selfUin);
-    if (!targetUin || (Number(payload?.chatType) === 2 && !groupUin)) {
-        return { ok: false, reason: 'invalid-target' };
+function getNativeNudgePeer(browserWindow, payload, chatType, targetUin, groupUin) {
+    if (chatType === 2) {
+        return {
+            chatType,
+            peerUid: groupUin,
+            guildId: ''
+        };
     }
+    let peerUid = normalizeText(payload?.peerUid);
+    if (!peerUid.startsWith('u_')) {
+        const aliases = getWindowState(browserWindow).peerUidByUin;
+        peerUid = aliases.get(targetUin) || aliases.get(peerUid) || '';
+    }
+    if (!peerUid.startsWith('u_')) {
+        return null;
+    }
+    return {
+        chatType,
+        peerUid,
+        guildId: ''
+    };
+}
+
+async function sendPokeThroughNativeService(browserWindow, payload, chatType, targetUin, groupUin) {
+    const peer = getNativeNudgePeer(browserWindow, payload, chatType, targetUin, groupUin);
+    if (!peer) {
+        return { ok: false, reason: 'peer-unavailable' };
+    }
+    const response = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        NUDGE_SEND_COMMAND,
+        [{
+            peer,
+            targetUin,
+            chatUin: chatType === 2 ? groupUin : targetUin
+        }, null],
+        true,
+        10000
+    );
+    const nativeCode = Number(response?.result);
+    if (isNativeFailure(response) || (Number.isFinite(nativeCode) && nativeCode !== 0)) {
+        throw new Error(`Native nudge request failed: ${safeJson(response)}`);
+    }
+    return { ok: true, method: 'native-nudge' };
+}
+
+async function sendPokeThroughLegacyProtocol(browserWindow, targetUin, groupUin) {
     if (!installPokeBridge()) {
         return { ok: false, reason: 'bridge-unavailable' };
     }
+    const packet = buildPokePacket({ targetUin, groupUin });
+    const directResult = await sendPokeThroughWrapperSession(packet);
+    const response = directResult
+        ? directResult.response
+        : await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendSsoCmdReqByContend',
+            [POKE_COMMAND, packet],
+            true,
+            10000
+        );
+    const nativeCode = Number(response?.result);
+    if (isNativeFailure(response) || (Number.isFinite(nativeCode) && nativeCode !== 0)) {
+        throw new Error(`Native SSO request failed: ${safeJson(response)}`);
+    }
+    return { ok: true, method: 'legacy-sso' };
+}
+
+async function sendPoke(browserWindow, payload) {
+    const chatType = Number(payload?.chatType);
+    const targetUin = normalizeUin(payload?.targetUin);
+    const groupUin = chatType === 2 ? normalizeUin(payload?.groupUin) : '';
+    registerPokeAccount(payload?.selfUin);
+    if ((chatType !== 1 && chatType !== 2) || !targetUin || (chatType === 2 && !groupUin)) {
+        return { ok: false, reason: 'invalid-target' };
+    }
 
     try {
-        const packet = buildPokePacket({ targetUin, groupUin });
-        const directResult = await sendPokeThroughWrapperSession(packet);
-        let response;
-        if (directResult) {
-            response = directResult.response;
-        } else {
-            response = await qqNativeInvoke(
+        if (supportsNativeNudge()) {
+            return await sendPokeThroughNativeService(
                 browserWindow,
-                'ntApi',
-                'nodeIKernelMsgService/sendSsoCmdReqByContend',
-                [POKE_COMMAND, packet],
-                true,
-                10000
+                payload,
+                chatType,
+                targetUin,
+                groupUin
             );
         }
-        const nativeCode = Number(response?.result);
-        if (isNativeFailure(response) || (Number.isFinite(nativeCode) && nativeCode !== 0)) {
-            throw new Error(`Native SSO request failed: ${safeJson(response)}`);
-        }
-        return { ok: true };
+        return await sendPokeThroughLegacyProtocol(browserWindow, targetUin, groupUin);
     } catch (error) {
         warn('poke failed:', error?.message || error);
         return { ok: false, reason: 'send-failed' };
@@ -469,7 +603,12 @@ function installConfigIpc() {
         return await repeatMessageFromRenderer(browserWindow, payload);
     });
     ipcMain.handle(CHANNEL_SEND_POKE, async (event, payload) => {
-        if (getEntertainmentConfig().doubleClickAvatarPoke !== true) {
+        const entertainment = getEntertainmentConfig();
+        const source = String(payload?.source || 'double-click');
+        const enabled = source === 'context-menu'
+            ? entertainment.rightClickAvatarPoke !== false
+            : entertainment.doubleClickAvatarPoke === true;
+        if (!enabled) {
             return { ok: false, reason: 'disabled' };
         }
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
@@ -572,6 +711,103 @@ function getWindowState(browserWindow) {
         windowStates.set(browserWindow, state);
     }
     return state;
+}
+
+function findIpcObject(value, predicate, depth = 0, seen = new WeakSet()) {
+    if (!value || depth > 6 || typeof value !== 'object' || value instanceof Uint8Array) {
+        return null;
+    }
+    if (seen.has(value)) {
+        return null;
+    }
+    seen.add(value);
+    if (predicate(value)) {
+        return value;
+    }
+    const entries = value instanceof Map ? value.values() : Object.values(value);
+    for (const item of entries) {
+        const match = findIpcObject(item, predicate, depth + 1, seen);
+        if (match) {
+            return match;
+        }
+    }
+    return null;
+}
+
+function getInterfaceTweaksConfig() {
+    if (!configCache) {
+        loadConfig();
+    }
+    return configCache.interfaceTweaks;
+}
+
+function replyWithEmptyQrResult(event, request) {
+    const sender = event?.sender;
+    if (!sender || sender.isDestroyed()) {
+        return false;
+    }
+    const peerId = request.peerId ?? sender.id;
+    const responseChannel = `RM_IPCFROM_MAIN${peerId}`;
+    const response = {
+        callbackId: request.callbackId,
+        promiseStatue: 'full',
+        type: 'response',
+        eventName: request.eventName,
+        peerId
+    };
+    setImmediate(() => {
+        if (!sender.isDestroyed()) {
+            sender.send(responseChannel, response, { infos: [] });
+        }
+    });
+    return true;
+}
+
+function isImageViewerWindow(browserWindow) {
+    if (!browserWindow || browserWindow.isDestroyed()) {
+        return false;
+    }
+    const url = browserWindow.webContents.getURL();
+    return url.includes('#/image-viewer') || url.includes('/image-viewer');
+}
+
+function closeExistingImageViewers(sender) {
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        if (browserWindow.webContents !== sender && isImageViewerWindow(browserWindow)) {
+            browserWindow.close();
+        }
+    }
+}
+
+function installIpcMainInterceptor() {
+    if (globalThis.__qqntToolboxIpcMainInterceptorInstalled) {
+        return;
+    }
+    const originalEmit = ipcMain.emit;
+    ipcMain.emit = function(channel, ...args) {
+        try {
+            const tweaks = getInterfaceTweaksConfig();
+            const payload = args.slice(1);
+            if (tweaks.disableImageQrScan === true &&
+                typeof channel === 'string' && channel.startsWith('RM_IPCFROM_RENDERER')) {
+                const command = findIpcObject(payload, value => value?.cmdName === QR_SCAN_COMMAND);
+                if (command) {
+                    const request = findIpcObject(payload, value => typeof value?.callbackId === 'string');
+                    if (request && replyWithEmptyQrResult(args[0], request)) {
+                        return true;
+                    }
+                }
+            }
+            if (tweaks.singleImageViewer === true &&
+                findIpcObject(payload, value => value?.cmdName === OPEN_MEDIA_VIEWER_COMMAND)) {
+                closeExistingImageViewers(args[0]?.sender);
+            }
+        } catch (error) {
+            warn('IPC interceptor failed:', error?.message || error);
+        }
+        return Reflect.apply(originalEmit, this, [channel, ...args]);
+    };
+    globalThis.__qqntToolboxIpcMainInterceptorInstalled = true;
 }
 
 function collectNativePeerAliases(value, results = [], depth = 0, seen = new WeakSet()) {
@@ -809,6 +1045,32 @@ function isMsgRecord(value) {
     return Boolean(value && typeof value === 'object' && (value.msgId !== undefined || value.msgSeq !== undefined) && Array.isArray(value.elements));
 }
 
+function deleteBubbleSkinFromRecord(record) {
+    const attributes = record?.msgAttrs;
+    const attribute = attributes instanceof Map ? attributes.get(0) : attributes?.[0] || attributes?.['0'];
+    if (!attribute?.vasMsgInfo?.bubbleInfo) {
+        return false;
+    }
+    const nextAttribute = {
+        ...attribute,
+        vasMsgInfo: {
+            ...attribute.vasMsgInfo,
+            bubbleInfo: {
+                bubbleId: 0,
+                bubbleDiyTextId: null,
+                subBubbleId: null,
+                canConvertToText: null
+            }
+        }
+    };
+    if (attributes instanceof Map) {
+        attributes.set(0, nextAttribute);
+    } else if (attributes) {
+        attributes[0] = nextAttribute;
+    }
+    return true;
+}
+
 function processDeleteBubbleSkin(args) {
     if (!getConfig().interfaceTweaks.deleteBubbleSkin) {
         return;
@@ -818,17 +1080,7 @@ function processDeleteBubbleSkin(args) {
         collectMsgRecords(arg, records);
     }
     for (const record of new Set(records)) {
-        const attributes = record?.msgAttrs;
-        const attribute = attributes instanceof Map ? attributes.get(0) : attributes?.[0] || attributes?.['0'];
-        if (!attribute?.vasMsgInfo?.bubbleInfo) {
-            continue;
-        }
-        attribute.vasMsgInfo.bubbleInfo = {
-            bubbleId: 0,
-            bubbleDiyTextId: null,
-            subBubbleId: null,
-            canConvertToText: null
-        };
+        deleteBubbleSkinFromRecord(record);
     }
 }
 
@@ -1010,6 +1262,9 @@ function getRecoveredRecallRecord(record) {
         return null;
     }
     const recovered = cloneRecallRecord(cached);
+    if (getConfig().interfaceTweaks.deleteBubbleSkin) {
+        deleteBubbleSkinFromRecord(recovered);
+    }
     recovered.lt_recall = createRecallMark(record);
     recovered.qqnt_toolbox_recall = recovered.lt_recall;
     localizeRecallImages(recovered);
@@ -2708,16 +2963,6 @@ function deepCloneForSend(value, depth = 0, seen = new WeakMap()) {
     return object;
 }
 
-function sanitizeElementForSend(element) {
-    if (!element || typeof element !== 'object') {
-        return null;
-    }
-    const clone = deepCloneForSend(element);
-    clone.elementId = '';
-    delete clone.extBufForUI;
-    return clone;
-}
-
 function sanitizeRepeatPttElement(element) {
     if (!element || typeof element !== 'object') {
         return null;
@@ -2757,36 +3002,65 @@ async function repeatPttRecord(browserWindow, peer, record = {}) {
     };
 }
 
-async function createRepeatElement(browserWindow, element) {
-    const type = Number(element?.elementType);
-    if (!type) {
-        return null;
+async function getRepeatSourceRecord(browserWindow, peer, msgId) {
+    const result = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        'nodeIKernelMsgService/getMsgsByMsgId',
+        [{ peer, msgIds: [msgId] }, null],
+        true,
+        15000
+    );
+    if (isNativeFailure(result)) {
+        throw new Error(`repeat getMsgsByMsgId failed: ${safeJson(result)}`);
     }
-    if (type === 2 && element.picElement) {
-        const sourcePath = getPicSourcePath(element.picElement);
-        if (sourcePath) {
-            return await createPicElement(browserWindow, sourcePath, element.picElement);
-        }
-        return null;
+    const record = findIpcObject(
+        result,
+        value => isMsgRecord(value) && normalizeText(value.msgId) === msgId
+    );
+    if (!record) {
+        throw new Error('The complete source message could not be loaded.');
     }
-    return sanitizeElementForSend(element);
+    return record;
+}
+
+function shouldForwardRepeatRecord(record = {}) {
+    const elements = Array.isArray(record.elements) ? record.elements : [];
+    const hasMention = elements.some(element =>
+        Number(element?.elementType) === 1 && Number(element?.textElement?.atType) > 0
+    );
+    if (hasMention) {
+        return false;
+    }
+    const first = elements[0];
+    return Number(first?.elementType) === 2 ||
+        Number(first?.elementType) === 3 ||
+        Number(first?.elementType) === 5 ||
+        Number(first?.elementType) === 10 ||
+        Number(first?.elementType) === 11 ||
+        Number(first?.elementType) === 13 ||
+        Number(first?.elementType) === 16 ||
+        Boolean(first?.picElement) ||
+        Boolean(first?.fileElement) ||
+        Boolean(first?.videoElement) ||
+        Boolean(first?.marketFaceElement) ||
+        Boolean(first?.structMsgElement) ||
+        Boolean(first?.structLongMsgElement) ||
+        Boolean(first?.multiForwardMsgElement) ||
+        Boolean(first?.arkElement);
 }
 
 async function repeatBySendMsg(browserWindow, peer, record = {}) {
-    const sourceElements = Array.isArray(record.elements) ? record.elements : [];
-    const msgElements = [];
-    for (const element of sourceElements) {
-        const nextElement = await createRepeatElement(browserWindow, element);
-        if (!nextElement) {
-            throw new Error(`Message element ${Number(element?.elementType) || 0} cannot be repeated intact.`);
-        }
-        msgElements.push(nextElement);
+    const msgElements = deepCloneForSend(record.elements || []);
+    if (!Array.isArray(msgElements) || !msgElements.length) {
+        throw new Error('The source message has no repeatable elements.');
     }
-    if (!msgElements.length) {
-        throw new Error('No repeatable message element was found.');
+    for (const element of msgElements) {
+        if (element && typeof element === 'object') {
+            element.elementId = '';
+        }
     }
     const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
-    const msgAttributeInfos = makeSendAttributeInfos(attrId);
     const result = await qqNativeInvoke(
         browserWindow,
         'ntApi',
@@ -2795,7 +3069,7 @@ async function repeatBySendMsg(browserWindow, peer, record = {}) {
             msgId: '0',
             peer,
             msgElements,
-            msgAttributeInfos
+            msgAttributeInfos: makeSendAttributeInfos(attrId)
         }, null],
         true,
         15000
@@ -2806,21 +3080,57 @@ async function repeatBySendMsg(browserWindow, peer, record = {}) {
     return result;
 }
 
+async function repeatByNativeForward(browserWindow, peer, record = {}) {
+    const msgId = normalizeText(record.msgId);
+    if (!msgId || msgId === '0') {
+        throw new Error('The source message has no valid message ID.');
+    }
+    const result = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        'nodeIKernelMsgService/forwardMsgWithComment',
+        [{
+            commentElements: [],
+            dstContacts: [peer],
+            msgAttributeInfos: new Map(),
+            msgIds: [msgId],
+            srcContact: peer
+        }, null],
+        true,
+        15000
+    );
+    if (isNativeFailure(result)) {
+        throw new Error(`repeat forwardMsgWithComment failed: ${safeJson(result)}`);
+    }
+    return result;
+}
+
 async function repeatMessageFromRenderer(browserWindow, payload = {}) {
     if (!isRepeatMessageEnabled()) {
         throw new Error('Repeat message is disabled.');
     }
     const peer = normalizeRepeatPeer(browserWindow, payload);
-    const pttResult = await repeatPttRecord(browserWindow, peer, payload.record || {});
+    const msgId = normalizeText(payload.msgId || payload.record?.msgId);
+    if (!msgId) {
+        throw new Error('The source message has no valid message ID.');
+    }
+    const record = await getRepeatSourceRecord(browserWindow, peer, msgId);
+    const pttResult = await repeatPttRecord(browserWindow, peer, record);
     if (pttResult) {
         return {
             method: 'ptt',
             result: pttResult
         };
     }
+    if (!shouldForwardRepeatRecord(record)) {
+        return {
+            method: 'sendMsg',
+            result: await repeatBySendMsg(browserWindow, peer, record)
+        };
+    }
     return {
-        method: 'sendMsg',
-        result: await repeatBySendMsg(browserWindow, peer, payload.record || {})
+        method: 'forwardMsgWithComment',
+        result: await repeatByNativeForward(browserWindow, peer, record)
     };
 }
 
@@ -2930,6 +3240,7 @@ function installForAllWindows() {
 
 function start() {
     loadConfig();
+    installIpcMainInterceptor();
     loadPersistedRecallCache();
     installConfigIpc();
     installForAllWindows();
