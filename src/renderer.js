@@ -5,7 +5,6 @@ let initializeToolboxSettings = async () => {};
     const SETTINGS_ID = 'qqnt-toolbox-settings';
     const STYLE_ID = 'qqnt-toolbox-style';
     const SETTINGS_STYLE_ID = 'qqnt-toolbox-settings-style';
-    const POKE_TOAST_ID = 'qqnt-toolbox-poke-toast';
     const POKE_FALLBACK_MENU_ID = 'qqnt-toolbox-poke-fallback-menu';
     const POKE_RECALL_NOTICE = '若对方QQ版本过低，可能无法撤回。';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
@@ -71,8 +70,7 @@ let initializeToolboxSettings = async () => {};
             autoPokeBack: false,
             autoPokeBackLimit: 1,
             doubleClickAvatarPoke: false,
-            rightClickAvatarPoke: true,
-            pokeToast: true
+            rightClickAvatarPoke: true
         },
         floatingPanel: {
             enabled: true,
@@ -136,7 +134,6 @@ let initializeToolboxSettings = async () => {};
     let lastPokeAccountSyncAt = 0;
     let pendingAvatarPoke = null;
     let suppressAvatarClicksUntil = 0;
-    let pokeToastTimer = 0;
     let pokeAccountRegistration = null;
     let activeRepeatPeerSignature = '';
     let simplifyBarObserver = null;
@@ -659,28 +656,6 @@ let initializeToolboxSettings = async () => {};
 #${PANEL_ID} .qqnt-toolbox-shortcut-button:disabled {
     cursor: default;
     opacity: .58;
-}
-#${POKE_TOAST_ID} {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    z-index: 2147483646;
-    display: flex;
-    align-items: center;
-    min-height: 42px;
-    padding: 0 14px;
-    box-sizing: border-box;
-    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
-    border-radius: 8px;
-    color: var(--text-primary, var(--text-01, #1f2329));
-    background: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
-    box-shadow: var(--shadow-bg-middle-primary, 0 8px 28px rgba(0, 0, 0, .18));
-    font: 13px/1.4 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
-    transform: translate(-50%, -50%);
-    user-select: none;
-}
-#${POKE_TOAST_ID} .qqnt-toolbox-poke-toast-label {
-    white-space: nowrap;
 }
 #${POKE_FALLBACK_MENU_ID} {
     position: fixed;
@@ -1391,8 +1366,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     child: true
                 }),
                 createSwitchItem(text('双击头像戳戳'), text('替代双击头像打开私聊'), 'entertainment.doubleClickAvatarPoke'),
-                createSwitchItem(text('右键头像戳戳'), text('控制头像右键菜单中的戳一戳入口'), 'entertainment.rightClickAvatarPoke'),
-                createSwitchItem(text('戳戳提示'), text('发送后显示结果提示'), 'entertainment.pokeToast')
+                createSwitchItem(text('右键头像戳戳'), text('控制头像右键菜单中的戳一戳入口'), 'entertainment.rightClickAvatarPoke')
             ]),
             createCategoryTitle(text('精简')),
             createSection('simplifySidebar', text('侧边栏'), []),
@@ -1528,7 +1502,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const nextConfig = clonePlain(currentConfig);
         setByPath(nextConfig, configPath, value);
         currentConfig = mergeConfig(nextConfig);
-        syncPokeToastVisibility();
         syncMessageBadgeObserver(true);
         refreshConfigViews();
         scheduleRepeatEntrypointRefresh();
@@ -1542,7 +1515,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
-            syncPokeToastVisibility();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
@@ -3115,104 +3087,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         animation.addEventListener('cancel', clearAnimation, { once: true });
     }
 
-    function dismissPokeToast(delay = 0) {
-        window.clearTimeout(pokeToastTimer);
-        pokeToastTimer = window.setTimeout(() => {
-            document.getElementById(POKE_TOAST_ID)?.remove();
-            pokeToastTimer = 0;
-        }, delay);
-    }
-
-    function syncPokeToastVisibility() {
-        if (isFeatureEnabled('entertainment.pokeToast')) {
-            return;
-        }
-        window.clearTimeout(pokeToastTimer);
-        pokeToastTimer = 0;
-        document.getElementById(POKE_TOAST_ID)?.remove();
-    }
-
-    function showPokeToast(message, force = false) {
-        if (!force && !isFeatureEnabled('entertainment.pokeToast')) {
-            return;
-        }
-        injectStyle();
-        window.clearTimeout(pokeToastTimer);
-        pokeToastTimer = 0;
-        document.getElementById(POKE_TOAST_ID)?.remove();
-
-        const toast = document.createElement('div');
-        toast.id = POKE_TOAST_ID;
-        toast.setAttribute('role', 'status');
-        const label = document.createElement('span');
-        label.className = 'qqnt-toolbox-poke-toast-label';
-        label.textContent = text(message);
-        toast.append(label);
-        document.body?.appendChild(toast);
-        dismissPokeToast(4000);
-    }
-
-    function showPokeSentToast() {
-        showPokeToast('已戳戳');
-    }
-
-    function removeNativePokeToast(node) {
-        if (!(node instanceof Element)) {
-            return false;
-        }
-        const candidates = new Set([node]);
-        node.querySelectorAll?.([
-            '[class*="toast" i]',
-            '[class*="notice" i]',
-            '[class*="notify" i]',
-            '[role="status"]',
-            '[role="alert"]'
-        ].join(',')).forEach(element => candidates.add(element));
-        for (let parent = node.parentElement, depth = 0; parent && parent !== document.body && depth < 6;
-            parent = parent.parentElement, depth++) {
-            candidates.add(parent);
-        }
-        for (const candidate of candidates) {
-            if (candidate.id === POKE_TOAST_ID) {
-                continue;
-            }
-            const content = compactText(candidate);
-            if (!content.includes('撤回') || (!content.includes('戳') && !content.includes('拍'))) {
-                continue;
-            }
-            const className = String(candidate.className?.baseVal || candidate.className || '');
-            const position = window.getComputedStyle(candidate).position;
-            if (!/toast|notice|notify/i.test(className) && position !== 'fixed') {
-                continue;
-            }
-            candidate.remove();
-            return true;
-        }
-        return false;
-    }
-
-    function suppressNextNativePokeToast() {
-        if (!document.body) {
-            return;
-        }
-        const observer = new MutationObserver(mutations => {
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (removeNativePokeToast(node)) {
-                        observer.disconnect();
-                        return;
-                    }
-                }
-            }
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-        window.setTimeout(() => observer.disconnect(), 5000);
-    }
-
     function sendAvatarPoke(payload, avatar, source = 'double-click') {
-        if (!isFeatureEnabled('entertainment.pokeToast')) {
-            suppressNextNativePokeToast();
-        }
         const request = {
             ...(payload || { chatType: 0, targetUin: '', groupUin: '' }),
             selfUin: registerPokeAccountFromPage(true),
@@ -3221,9 +3096,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         Promise.resolve(getBridge()?.sendPoke?.(request)).then(result => {
             if (result?.ok === true) {
                 animatePokedAvatar(avatar);
-                if (!supportsNativeNudge()) {
-                    showPokeSentToast();
-                }
             }
         }).catch(() => {});
     }
@@ -4110,24 +3982,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const recallPoke = getBridge()?.recallPoke;
             menu.remove();
             if (!payload || typeof recallPoke !== 'function') {
-                showPokeToast('撤回接口未加载', true);
                 return;
             }
-            let request;
-            try {
-                request = recallPoke(payload);
-            } catch {
-                showPokeToast('撤回失败', true);
-                return;
-            }
-            Promise.resolve(request).then(result => {
-                if (result?.ok) {
-                    markPokeRecalled(messageElement, record);
-                }
-                showPokeToast(result?.ok ? '已撤回' : '撤回失败', true);
-            }).catch(() => {
-                showPokeToast('撤回失败', true);
-            });
+            Promise.resolve()
+                .then(() => recallPoke(payload))
+                .then(result => {
+                    if (result?.ok) {
+                        markPokeRecalled(messageElement, record);
+                    }
+                })
+                .catch(() => {});
         }, true);
         return item;
     }
@@ -4243,7 +4107,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
-            syncPokeToastVisibility();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
             refreshRepeatEntrypoints();
@@ -4260,7 +4123,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         bridge.onConfigChanged(config => {
             currentConfig = mergeConfig(config);
             configReady = true;
-            syncPokeToastVisibility();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();

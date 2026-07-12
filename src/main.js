@@ -101,8 +101,7 @@ const DEFAULT_CONFIG = {
         autoPokeBack: false,
         autoPokeBackLimit: 1,
         doubleClickAvatarPoke: false,
-        rightClickAvatarPoke: true,
-        pokeToast: true
+        rightClickAvatarPoke: true
     },
     floatingPanel: {
         enabled: true,
