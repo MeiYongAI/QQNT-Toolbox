@@ -1,36 +1,44 @@
 const { app, BrowserWindow, dialog } = require("electron");
 
-const util = require('util');
-const execFile = util.promisify(require("child_process").execFile);
-
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
-const { decode, encode } = require('silk-wasm');
 const {
+    addNativeRequestHandler,
     addNativeSendHandler,
     createNativeEventWaiter,
     isNativeFailure,
     qqNativeInvoke,
     unwrapNativeValue
 } = require('./native-ipc');
+const {
+    VOICE_LIBRARY_PANEL_CSS,
+    createVoiceLibraryPanel,
+    injectedVoiceFileSenderUi
+} = require('./voice/renderer-ui');
+const {
+    TARGET_SILK_SAMPLE_RATE,
+    decodeSilkToPcm,
+    encodeMediaFileToSilk,
+    estimateSilkDurationMs,
+    isSilkFile,
+    makePcm16Wav,
+    runTool
+} = require('./voice/media');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
 const VOICE_DATA_DIR_NAME = 'voice';
-const AUDIO_FILE_EXTENSIONS = ['aac', 'amr', 'flac', 'm4a', 'mp3', 'ogg', 'opus', 'wav', 'weba', 'webm'];
+const AUDIO_FILE_EXTENSIONS = ['aac', 'amr', 'flac', 'm4a', 'mp3', 'ogg', 'opus', 'silk', 'slk', 'wav', 'weba', 'webm'];
 const VIDEO_FILE_EXTENSIONS = ['3g2', '3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ogv', 'ts', 'webm', 'wmv'];
 const MEDIA_FILE_EXTENSIONS = uniqueStrings([...AUDIO_FILE_EXTENSIONS, ...VIDEO_FILE_EXTENSIONS]);
 const MEDIA_EXTENSION_SET = new Set(MEDIA_FILE_EXTENSIONS.map(extension => `.${extension}`));
-const TARGET_SILK_SAMPLE_RATE = 24000;
-const VOICE_WAVE_BIN_COUNT = 17;
-const VOICE_WAVE_MAX_AMPLITUDE = 99;
-const VOICE_WAVE_NOISE_FLOOR_DB = -60;
-let voiceFeatureEnabled = true;
-let voiceSaveInContextMenuEnabled = true;
+let voiceFeatureEnabled = false;
+let voiceSaveInContextMenuEnabled = false;
+let voiceForwardInContextMenuEnabled = false;
 let fakeVoiceDurationSeconds = 0;
 
 function getPluginTempDir() {
@@ -195,39 +203,6 @@ function safeJson(value) {
         }
         return item;
     });
-}
-
-function getToolCandidates(toolName) {
-    return [
-        process.env[`${toolName.toUpperCase()}_PATH`],
-        process.env[`${toolName.toLowerCase()}_PATH`],
-        ['ffmpeg', 'ffprobe'].includes(toolName)
-            ? `C:\\Program Files\\ffmpeg\\bin\\${toolName}.exe`
-            : '',
-        toolName
-    ].filter(Boolean);
-}
-
-async function runTool(toolName, args, options = {}) {
-    for (const command of getToolCandidates(toolName)) {
-        if (path.isAbsolute(command) && !fsSync.existsSync(command)) {
-            continue;
-        }
-        try {
-            return await execFile(command, args, {
-                windowsHide: true,
-                maxBuffer: 512 * 1024 * 1024,
-                ...options
-            });
-        } catch (error) {
-            if (error.code === 'ENOENT') {
-                continue;
-            }
-            error.message = `${toolName} failed (${command}): ${error.message}`;
-            throw error;
-        }
-    }
-    throw new Error(`${toolName} was not found. Put it in PATH or set ${toolName.toUpperCase()}_PATH.`);
 }
 
 async function getFileMd5(filePath) {
@@ -672,7 +647,7 @@ async function createAudioPreviewFile(sourcePath, cacheKey = '') {
     if (!fsSync.existsSync(previewPath)) {
         if (isSilkFile(sourcePath)) {
             const sourceData = await fs.readFile(sourcePath);
-            const decoded = await decode(toExactArrayBuffer(sourceData), TARGET_SILK_SAMPLE_RATE);
+            const decoded = await decodeSilkToPcm(sourceData);
             await fs.writeFile(previewPath, makePcm16Wav(decoded.data, TARGET_SILK_SAMPLE_RATE, 1));
         } else {
             await runTool('ffmpeg', [
@@ -705,19 +680,6 @@ async function createLibraryPreviewItem(itemId) {
         duration: Number(item.duration) || 0,
         createdAt: item.createdAt || '',
         previewPath
-    };
-}
-
-async function createPttPreviewItem(value) {
-    const ptt = sanitizePttInfo(value);
-    const sourcePath = resolvePttSourcePath(ptt);
-    if (!sourcePath) {
-        throw new Error('Voice file was not found in QQNT cache.');
-    }
-    return {
-        title: normalizeFieldText(ptt?.fileName) || 'Voice message',
-        duration: Number(ptt?.duration) || 0,
-        previewPath: await createAudioPreviewFile(sourcePath, ptt?.md5HexStr || ptt?.fileName)
     };
 }
 
@@ -810,9 +772,7 @@ async function addMediaFileToLibrary(filePath, targetFolder = '') {
 
     const targetDir = getLibraryAbsolutePath(targetFolder);
     await fs.mkdir(targetDir, { recursive: true });
-    const silkResult = await encodeMediaFileToSilk(filePath, {
-        allowSilk: true
-    });
+    const silkResult = await encodeMediaFileToSilk(filePath);
     return await addVoiceDataToLibrary(silkResult.data, {
         title,
         originalName: path.basename(filePath),
@@ -825,7 +785,7 @@ async function addMediaFileToLibrary(filePath, targetFolder = '') {
 
 async function addMediaFilesToLibrary(filePaths, targetFolder = '') {
     const items = [];
-    for (const filePath of filePaths.filter(isSupportedMediaPath)) {
+    for (const filePath of filePaths.filter(filePath => isSupportedMediaPath(filePath) || isSilkFile(filePath))) {
         items.push(await addMediaFileToLibrary(filePath, targetFolder));
     }
     return items;
@@ -1089,282 +1049,13 @@ async function addPttToLibrary(ptt) {
     if (!sourcePath) {
         throw new Error('The voice file was not found in QQNT cache. Play it once, then try again.');
     }
-    const duration = Number(ptt?.duration) || 0;
+    const duration = await detectLibraryDurationSeconds(sourcePath) || Number(ptt?.duration) || 0;
     const title = duration > 0 ? `语音 ${Math.ceil(duration)}s` : '语音消息';
     return await addFileToLibrary(sourcePath, {
         title,
         duration,
         originalName: ptt?.fileName || path.basename(sourcePath)
     });
-}
-
-function convertBufferToHexPreview(buffer, length) {
-    return Buffer.from(buffer).toString('hex', 0, length);
-}
-
-function isSilkData(data) {
-    return convertBufferToHexPreview(data, 7) === '02232153494c4b';
-}
-
-function isSilkFile(filePath) {
-    let fd;
-    try {
-        fd = fsSync.openSync(filePath, 'r');
-        const header = Buffer.alloc(10);
-        const bytesRead = fsSync.readSync(fd, header, 0, header.length, 0);
-        return bytesRead >= 7 && isSilkData(header.subarray(0, bytesRead));
-    } catch {
-        return false;
-    } finally {
-        if (fd !== undefined) {
-            try {
-                fsSync.closeSync(fd);
-            } catch {
-            }
-        }
-    }
-}
-
-function toExactArrayBuffer(data) {
-    if (data instanceof ArrayBuffer) {
-        return data;
-    }
-    if (ArrayBuffer.isView(data)) {
-        return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    }
-    const buffer = Buffer.from(data);
-    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-}
-
-function makePcm16Wav(pcmData, sampleRate, channels = 1) {
-    const pcm = Buffer.from(pcmData);
-    const header = Buffer.alloc(44);
-    const bytesPerSample = 2;
-    const byteRate = sampleRate * channels * bytesPerSample;
-    const blockAlign = channels * bytesPerSample;
-    header.write('RIFF', 0);
-    header.writeUInt32LE(36 + pcm.length, 4);
-    header.write('WAVE', 8);
-    header.write('fmt ', 12);
-    header.writeUInt32LE(16, 16);
-    header.writeUInt16LE(1, 20);
-    header.writeUInt16LE(channels, 22);
-    header.writeUInt32LE(sampleRate, 24);
-    header.writeUInt32LE(byteRate, 28);
-    header.writeUInt16LE(blockAlign, 32);
-    header.writeUInt16LE(16, 34);
-    header.write('data', 36);
-    header.writeUInt32LE(pcm.length, 40);
-    return Buffer.concat([header, pcm]);
-}
-
-function calculatePcmWaveAmplitudes(pcmData, binCount = VOICE_WAVE_BIN_COUNT) {
-    const pcm = Buffer.from(pcmData);
-    const sampleCount = Math.floor(pcm.length / 2);
-    const count = Math.max(1, Math.trunc(Number(binCount)) || VOICE_WAVE_BIN_COUNT);
-    if (!sampleCount) {
-        return Array(count).fill(0);
-    }
-
-    const amplitudes = [];
-    for (let bin = 0; bin < count; bin += 1) {
-        const start = Math.floor(bin * sampleCount / count);
-        const end = Math.max(start + 1, Math.floor((bin + 1) * sampleCount / count));
-        const stride = Math.max(1, Math.floor((end - start) / 4096));
-        let sumSquares = 0;
-        let sampled = 0;
-        for (let sample = start; sample < end; sample += stride) {
-            const value = pcm.readInt16LE(sample * 2);
-            sumSquares += value * value;
-            sampled += 1;
-        }
-        if (!sumSquares || !sampled) {
-            amplitudes.push(0);
-            continue;
-        }
-        const rmsRatio = Math.sqrt(sumSquares / sampled) / 32768;
-        const decibels = 20 * Math.log10(rmsRatio);
-        const level = Math.min(1, Math.max(0,
-            (decibels - VOICE_WAVE_NOISE_FLOOR_DB) / -VOICE_WAVE_NOISE_FLOOR_DB
-        ));
-        amplitudes.push(Math.max(1, Math.round(level * VOICE_WAVE_MAX_AMPLITUDE)));
-    }
-    return amplitudes;
-}
-
-async function calculateSilkWaveAmplitudes(silkData) {
-    const decoded = await decode(toExactArrayBuffer(silkData), TARGET_SILK_SAMPLE_RATE);
-    return calculatePcmWaveAmplitudes(decoded.data);
-}
-
-function getSilkFrameStart(data) {
-    const buffer = Buffer.from(data);
-    if (buffer.length >= 10 && buffer[0] === 0x02 && buffer.subarray(1, 10).toString('latin1') === '#!SILK_V3') {
-        return 10;
-    }
-    if (buffer.length >= 9 && buffer.subarray(0, 9).toString('latin1') === '#!SILK_V3') {
-        return 9;
-    }
-    return -1;
-}
-
-function inspectSilkFrames(data) {
-    const buffer = Buffer.from(data);
-    const frameStart = getSilkFrameStart(buffer);
-    if (frameStart < 0) {
-        return {
-            isSilk: false,
-            bytes: buffer.length
-        };
-    }
-
-    let offset = frameStart;
-    let frameCount = 0;
-    let nextFrameSize = null;
-    while (offset + 2 <= buffer.length) {
-        const frameSize = buffer.readUInt16LE(offset);
-        nextFrameSize = frameSize;
-        if (!frameSize) {
-            break;
-        }
-        const nextOffset = offset + 2 + frameSize;
-        if (nextOffset > buffer.length) {
-            return {
-                isSilk: true,
-                bytes: buffer.length,
-                frameStart,
-                frameCount,
-                consumedBytes: offset,
-                tailBytes: buffer.length - offset,
-                nextFrameSize,
-                missingBytes: nextOffset - buffer.length
-            };
-        }
-        frameCount += 1;
-        offset = nextOffset;
-        nextFrameSize = null;
-    }
-
-    return {
-        isSilk: true,
-        bytes: buffer.length,
-        frameStart,
-        frameCount,
-        consumedBytes: offset,
-        tailBytes: buffer.length - offset,
-        nextFrameSize,
-        missingBytes: 0
-    };
-}
-
-function estimateSilkDurationMs(data) {
-    const info = inspectSilkFrames(data);
-    return info.isSilk && info.frameCount > 0 ? info.frameCount * 20 : 1000;
-}
-
-function repairSilkFrames(data) {
-    const buffer = Buffer.from(data);
-    const before = inspectSilkFrames(buffer);
-    if (!before.isSilk || before.tailBytes === 0) {
-        return {
-            data: buffer,
-            action: 'none',
-            before,
-            after: before
-        };
-    }
-
-    if (before.missingBytes > 0 && before.missingBytes <= 2) {
-        const repaired = Buffer.concat([buffer, Buffer.alloc(before.missingBytes)]);
-        return {
-            data: repaired,
-            action: `pad:${before.missingBytes}`,
-            before,
-            after: inspectSilkFrames(repaired)
-        };
-    }
-
-    const repaired = Buffer.from(buffer.subarray(0, before.consumedBytes));
-    return {
-        data: repaired,
-        action: 'trim',
-        before,
-        after: inspectSilkFrames(repaired)
-    };
-}
-
-async function encodeToSilk(inputData, sampleRate) {
-    try {
-        return {
-            data: await encode(toExactArrayBuffer(inputData), sampleRate)
-        };
-    } catch (error) {
-        return {
-            error: `An error occurred while converting audio to silk. Details: ${ error?.message || error }`
-        };
-    }
-}
-
-async function convertMediaToPcm24k(mediaPath) {
-    const { stdout, stderr } = await runTool('ffmpeg', [
-        '-v', 'error',
-        '-y',
-        '-i', mediaPath,
-        '-vn',
-        '-ar', String(TARGET_SILK_SAMPLE_RATE),
-        '-ac', '1',
-        '-f', 's16le',
-        'pipe:1'
-    ], {
-        encoding: 'buffer'
-    });
-    if (stderr?.length) {
-        throw new Error(Buffer.from(stderr).toString('utf8'));
-    }
-    return stdout;
-}
-
-async function encodeMediaFileToSilk(mediaPath, options = {}) {
-    const file = await fs.readFile(mediaPath);
-    if (isSilkData(file)) {
-        if (!options.allowSilk) {
-            throw new Error('Direct .silk sending is disabled because it can freeze this QQNT version.');
-        }
-        const repaired = repairSilkFrames(file);
-        return {
-            data: repaired.data,
-            duration: Number(options.durationMs) || estimateSilkDurationMs(repaired.data),
-            waveAmplitudes: await calculateSilkWaveAmplitudes(repaired.data),
-            directSilk: true,
-            sampleRate: TARGET_SILK_SAMPLE_RATE,
-            silkRepair: {
-                action: repaired.action,
-                before: repaired.before,
-                after: repaired.after
-            }
-        };
-    }
-
-    const inputData = await convertMediaToPcm24k(mediaPath);
-
-    const silkResult = await encodeToSilk(inputData, TARGET_SILK_SAMPLE_RATE);
-    if (silkResult.error) {
-        throw new Error(silkResult.error);
-    }
-    const repaired = repairSilkFrames(silkResult.data.data);
-
-    return {
-        ...silkResult.data,
-        data: repaired.data,
-        duration: Number(silkResult.data.duration) || estimateSilkDurationMs(repaired.data),
-        waveAmplitudes: calculatePcmWaveAmplitudes(inputData),
-        sampleRate: TARGET_SILK_SAMPLE_RATE,
-        silkRepair: {
-            action: repaired.action,
-            before: repaired.before,
-            after: repaired.after
-        }
-    };
 }
 
 function normalizeComparablePath(filePath) {
@@ -1409,2255 +1100,8 @@ function isSupportedMediaPath(filePath) {
     return MEDIA_EXTENSION_SET.has(path.extname(filePath).toLowerCase());
 }
 
-const VOICE_LIBRARY_PANEL_CSS = String.raw`
-#qqnt-toolbox-voice-library {
-    --voice-bg: var(--bg_top_light, var(--background-05, var(--background-01, #ffffff)));
-    --voice-layer: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .06)));
-    --voice-hover: var(--background-02, rgba(127, 127, 127, .12));
-    --voice-active: var(--background-03, rgba(127, 127, 127, .18));
-    --voice-border: var(--border-level-1-color, var(--divider, rgba(0, 0, 0, .08)));
-    --voice-text: var(--text-primary, var(--text-01, #1f2329));
-    --voice-muted: var(--text-secondary, var(--text-02, #6b7280));
-    --voice-faint: var(--text-tertiary, var(--text-03, #8a8f99));
-    --voice-accent: var(--brand_standard, var(--theme-color, #0099ff));
-    --voice-danger: var(--text_error, #e84d4d);
-    position: fixed;
-    inset: 0;
-    z-index: 2147483000;
-    color: var(--voice-text);
-    background: rgba(0, 0, 0, .28);
-    font: 13px/1.45 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
-    letter-spacing: 0;
-}
-#qqnt-toolbox-voice-library, #qqnt-toolbox-voice-library * {
-    box-sizing: border-box;
-}
-#qqnt-toolbox-voice-library .qvlib-shell {
-    position: absolute;
-    left: var(--voice-left, 50%);
-    top: var(--voice-top, 50%);
-    width: min(360px, calc(100vw - 24px));
-    height: min(400px, calc(100vh - 24px));
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    transform: translate(-50%, -50%);
-    border: 1px solid var(--voice-border);
-    border-radius: 8px;
-    background: var(--voice-bg);
-    box-shadow: var(--shadow-bg-middle-primary, 0 18px 48px rgba(0, 0, 0, .18));
-    will-change: left, top;
-}
-#qqnt-toolbox-voice-library .qvlib-header {
-    flex: 0 0 44px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 7px 0 12px;
-    border-bottom: 1px solid var(--voice-border);
-    background: var(--voice-bg);
-    cursor: grab;
-    touch-action: none;
-    user-select: none;
-}
-#qqnt-toolbox-voice-library .qvlib-shell.is-dragging .qvlib-header {
-    cursor: grabbing;
-}
-#qqnt-toolbox-voice-library .qvlib-heading {
-    min-width: 0;
-    flex: 1;
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-}
-#qqnt-toolbox-voice-library .qvlib-title {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--voice-text);
-    font-size: 14px;
-    font-weight: 600;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library .qvlib-count {
-    flex: none;
-    color: var(--voice-muted);
-    font-size: 11px;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library button {
-    height: 28px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 8px;
-    border: 1px solid var(--voice-border);
-    border-radius: 6px;
-    color: var(--voice-text);
-    background: var(--voice-layer);
-    font: 500 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    letter-spacing: 0;
-    white-space: nowrap;
-    cursor: pointer;
-}
-#qqnt-toolbox-voice-library button:hover:not(:disabled) {
-    background: var(--voice-hover);
-}
-#qqnt-toolbox-voice-library button:active:not(:disabled) {
-    background: var(--voice-active);
-}
-#qqnt-toolbox-voice-library button:focus-visible,
-#qqnt-toolbox-voice-library input:focus-visible,
-#qqnt-toolbox-voice-library [role="slider"]:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--voice-accent) 72%, transparent);
-    outline-offset: 1px;
-}
-#qqnt-toolbox-voice-library button:disabled {
-    opacity: .42;
-    cursor: default;
-}
-#qqnt-toolbox-voice-library .qvlib-icon-button {
-    width: 30px;
-    height: 30px;
-    flex: none;
-    padding: 0;
-    border-color: transparent;
-    background: transparent;
-    font-size: 18px;
-}
-#qqnt-toolbox-voice-library .qvlib-close {
-    color: var(--voice-muted);
-    font-size: 19px;
-}
-#qqnt-toolbox-voice-library .qvlib-nav {
-    flex: 0 0 38px;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--voice-border);
-    background: var(--voice-layer);
-}
-#qqnt-toolbox-voice-library .qvlib-nav[hidden] {
-    display: none;
-}
-#qqnt-toolbox-voice-library .qvlib-back {
-    width: 28px;
-    flex: none;
-    padding: 0;
-    border-color: transparent;
-    background: transparent;
-    font-size: 16px;
-}
-#qqnt-toolbox-voice-library .qvlib-path {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-}
-#qqnt-toolbox-voice-library .qvlib-path-current,
-#qqnt-toolbox-voice-library .qvlib-path-parent {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library .qvlib-path-current {
-    color: var(--voice-text);
-    font-size: 12px;
-}
-#qqnt-toolbox-voice-library .qvlib-path-parent {
-    color: var(--voice-muted);
-    font-size: 10px;
-}
-#qqnt-toolbox-voice-library .qvlib-list {
-    min-height: 0;
-    flex: 1;
-    overflow: auto;
-    padding: 3px 8px;
-    scrollbar-width: thin;
-    scrollbar-color: var(--voice-border) transparent;
-}
-#qqnt-toolbox-voice-library .qvlib-list::-webkit-scrollbar {
-    width: 4px;
-}
-#qqnt-toolbox-voice-library .qvlib-list::-webkit-scrollbar-track {
-    background: transparent;
-}
-#qqnt-toolbox-voice-library .qvlib-list::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: var(--voice-border);
-}
-#qqnt-toolbox-voice-library .qvlib-empty {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--voice-faint);
-}
-#qqnt-toolbox-voice-library .qvlib-row {
-    min-height: 55px;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 7px;
-    padding: 7px 3px;
-    border-bottom: 1px solid var(--voice-border);
-}
-#qqnt-toolbox-voice-library .qvlib-row:last-child {
-    border-bottom: 0;
-}
-#qqnt-toolbox-voice-library .qvlib-row:hover {
-    background: var(--voice-layer);
-}
-#qqnt-toolbox-voice-library .qvlib-main {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-}
-#qqnt-toolbox-voice-library .qvlib-name {
-    overflow: hidden;
-    color: var(--voice-text);
-    font-size: 13px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library .qvlib-meta {
-    overflow: hidden;
-    color: var(--voice-muted);
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library .qvlib-actions {
-    display: flex;
-    align-items: center;
-    gap: 1px;
-}
-#qqnt-toolbox-voice-library .qvlib-row-action {
-    height: 26px;
-    padding: 0 4px;
-    border-color: transparent;
-    background: transparent;
-}
-#qqnt-toolbox-voice-library .qvlib-send {
-    color: var(--voice-accent);
-}
-#qqnt-toolbox-voice-library .qvlib-delete {
-    color: var(--voice-danger);
-}
-#qqnt-toolbox-voice-library .qvlib-player {
-    flex: 0 0 56px;
-    display: grid;
-    grid-template-columns: 30px minmax(0, 1fr) auto;
-    grid-template-rows: 19px 16px;
-    align-items: center;
-    gap: 3px 10px;
-    padding: 7px 11px 8px;
-    border-top: 1px solid var(--voice-border);
-    background: var(--voice-bg);
-}
-#qqnt-toolbox-voice-library .qvlib-player-toggle {
-    grid-column: 1;
-    grid-row: 1 / 3;
-    width: 30px;
-    height: 30px;
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    color: var(--voice-muted);
-    background: var(--voice-layer);
-    gap: 3px;
-}
-#qqnt-toolbox-voice-library .qvlib-player-toggle::before {
-    content: "";
-    width: 0;
-    height: 0;
-    border-top: 5px solid transparent;
-    border-bottom: 5px solid transparent;
-    border-left: 8px solid currentColor;
-    transform: translateX(1px);
-}
-#qqnt-toolbox-voice-library .qvlib-player-toggle::after {
-    content: "";
-    display: none;
-}
-#qqnt-toolbox-voice-library .qvlib-player-toggle[data-playing="true"]::before,
-#qqnt-toolbox-voice-library .qvlib-player-toggle[data-playing="true"]::after {
-    width: 2px;
-    height: 10px;
-    flex: 0 0 2px;
-    border: 0;
-    border-radius: 1px;
-    background: currentColor;
-    transform: none;
-}
-#qqnt-toolbox-voice-library .qvlib-player-toggle[data-playing="true"]::after {
-    display: block;
-}
-#qqnt-toolbox-voice-library .qvlib-player-title {
-    grid-column: 2;
-    grid-row: 1;
-    min-width: 0;
-    overflow: hidden;
-    color: var(--voice-muted);
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library .qvlib-player-time {
-    grid-column: 3;
-    grid-row: 1;
-    color: var(--voice-faint);
-    font-size: 10px;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-#qqnt-toolbox-voice-library .qvlib-track {
-    grid-column: 2 / 4;
-    grid-row: 2;
-    position: relative;
-    height: 16px;
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-}
-#qqnt-toolbox-voice-library .qvlib-track::before {
-    content: "";
-    width: 100%;
-    height: 4px;
-    border-radius: 999px;
-    background: var(--voice-border);
-}
-#qqnt-toolbox-voice-library .qvlib-progress {
-    position: absolute;
-    left: 0;
-    top: 50%;
-    width: var(--voice-progress, 0%);
-    height: 4px;
-    transform: translateY(-50%);
-    border-radius: 999px;
-    background: var(--voice-accent);
-}
-#qqnt-toolbox-voice-library .qvlib-thumb {
-    position: absolute;
-    left: var(--voice-progress, 0%);
-    top: 50%;
-    width: 8px;
-    height: 8px;
-    transform: translate(-50%, -50%);
-    border-radius: 50%;
-    background: var(--voice-accent);
-    box-shadow: 0 0 0 2px var(--voice-bg);
-    opacity: 0;
-}
-#qqnt-toolbox-voice-library .qvlib-player.is-ready .qvlib-track:hover .qvlib-thumb,
-#qqnt-toolbox-voice-library .qvlib-player.is-ready .qvlib-track:focus-visible .qvlib-thumb {
-    opacity: 1;
-}
-#qqnt-toolbox-voice-library audio {
-    display: none;
-}
-#qqnt-toolbox-voice-library .qvlib-footer {
-    flex: 0 0 44px;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 7px;
-    padding: 7px 9px;
-    border-top: 1px solid var(--voice-border);
-    background: var(--voice-bg);
-}
-#qqnt-toolbox-voice-library .qvlib-footer button {
-    width: 100%;
-    height: 30px;
-}
-#qqnt-toolbox-voice-library .qvlib-toast {
-    position: absolute;
-    left: 50%;
-    top: 51px;
-    z-index: 7;
-    max-width: calc(100% - 24px);
-    overflow: hidden;
-    padding: 6px 10px;
-    transform: translate(-50%, -7px);
-    border: 1px solid var(--voice-border);
-    border-radius: 6px;
-    color: var(--voice-text);
-    background: var(--voice-bg);
-    box-shadow: 0 7px 20px rgba(0, 0, 0, .2);
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity .14s ease, transform .14s ease;
-}
-#qqnt-toolbox-voice-library .qvlib-toast.is-visible {
-    transform: translate(-50%, 0);
-    opacity: 1;
-}
-#qqnt-toolbox-voice-library .qvlib-toast.is-error {
-    color: var(--voice-danger);
-    border-color: color-mix(in srgb, var(--voice-danger) 58%, var(--voice-border));
-}
-#qqnt-toolbox-voice-library .qvlib-dialog-layer {
-    position: absolute;
-    inset: 0;
-    z-index: 5;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 22px;
-    background: rgba(0, 0, 0, .24);
-}
-#qqnt-toolbox-voice-library .qvlib-dialog {
-    width: 100%;
-    max-width: 310px;
-    padding: 14px;
-    border: 1px solid var(--voice-border);
-    border-radius: 8px;
-    background: var(--voice-bg);
-    box-shadow: 0 12px 30px rgba(0, 0, 0, .24);
-}
-#qqnt-toolbox-voice-library .qvlib-dialog-title {
-    margin-bottom: 8px;
-    color: var(--voice-text);
-    font-size: 14px;
-    font-weight: 600;
-}
-#qqnt-toolbox-voice-library .qvlib-dialog-message {
-    margin-bottom: 10px;
-    color: var(--voice-muted);
-    font-size: 12px;
-    overflow-wrap: anywhere;
-    white-space: pre-line;
-}
-#qqnt-toolbox-voice-library .qvlib-dialog input {
-    width: 100%;
-    height: 32px;
-    padding: 0 8px;
-    border: 1px solid var(--voice-border);
-    border-radius: 6px;
-    outline: 0;
-    color: var(--voice-text) !important;
-    -webkit-text-fill-color: var(--voice-text) !important;
-    caret-color: var(--voice-text);
-    background: var(--voice-layer) !important;
-    font: 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    letter-spacing: 0;
-}
-#qqnt-toolbox-voice-library .qvlib-dialog input:focus {
-    border-color: var(--voice-accent);
-    background: var(--voice-hover) !important;
-}
-#qqnt-toolbox-voice-library .qvlib-dialog-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 7px;
-    margin-top: 12px;
-}
-#qqnt-toolbox-voice-library .qvlib-dialog-confirm.is-danger {
-    color: var(--voice-danger);
-}
-@media (max-width: 390px) {
-    #qqnt-toolbox-voice-library .qvlib-row-action {
-        padding: 0 3px;
-        font-size: 11px;
-    }
-    #qqnt-toolbox-voice-library .qvlib-row {
-        gap: 5px;
-    }
-}
-`;
-
-function createVoiceLibraryPanel(options = {}) {
-    const ROOT_ID = 'qqnt-toolbox-voice-library';
-    const STYLE_ID = 'qqnt-toolbox-voice-library-style';
-    const TEXT = {
-        title: '\u8bed\u97f3\u6d88\u606f',
-        library: '\u8bed\u97f3\u5e93',
-        empty: '\u6682\u65e0\u8bed\u97f3',
-        folderEmpty: '\u8be5\u6587\u4ef6\u5939\u6682\u65e0\u8bed\u97f3',
-        item: '\u8bed\u97f3',
-        items: '\u9879',
-        folder: '\u6587\u4ef6\u5939',
-        pending: '\u5f85\u8f6c\u6362',
-        duration: '\u65f6\u957f',
-        unknown: '\u672a\u77e5',
-        back: '\u8fd4\u56de',
-        refresh: '\u5237\u65b0',
-        pick: '\u9009\u62e9\u53d1\u9001',
-        add: '\u6dfb\u52a0\u5230\u8bed\u97f3\u5e93',
-        open: '\u6253\u5f00',
-        send: '\u53d1\u9001',
-        play: '\u64ad\u653e',
-        pause: '\u6682\u505c',
-        rename: '\u91cd\u547d\u540d',
-        remove: '\u5220\u9664',
-        close: '\u5173\u95ed',
-        cancel: '\u53d6\u6d88',
-        confirm: '\u786e\u5b9a',
-        notPlaying: '\u672a\u64ad\u653e',
-        progress: '\u64ad\u653e\u8fdb\u5ea6',
-        choose: '\u9009\u62e9\u4e2d',
-        refreshing: '\u5237\u65b0\u4e2d',
-        sending: '\u53d1\u9001\u4e2d',
-        converting: '\u4e34\u65f6\u8f6c\u6362\u5e76\u53d1\u9001\u4e2d',
-        loading: '\u52a0\u8f7d\u64ad\u653e\u4e2d',
-        renaming: '\u91cd\u547d\u540d\u4e2d',
-        deleting: '\u5220\u9664\u4e2d',
-        missing: '\u672a\u627e\u5230\u6761\u76ee',
-        emptyName: '\u540d\u79f0\u4e0d\u80fd\u4e3a\u7a7a',
-        deleteTitle: '\u5220\u9664\u8bed\u97f3',
-        deleteMessage: '\u5220\u9664\u540e\u65e0\u6cd5\u6062\u590d\uff0c\u786e\u5b9a\u7ee7\u7eed\u5417\uff1f'
-    };
-    const state = {
-        root: null,
-        host: null,
-        items: [],
-        folder: '',
-        parent: '',
-        busy: false,
-        statusTimer: 0,
-        moved: false,
-        position: null
-    };
-
-    function createElement(tagName, className = '', textContent) {
-        const element = document.createElement(tagName);
-        if (className) {
-            element.className = className;
-        }
-        if (textContent !== undefined) {
-            element.textContent = textContent;
-        }
-        return element;
-    }
-
-    function createButton(label, action, className = '', title = label) {
-        const button = createElement('button', className, label);
-        button.type = 'button';
-        button.dataset.voiceAction = action;
-        if (title) {
-            button.title = title;
-            button.setAttribute('aria-label', title);
-        }
-        return button;
-    }
-
-    function ensureStyle() {
-        if (document.getElementById(STYLE_ID)) {
-            return;
-        }
-        const style = document.createElement('style');
-        style.id = STYLE_ID;
-        style.textContent = String(options.cssText || '').replaceAll('${ROOT_ID}', ROOT_ID);
-        document.head.append(style);
-    }
-
-    function formatDuration(seconds) {
-        const value = Math.ceil(Number(seconds) || 0);
-        if (value <= 0) {
-            return TEXT.unknown;
-        }
-        const minutes = Math.floor(value / 60);
-        const rest = value % 60;
-        return minutes > 0 ? `${minutes}:${String(rest).padStart(2, '0')}` : `${value}\u79d2`;
-    }
-
-    function formatPlayerTime(seconds) {
-        const value = Math.max(0, Math.floor(Number(seconds) || 0));
-        const minutes = Math.floor(value / 60);
-        const rest = value % 60;
-        return `${minutes}:${String(rest).padStart(2, '0')}`;
-    }
-
-    function getFolderTitle(folder = '') {
-        const parts = String(folder || '').split('/').filter(Boolean);
-        return parts[parts.length - 1] || TEXT.library;
-    }
-
-    function getItem(itemId) {
-        return state.items.find(item => String(item.id) === String(itemId)) || null;
-    }
-
-    function emit(action) {
-        options.onAction?.({
-            ...action,
-            folder: action.folder ?? state.folder
-        });
-    }
-
-    function updateDisabledState() {
-        if (!state.root) {
-            return;
-        }
-        state.root.querySelectorAll('[data-voice-action]').forEach(button => {
-            const action = button.dataset.voiceAction;
-            if (action === 'close') {
-                button.disabled = false;
-                return;
-            }
-            if (action === 'playerToggle') {
-                const audio = state.root.querySelector('audio');
-                button.disabled = state.busy || !audio?.src;
-                return;
-            }
-            button.disabled = state.busy;
-        });
-    }
-
-    function setStatus(message = '', statusOptions = {}) {
-        if (!state.root) {
-            return;
-        }
-        if (Object.prototype.hasOwnProperty.call(statusOptions, 'disabled')) {
-            state.busy = Boolean(statusOptions.disabled);
-            updateDisabledState();
-        }
-        clearTimeout(state.statusTimer);
-        let toast = state.root.querySelector('.qvlib-toast');
-        if (!message) {
-            toast?.classList.remove('is-visible');
-            if (toast) {
-                setTimeout(() => {
-                    if (!toast.classList.contains('is-visible')) {
-                        toast.remove();
-                    }
-                }, 160);
-            }
-            return;
-        }
-        if (!toast) {
-            toast = createElement('div', 'qvlib-toast');
-            state.root.querySelector('.qvlib-shell')?.append(toast);
-        }
-        toast.textContent = message;
-        toast.classList.toggle('is-error', Boolean(statusOptions.error));
-        requestAnimationFrame(() => toast.classList.add('is-visible'));
-        if (statusOptions.resetAfterMs) {
-            state.statusTimer = setTimeout(() => setStatus(''), statusOptions.resetAfterMs);
-        }
-    }
-
-    function closeDialog() {
-        state.root?.querySelector('.qvlib-dialog-layer')?.remove();
-    }
-
-    function showDialog(dialogOptions = {}) {
-        const shell = state.root?.querySelector('.qvlib-shell');
-        if (!shell) {
-            return;
-        }
-        closeDialog();
-        const layer = createElement('div', 'qvlib-dialog-layer');
-        const form = createElement('form', 'qvlib-dialog');
-        const title = createElement('div', 'qvlib-dialog-title', dialogOptions.title || '');
-        form.append(title);
-        if (dialogOptions.message) {
-            form.append(createElement('div', 'qvlib-dialog-message', dialogOptions.message));
-        }
-        let input = null;
-        if (dialogOptions.inputValue !== undefined) {
-            input = createElement('input');
-            input.value = dialogOptions.inputValue || '';
-            input.maxLength = 80;
-            form.append(input);
-        }
-        const actions = createElement('div', 'qvlib-dialog-actions');
-        const cancel = createElement('button', '', TEXT.cancel);
-        cancel.type = 'button';
-        cancel.addEventListener('click', closeDialog);
-        const confirm = createElement(
-            'button',
-            `qvlib-dialog-confirm${dialogOptions.danger ? ' is-danger' : ''}`,
-            dialogOptions.confirmText || TEXT.confirm
-        );
-        confirm.type = 'submit';
-        form.addEventListener('submit', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            dialogOptions.onConfirm?.(input?.value.trim() ?? '');
-        });
-        actions.append(cancel, confirm);
-        form.append(actions);
-        layer.append(form);
-        layer.addEventListener('pointerdown', event => {
-            if (event.target === layer) {
-                closeDialog();
-            }
-        });
-        shell.append(layer);
-        if (input) {
-            input.focus();
-            input.select?.();
-        } else {
-            cancel.focus();
-        }
-    }
-
-    function showRenameDialog(item) {
-        showDialog({
-            title: TEXT.rename,
-            inputValue: item.title || '',
-            onConfirm: nextTitle => {
-                if (!nextTitle) {
-                    setStatus(TEXT.emptyName, { error: true, resetAfterMs: 1600 });
-                    return;
-                }
-                closeDialog();
-                setStatus(TEXT.renaming, { disabled: true });
-                emit({ type: 'renameLibrary', id: item.id, title: nextTitle });
-            }
-        });
-    }
-
-    function showDeleteDialog(item) {
-        showDialog({
-            title: TEXT.deleteTitle,
-            message: `${item.title || TEXT.item}\n${TEXT.deleteMessage}`,
-            confirmText: TEXT.remove,
-            danger: true,
-            onConfirm: () => {
-                closeDialog();
-                setStatus(TEXT.deleting, { disabled: true });
-                emit({ type: 'deleteLibrary', id: item.id });
-            }
-        });
-    }
-
-    function syncPlayer() {
-        const player = state.root?.querySelector('.qvlib-player');
-        const audio = player?.querySelector('audio');
-        const track = player?.querySelector('.qvlib-track');
-        const time = player?.querySelector('.qvlib-player-time');
-        const toggle = player?.querySelector('[data-voice-action="playerToggle"]');
-        if (!player || !audio || !track || !time || !toggle) {
-            return;
-        }
-        const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
-        const current = duration ? Math.min(audio.currentTime || 0, duration) : 0;
-        const progress = duration ? Math.min(100, Math.max(0, current / duration * 100)) : 0;
-        player.classList.toggle('is-ready', duration > 0);
-        track.style.setProperty('--voice-progress', `${progress}%`);
-        track.setAttribute('aria-valuenow', String(Math.round(progress)));
-        track.setAttribute('aria-valuetext', duration ? `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}` : '0:00');
-        time.textContent = duration ? `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}` : '0:00';
-        toggle.dataset.playing = String(!audio.paused);
-        toggle.title = audio.paused ? TEXT.play : TEXT.pause;
-        toggle.setAttribute('aria-label', toggle.title);
-        updateDisabledState();
-    }
-
-    function seekPlayer(event) {
-        const player = state.root?.querySelector('.qvlib-player');
-        const audio = player?.querySelector('audio');
-        const track = player?.querySelector('.qvlib-track');
-        const duration = Number.isFinite(audio?.duration) && audio.duration > 0 ? audio.duration : 0;
-        const rect = track?.getBoundingClientRect?.();
-        if (!audio || !track || !duration || !rect?.width) {
-            return;
-        }
-        const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-        audio.currentTime = duration * ratio;
-        syncPlayer();
-    }
-
-    function createPlayer() {
-        const player = createElement('div', 'qvlib-player');
-        const title = createElement('div', 'qvlib-player-title', TEXT.notPlaying);
-        const time = createElement('div', 'qvlib-player-time', '0:00');
-        const toggle = createButton('', 'playerToggle', 'qvlib-player-toggle', TEXT.play);
-        toggle.dataset.playing = 'false';
-        const track = createElement('div', 'qvlib-track');
-        track.setAttribute('role', 'slider');
-        track.setAttribute('aria-label', TEXT.progress);
-        track.setAttribute('aria-valuemin', '0');
-        track.setAttribute('aria-valuemax', '100');
-        track.tabIndex = 0;
-        const progress = createElement('div', 'qvlib-progress');
-        const thumb = createElement('div', 'qvlib-thumb');
-        const audio = document.createElement('audio');
-        audio.preload = 'metadata';
-        track.append(progress, thumb);
-        player.append(title, time, toggle, track, audio);
-        for (const eventName of ['loadedmetadata', 'timeupdate', 'play', 'pause', 'ended']) {
-            audio.addEventListener(eventName, syncPlayer);
-        }
-        track.addEventListener('pointerdown', event => {
-            event.preventDefault();
-            track.setPointerCapture?.(event.pointerId);
-            seekPlayer(event);
-        });
-        track.addEventListener('pointermove', event => {
-            if (event.buttons === 1) {
-                seekPlayer(event);
-            }
-        });
-        track.addEventListener('pointerup', event => {
-            if (track.hasPointerCapture?.(event.pointerId)) {
-                track.releasePointerCapture(event.pointerId);
-            }
-            syncPlayer();
-        });
-        track.addEventListener('keydown', event => {
-            if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
-                return;
-            }
-            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-                return;
-            }
-            event.preventDefault();
-            if (event.key === 'Home') {
-                audio.currentTime = 0;
-            } else if (event.key === 'End') {
-                audio.currentTime = audio.duration;
-            } else {
-                audio.currentTime = Math.min(
-                    audio.duration,
-                    Math.max(0, audio.currentTime + (event.key === 'ArrowRight' ? 5 : -5))
-                );
-            }
-            syncPlayer();
-        });
-        return player;
-    }
-
-    function renderNavigation() {
-        const nav = state.root?.querySelector('.qvlib-nav');
-        if (!nav) {
-            return;
-        }
-        nav.hidden = !state.folder;
-        nav.replaceChildren();
-        if (!state.folder) {
-            return;
-        }
-        const back = createButton('\u2190', 'backFolder', 'qvlib-back', TEXT.back);
-        const path = createElement('div', 'qvlib-path');
-        path.append(
-            createElement('div', 'qvlib-path-current', getFolderTitle(state.folder)),
-            createElement('div', 'qvlib-path-parent', state.parent || TEXT.library)
-        );
-        nav.append(back, path);
-    }
-
-    function renderList(resetScroll = false) {
-        const list = state.root?.querySelector('.qvlib-list');
-        const count = state.root?.querySelector('.qvlib-count');
-        if (!list) {
-            return;
-        }
-        if (count) {
-            count.textContent = `${state.items.length} ${TEXT.items}`;
-        }
-        renderNavigation();
-        list.replaceChildren();
-        if (!state.items.length) {
-            list.append(createElement('div', 'qvlib-empty', state.folder ? TEXT.folderEmpty : TEXT.empty));
-            return;
-        }
-        for (const item of state.items) {
-            const row = createElement('div', 'qvlib-row');
-            const main = createElement('div', 'qvlib-main');
-            const name = createElement('div', 'qvlib-name', item.title || TEXT.item);
-            name.title = item.title || TEXT.item;
-            let metaText = '';
-            if (item.kind === 'folder') {
-                metaText = `${TEXT.folder} \u00b7 ${Number(item.count) || 0} ${TEXT.items}`;
-            } else if (item.kind === 'media') {
-                metaText = `${TEXT.pending} \u00b7 ${TEXT.duration}\uff1a${formatDuration(item.duration)}`;
-            } else {
-                metaText = `${TEXT.duration}\uff1a${formatDuration(item.duration)}`;
-            }
-            main.append(name, createElement('div', 'qvlib-meta', metaText));
-            const actions = createElement('div', 'qvlib-actions');
-            const specs = item.kind === 'folder'
-                ? [
-                    [TEXT.open, 'openFolder', ''],
-                    [TEXT.rename, 'renameLibrary', '']
-                ]
-                : [
-                    [TEXT.send, 'sendLibrary', 'qvlib-send'],
-                    [TEXT.play, 'previewLibrary', ''],
-                    [TEXT.rename, 'renameLibrary', ''],
-                    [TEXT.remove, 'deleteLibrary', 'qvlib-delete']
-                ];
-            for (const [label, action, className] of specs) {
-                const button = createButton(label, action, `qvlib-row-action ${className}`.trim());
-                button.dataset.voiceItemId = item.id;
-                actions.append(button);
-            }
-            row.append(main, actions);
-            list.append(row);
-        }
-        if (resetScroll) {
-            list.scrollTop = 0;
-        }
-        updateDisabledState();
-    }
-
-    function setLibrary(payload) {
-        const previousFolder = state.folder;
-        if (Array.isArray(payload)) {
-            state.items = payload;
-            state.folder = '';
-            state.parent = '';
-        } else {
-            state.items = Array.isArray(payload?.items) ? payload.items : [];
-            state.folder = payload?.folder || '';
-            state.parent = payload?.parent || '';
-        }
-        renderList(previousFolder !== state.folder);
-    }
-
-    function playPreview(payload = {}) {
-        const audio = state.root?.querySelector('audio');
-        const title = state.root?.querySelector('.qvlib-player-title');
-        if (!audio || !payload.previewUrl) {
-            return;
-        }
-        if (title) {
-            title.textContent = payload.previewTitle || TEXT.item;
-        }
-        audio.src = payload.previewUrl;
-        audio.play?.().catch(() => {});
-        syncPlayer();
-    }
-
-    function handleAction(action, itemId = '') {
-        if (action === 'close') {
-            close();
-            return;
-        }
-        if (action === 'playerToggle') {
-            const audio = state.root?.querySelector('audio');
-            if (!audio?.src) {
-                return;
-            }
-            if (audio.paused) {
-                audio.play?.().catch(() => {});
-            } else {
-                audio.pause?.();
-            }
-            syncPlayer();
-            return;
-        }
-        if (action === 'backFolder') {
-            const folder = state.parent || '';
-            setStatus(TEXT.refreshing, { disabled: true });
-            emit({ type: 'list', folder });
-            return;
-        }
-        if (action === 'list' || action === 'pick' || action === 'pickSave') {
-            setStatus(action === 'list' ? TEXT.refreshing : TEXT.choose, { disabled: true });
-            emit({ type: action });
-            return;
-        }
-        const item = getItem(itemId);
-        if (!item) {
-            setStatus(TEXT.missing, { error: true, resetAfterMs: 1600 });
-            return;
-        }
-        if (action === 'openFolder') {
-            setStatus(TEXT.refreshing, { disabled: true });
-            emit({ type: 'list', folder: item.relativePath || '' });
-            return;
-        }
-        if (action === 'sendLibrary') {
-            setStatus(item.kind === 'media' ? TEXT.converting : TEXT.sending, { disabled: true });
-            emit({ type: 'sendLibrary', id: item.id });
-            return;
-        }
-        if (action === 'previewLibrary') {
-            setStatus(TEXT.loading, { disabled: true });
-            emit({ type: 'previewLibrary', id: item.id });
-            return;
-        }
-        if (action === 'renameLibrary') {
-            showRenameDialog(item);
-            return;
-        }
-        if (action === 'deleteLibrary') {
-            showDeleteDialog(item);
-        }
-    }
-
-    function setPosition(left, top, remember = false) {
-        const shell = state.root?.querySelector('.qvlib-shell');
-        if (!state.root || !shell) {
-            return null;
-        }
-        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        const width = shell.offsetWidth || Math.min(360, Math.max(0, viewportWidth - 24));
-        const height = shell.offsetHeight || Math.min(400, Math.max(0, viewportHeight - 24));
-        const margin = 12;
-        const minLeft = margin + width / 2;
-        const maxLeft = Math.max(minLeft, viewportWidth - margin - width / 2);
-        const minTop = margin + height / 2;
-        const maxTop = Math.max(minTop, viewportHeight - margin - height / 2);
-        const position = {
-            left: Math.round(Math.min(maxLeft, Math.max(minLeft, Number(left) || viewportWidth / 2))),
-            top: Math.round(Math.min(maxTop, Math.max(minTop, Number(top) || viewportHeight / 2)))
-        };
-        state.root.style.setProperty('--voice-left', `${position.left}px`);
-        state.root.style.setProperty('--voice-top', `${position.top}px`);
-        if (remember) {
-            state.position = position;
-            state.moved = true;
-        }
-        return position;
-    }
-
-    function updatePlacement() {
-        if (!state.root) {
-            return;
-        }
-        if (!state.host?.isConnected) {
-            state.host = options.resolveHost?.() || null;
-        }
-        const hostRect = state.host?.getBoundingClientRect?.();
-        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        const left = state.moved && state.position
-            ? state.position.left
-            : (hostRect?.width > 0 ? hostRect.left + hostRect.width / 2 : viewportWidth / 2);
-        const top = state.moved && state.position
-            ? state.position.top
-            : (hostRect?.height > 0 ? hostRect.top + hostRect.height / 2 : viewportHeight / 2);
-        const position = setPosition(left, top);
-        if (state.moved && position) {
-            state.position = position;
-        }
-    }
-
-    function installDrag(shell, header) {
-        let dragState = null;
-        const finish = event => {
-            if (!dragState || dragState.pointerId !== event.pointerId) {
-                return;
-            }
-            if (header.hasPointerCapture?.(event.pointerId)) {
-                header.releasePointerCapture(event.pointerId);
-            }
-            dragState = null;
-            shell.classList.remove('is-dragging');
-        };
-        header.addEventListener('pointerdown', event => {
-            if (event.button !== 0 || event.target?.closest?.('button,input,a')) {
-                return;
-            }
-            const rect = shell.getBoundingClientRect();
-            dragState = {
-                pointerId: event.pointerId,
-                offsetX: event.clientX - (rect.left + rect.width / 2),
-                offsetY: event.clientY - (rect.top + rect.height / 2)
-            };
-            header.setPointerCapture?.(event.pointerId);
-            shell.classList.add('is-dragging');
-            event.preventDefault();
-        });
-        header.addEventListener('pointermove', event => {
-            if (!dragState || dragState.pointerId !== event.pointerId) {
-                return;
-            }
-            setPosition(
-                event.clientX - dragState.offsetX,
-                event.clientY - dragState.offsetY,
-                true
-            );
-        });
-        header.addEventListener('pointerup', finish);
-        header.addEventListener('pointercancel', finish);
-    }
-
-    function buildPanel() {
-        const root = createElement('div');
-        root.id = ROOT_ID;
-        const shell = createElement('div', 'qvlib-shell');
-        const header = createElement('div', 'qvlib-header');
-        const heading = createElement('div', 'qvlib-heading');
-        heading.append(
-            createElement('div', 'qvlib-title', TEXT.title),
-            createElement('div', 'qvlib-count', `0 ${TEXT.items}`)
-        );
-        const refresh = createButton('\u21bb', 'list', 'qvlib-icon-button', TEXT.refresh);
-        const closeButton = createButton('\u00d7', 'close', 'qvlib-icon-button qvlib-close', TEXT.close);
-        header.append(heading, refresh, closeButton);
-        const nav = createElement('div', 'qvlib-nav');
-        nav.hidden = true;
-        const list = createElement('div', 'qvlib-list');
-        const player = createPlayer();
-        const footer = createElement('div', 'qvlib-footer');
-        footer.append(
-            createButton(TEXT.pick, 'pick'),
-            createButton(TEXT.add, 'pickSave')
-        );
-        shell.append(header, nav, list, player, footer);
-        root.append(shell);
-        root.addEventListener('click', event => {
-            const control = event.target?.closest?.('[data-voice-action]');
-            if (!control || !root.contains(control)) {
-                event.stopPropagation();
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            event.stopImmediatePropagation?.();
-            handleAction(control.dataset.voiceAction, control.dataset.voiceItemId || '');
-        });
-        for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick', 'wheel', 'dragover', 'drop']) {
-            root.addEventListener(eventName, event => {
-                if (event.target === root) {
-                    event.preventDefault();
-                }
-                event.stopPropagation();
-            });
-        }
-        root.addEventListener('contextmenu', event => {
-            event.preventDefault();
-            event.stopPropagation();
-        });
-        installDrag(shell, header);
-        return root;
-    }
-
-    function open() {
-        ensureStyle();
-        const host = options.resolveHost?.();
-        if (!host) {
-            return false;
-        }
-        close();
-        state.host = host;
-        state.root = buildPanel();
-        document.body.append(state.root);
-        updatePlacement();
-        renderList(true);
-        syncPlayer();
-        emit({ type: 'list' });
-        return true;
-    }
-
-    function close() {
-        clearTimeout(state.statusTimer);
-        const audio = state.root?.querySelector('audio');
-        audio?.pause?.();
-        state.root?.remove();
-        state.root = null;
-        state.host = null;
-        state.busy = false;
-    }
-
-    function handleEscape() {
-        if (!state.root) {
-            return false;
-        }
-        if (state.root.querySelector('.qvlib-dialog-layer')) {
-            closeDialog();
-        } else {
-            close();
-        }
-        return true;
-    }
-
-    return {
-        open,
-        close,
-        isOpen: () => Boolean(state.root),
-        contains: target => Boolean(state.root?.contains(target)),
-        updatePlacement,
-        setStatus,
-        setLibrary,
-        playPreview,
-        handleEscape
-    };
-}
-
-function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCss) {
-    const VOICE_TEXTS = [
-        '\u5f00\u59cb\u8bf4\u8bdd',
-        '\u6309\u4f4f\u8bf4\u8bdd',
-        '\u6309\u4f4f\u7a7a\u683c\u952e',
-        '\u6309Esc\u952e',
-        '\u70b9\u51fb\u9000\u51fa',
-        '\u677e\u5f00\u53d1\u9001'
-    ];
-    const VOICE_SELECTORS = [
-        '.audio-msg-input',
-        '[class*="audio-msg-input"]',
-        '[class*="record-panel"]',
-        '[class*="recordPanel"]',
-        '[class*="ptt-panel"]',
-        '[class*="pttPanel"]'
-    ];
-    const MEDIA_EXTENSIONS = new Set([
-        '.3g2', '.3gp', '.aac', '.amr', '.asf', '.avi', '.flac', '.flv', '.m2ts', '.m4a', '.m4v', '.mkv',
-        '.mov', '.mp3', '.mp4', '.mpeg', '.mpg', '.ogg', '.ogv', '.opus', '.ts', '.wav', '.weba', '.webm', '.wmv'
-    ]);
-    let libraryPanel = null;
-
-    function getBridge() {
-        window.__voiceFileSenderBridge = window.__voiceFileSenderBridge || {};
-        const bridge = window.__voiceFileSenderBridge;
-        bridge.queue = bridge.queue || [];
-        return bridge;
-    }
-
-    function isVoiceFeatureEnabled() {
-        return getBridge().enabled !== false;
-    }
-
-    function isVoiceSaveInContextMenuEnabled() {
-        const bridge = getBridge();
-        return bridge.enabled !== false && bridge.saveInContextMenu !== false;
-    }
-
-    function getByPath(object, path) {
-        return path.split('.').reduce((value, key) => value?.[key], object);
-    }
-
-    function findVueValue(element, path) {
-        const instances = element?.__VUE__;
-        if (!instances?.length) {
-            return undefined;
-        }
-        for (const instance of new Set(instances)) {
-            const value = getByPath(instance, path);
-            if (value !== undefined) {
-                return value;
-            }
-        }
-        return undefined;
-    }
-
-    function getCurrentAioData() {
-        return findVueValue(document.querySelector('.aio.vue-component'), 'proxy.commonAioStore.curAioData') ||
-            findVueValue(document.querySelector('.aio'), 'proxy.commonAioStore.curAioData') ||
-            getByPath(globalThis, 'app.__vue_app__.config.globalProperties.$store.state.common_Aio.curAioData');
-    }
-
-    function firstNonEmpty(values) {
-        return values.find(value => value !== undefined && value !== null && String(value).trim());
-    }
-
-    function normalizePeerId(value) {
-        const text = String(value ?? '').trim();
-        if (!text || text === 'undefined' || text === 'null' || text === '0') {
-            return '';
-        }
-        return text;
-    }
-
-    function pickPeerId(values) {
-        return normalizePeerId(firstNonEmpty(values));
-    }
-
-    function normalizePeerFromAioData(aioData) {
-        if (!aioData || typeof aioData !== 'object') {
-            return null;
-        }
-        const header = aioData.header || {};
-        const chatType = Number(firstNonEmpty([
-            aioData.chatType,
-            aioData.type,
-            header.chatType,
-            aioData.aioType,
-            header.type
-        ]));
-        const isGroup = chatType === 2;
-        const isC2c = chatType === 1 || chatType === 100;
-        const peerUin = pickPeerId([
-            aioData.peerUin,
-            header.peerUin,
-            aioData.chatUin,
-            header.chatUin,
-            aioData.uin,
-            header.uin,
-            aioData.userUin,
-            header.userUin,
-            aioData.contactUin,
-            header.contactUin,
-            aioData.targetUin,
-            header.targetUin
-        ]);
-        const peerUid = isGroup
-            ? pickPeerId([
-                aioData.peerUid,
-                header.peerUid,
-                aioData.groupCode,
-                header.groupCode,
-                aioData.groupId,
-                header.groupId,
-                aioData.peerUin,
-                header.peerUin,
-                aioData.chatUin,
-                header.chatUin,
-                aioData.uin,
-                header.uin
-            ])
-            : pickPeerId([
-                aioData.peerUid,
-                header.peerUid,
-                aioData.peer?.peerUid,
-                header.peer?.peerUid,
-                aioData.peer?.uid,
-                header.peer?.uid,
-                aioData.peer?.ntUid,
-                header.peer?.ntUid,
-                aioData.contact?.peerUid,
-                header.contact?.peerUid,
-                aioData.contact?.uid,
-                header.contact?.uid,
-                aioData.contact?.ntUid,
-                header.contact?.ntUid,
-                aioData.buddy?.peerUid,
-                header.buddy?.peerUid,
-                aioData.buddy?.uid,
-                header.buddy?.uid,
-                aioData.friend?.peerUid,
-                header.friend?.peerUid,
-                aioData.friend?.uid,
-                header.friend?.uid,
-                aioData.target?.peerUid,
-                header.target?.peerUid,
-                aioData.target?.uid,
-                header.target?.uid,
-                aioData.uid,
-                header.uid,
-                aioData.contactUid,
-                header.contactUid,
-                aioData.userUid,
-                header.userUid,
-                aioData.targetUid,
-                header.targetUid,
-                aioData.friendUid,
-                header.friendUid,
-                aioData.peerUin,
-                header.peerUin,
-                aioData.chatUin,
-                header.chatUin,
-                aioData.uin,
-                header.uin
-            ]);
-        if (!chatType || !peerUid || (isC2c && peerUid === 'self')) {
-            return null;
-        }
-        return {
-            chatType,
-            peerUid,
-            peerUin,
-            guildId: String(aioData?.guildId || header.guildId || '')
-        };
-    }
-
-    function getVueInstances(element) {
-        if (!(element instanceof Element)) {
-            return [];
-        }
-        const result = [];
-        if (Array.isArray(element.__VUE__)) {
-            result.push(...element.__VUE__);
-        }
-        if (element.__vueParentComponent) {
-            result.push(element.__vueParentComponent);
-        }
-        return Array.from(new Set(result.filter(Boolean)));
-    }
-
-    function isMsgRecord(value) {
-        return Boolean(value && typeof value === 'object' && (value.msgId || value.msgSeq) && Array.isArray(value.elements));
-    }
-
-    function findMsgRecordInValue(value, depth = 0, seen = new WeakSet()) {
-        if (!value || depth > 4 || typeof value !== 'object') {
-            return null;
-        }
-        if (value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
-            return null;
-        }
-        if (seen.has(value)) {
-            return null;
-        }
-        seen.add(value);
-        if (isMsgRecord(value)) {
-            return value;
-        }
-        for (const key of ['props', 'setupState', 'ctx', 'proxy', 'msgRecord', 'message', 'record', 'msg']) {
-            const found = findMsgRecordInValue(value[key], depth + 1, seen);
-            if (found) {
-                return found;
-            }
-        }
-        return null;
-    }
-
-    function getMessageElementFromElement(element) {
-        const vueMessage = element?.closest?.('.message.vue-component');
-        if (vueMessage) {
-            return vueMessage;
-        }
-        const item = element?.closest?.('.ml-item');
-        if (item) {
-            return item.querySelector?.('.message.vue-component') || item.querySelector?.('.message') || item;
-        }
-        const message = element?.closest?.('.message');
-        return message?.closest?.('.message.vue-component') || message || null;
-    }
-
-    function findMessageRecordFromElement(element) {
-        const messageElement = getMessageElementFromElement(element);
-        if (!messageElement) {
-            return null;
-        }
-        const candidates = [];
-        const seen = new Set();
-        const addCandidate = node => {
-            if (node instanceof Element && !seen.has(node)) {
-                seen.add(node);
-                candidates.push(node);
-            }
-        };
-        for (let node = element; node && node !== document.body; node = node.parentElement) {
-            addCandidate(node);
-            if (node === messageElement) {
-                break;
-            }
-        }
-        addCandidate(messageElement);
-        for (const child of Array.from(messageElement.querySelectorAll?.('*') || []).slice(0, 80)) {
-            addCandidate(child);
-        }
-        for (const candidate of candidates) {
-            for (const instance of getVueInstances(candidate)) {
-                const direct = instance?.props?.msgRecord ||
-                    instance?.ctx?.msgRecord ||
-                    instance?.proxy?.msgRecord ||
-                    instance?.props?.message ||
-                    instance?.ctx?.message ||
-                    instance?.proxy?.message;
-                if (isMsgRecord(direct)) {
-                    return direct;
-                }
-                const found = findMsgRecordInValue(instance);
-                if (found) {
-                    return found;
-                }
-            }
-        }
-        return null;
-    }
-
-    function findMessageRecordFromContextEvent(event) {
-        for (const item of event?.composedPath?.() || []) {
-            if (!(item instanceof Element)) {
-                continue;
-            }
-            const record = findMessageRecordFromElement(item);
-            if (record) {
-                return record;
-            }
-        }
-        return findMessageRecordFromElement(event?.target);
-    }
-
-    function getCurrentPeerFromAioComponents() {
-        const roots = Array.from(document.querySelectorAll('.aio.vue-component, .aio')).slice(0, 4);
-        for (const root of roots) {
-            for (const instance of getVueInstances(root)) {
-                for (const source of [
-                    instance.props,
-                    instance.proxy,
-                    instance.ctx,
-                    instance.setupState,
-                    instance.proxy?.commonAioStore?.curAioData,
-                    instance.ctx?.commonAioStore?.curAioData,
-                    instance.proxy?.aioStore?.curAioData,
-                    instance.ctx?.aioStore?.curAioData
-                ]) {
-                    const peer = normalizePeerFromAioData(source);
-                    if (peer) {
-                        return peer;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    function getCurrentPeer() {
-        return normalizePeerFromAioData(getCurrentAioData()) || getCurrentPeerFromAioComponents();
-    }
-
-    function compactText(element) {
-        return String(element?.innerText || element?.textContent || '').replace(/\s+/g, '');
-    }
-
-    function isVoicePanelOpen() {
-        const text = compactText(document.body);
-        return VOICE_TEXTS.some(item => text.includes(item.replace(/\s+/g, '')));
-    }
-
-    function isVisible(element) {
-        const rect = element?.getBoundingClientRect?.();
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-            return false;
-        }
-        const style = getComputedStyle(element);
-        return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) !== 0;
-    }
-
-    function hasVoicePanelText(element) {
-        const text = compactText(element);
-        return VOICE_TEXTS.some(item => text.includes(item.replace(/\s+/g, '')));
-    }
-
-    function findVoicePanelFrom(element) {
-        if (!isVoicePanelOpen()) {
-            return null;
-        }
-        let current = element;
-        for (let depth = 0; current && current !== document.documentElement && depth < 12; depth += 1) {
-            if (VOICE_SELECTORS.some(selector => current.matches?.(selector)) && isVisible(current) && hasVoicePanelText(current)) {
-                return current;
-            }
-            const rect = current.getBoundingClientRect?.();
-            const compactEnough = rect && rect.width > 0 && rect.height > 0 && rect.width <= 1200 && rect.height <= 760;
-            if (compactEnough && hasVoicePanelText(current)) {
-                return current;
-            }
-            current = current.parentElement;
-        }
-        return null;
-    }
-
-    function findVoicePanel() {
-        if (!isVoicePanelOpen()) {
-            return null;
-        }
-        const selectorTarget = document.querySelector('.audio-msg-input');
-        if (selectorTarget && isVisible(selectorTarget) && hasVoicePanelText(selectorTarget)) {
-            return selectorTarget;
-        }
-        const candidates = Array.from(document.querySelectorAll('div, section, main')).filter(element => {
-            const rect = element.getBoundingClientRect?.();
-            if (!rect || rect.width < 260 || rect.height < 90 || rect.width > 1300 || rect.height > 780) {
-                return false;
-            }
-            return isVisible(element) && hasVoicePanelText(element);
-        });
-        candidates.sort((a, b) => {
-            const aRect = a.getBoundingClientRect();
-            const bRect = b.getBoundingClientRect();
-            return (aRect.width * aRect.height) - (bRect.width * bRect.height);
-        });
-        return candidates[0] || null;
-    }
-
-    function getVoiceDropTarget(event) {
-        const activePanel = findVoicePanel();
-        if (!activePanel) {
-            return null;
-        }
-        const targets = [];
-        if (event?.target instanceof Element) {
-            targets.push(event.target);
-        }
-        const pointTarget = document.elementFromPoint?.(event.clientX, event.clientY);
-        if (pointTarget) {
-            targets.push(pointTarget);
-        }
-        for (const target of targets) {
-            const panel = findVoicePanelFrom(target);
-            if (panel && (panel === activePanel || activePanel.contains(panel) || panel.contains(activePanel))) {
-                return panel;
-            }
-        }
-        return null;
-    }
-
-    function isMediaPath(filePath) {
-        const name = String(filePath || '').toLowerCase();
-        const index = name.lastIndexOf('.');
-        return index >= 0 && MEDIA_EXTENSIONS.has(name.slice(index));
-    }
-
-    function getDropMediaPaths(dataTransfer) {
-        return Array.from(dataTransfer?.files || [])
-            .map(file => file.path)
-            .filter(filePath => filePath && isMediaPath(filePath));
-    }
-
-    function isLikelySidebarElement(element) {
-        const text = [
-            element.id || '',
-            String(element.className || ''),
-            element.getAttribute?.('role') || '',
-            element.getAttribute?.('aria-label') || ''
-        ].join(' ');
-        return /side|sidebar|right|member|notice|announcement|profile|detail|drawer|contact/i.test(text);
-    }
-
-    function getLibraryHostScore(element, trigger) {
-        const rect = element.getBoundingClientRect?.();
-        if (!rect || rect.width < 360 || rect.height < 260 || !isVisible(element) || isLikelySidebarElement(element)) {
-            return Infinity;
-        }
-        const text = [
-            element.id || '',
-            String(element.className || ''),
-            element.getAttribute?.('role') || ''
-        ].join(' ');
-        let score = rect.width * rect.height;
-        if (/chat|aio|message|conversation|main|content|panel/i.test(text)) {
-            score -= 100000;
-        }
-        if (/input|editor|toolbar|operation/i.test(text)) {
-            score += 1000000;
-        }
-        if (trigger && !element.contains(trigger)) {
-            score += 1000000;
-        }
-        return score;
-    }
-
-    function pickLibraryHost(candidates, trigger = null) {
-        return candidates
-            .filter(Boolean)
-            .map(element => ({
-                element,
-                score: getLibraryHostScore(element, trigger)
-            }))
-            .filter(item => Number.isFinite(item.score))
-            .sort((a, b) => a.score - b.score)[0]?.element || null;
-    }
-
-    function findLibraryHostFromTrigger(trigger) {
-        if (!(trigger instanceof Element)) {
-            return null;
-        }
-        const candidates = [];
-        let current = trigger;
-        for (let depth = 0; current && current !== document.documentElement && depth < 18; depth += 1) {
-            candidates.push(current);
-            current = current.parentElement;
-        }
-        return pickLibraryHost(candidates, trigger);
-    }
-
-    function findLibraryHost() {
-        const bridge = getBridge();
-        const triggerHost = findLibraryHostFromTrigger(bridge.lastLibraryTrigger);
-        if (triggerHost) {
-            return triggerHost;
-        }
-        const selectors = [
-            '.group-chat',
-            '.c2c-chat',
-            '[class*="chat-main"]',
-            '[class*="chat-content"]',
-            '[class*="message-panel"]',
-            '[class*="message-list"]',
-            '.chat-panel',
-            '.message-panel',
-            '.aio.vue-component',
-            '.aio'
-        ];
-        const candidates = selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)));
-        return pickLibraryHost(candidates);
-    }
-
-    function openLibraryPanel() {
-        return libraryPanel?.open();
-    }
-
-    function closeLibraryPanel() {
-        libraryPanel?.close();
-    }
-
-    function updateLibraryPanelPlacement() {
-        libraryPanel?.updatePlacement();
-    }
-
-    function blockDocumentWhileLibraryOpen(event) {
-        if (!libraryPanel?.isOpen()) {
-            return;
-        }
-        if (event.type === 'keydown' && event.key === 'Escape') {
-            event.preventDefault();
-            event.stopPropagation();
-            event.stopImmediatePropagation?.();
-            libraryPanel.handleEscape();
-            return;
-        }
-        if (libraryPanel.contains(event.target)) {
-            return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
-    }
-    function findVoiceLibraryTriggerFromEvent(event) {
-        const selector = [
-            '#id-func-bar-microphone_on',
-            '[id*="microphone_on"]',
-            '[aria-label="\u8bed\u97f3\u6d88\u606f"]',
-            '[title="\u8bed\u97f3\u6d88\u606f"]',
-            '[data-title="\u8bed\u97f3\u6d88\u606f"]'
-        ].join(',');
-        const path = (event.composedPath?.() || [])
-            .filter(item => item instanceof Element)
-            .slice(0, 16);
-        for (const item of path) {
-            const trigger = item.matches?.(selector) ? item : item.closest?.(selector);
-            if (trigger?.closest?.('.chat-func-bar .func-bar-native, .chat-func-bar')) {
-                return trigger;
-            }
-        }
-        return null;
-    }
-
-    function openLibraryPanelDebounced() {
-        if (!isVoiceFeatureEnabled()) {
-            closeLibraryPanel();
-            return;
-        }
-        const bridge = getBridge();
-        const now = Date.now();
-        if (bridge.lastLibraryOpenAt && now - bridge.lastLibraryOpenAt < 350) {
-            return;
-        }
-        bridge.lastLibraryOpenAt = now;
-        openLibraryPanel();
-    }
-
-    function flushActionQueue() {
-        const bridge = getBridge();
-        if (!bridge.resolve || bridge.queue.length === 0) {
-            return;
-        }
-        const resolve = bridge.resolve;
-        bridge.resolve = null;
-        resolve(bridge.queue.shift());
-    }
-
-    function enqueueAction(action) {
-        const bridge = getBridge();
-        bridge.queue.push(action);
-        flushActionQueue();
-    }
-
-    const panelBridge = getBridge();
-    libraryPanel = panelBridge.panelController || voiceLibraryPanelFactory({
-        cssText: voiceLibraryPanelCss,
-        resolveHost: findLibraryHost,
-        onAction: action => {
-            const nextAction = { ...action };
-            if (action.type === 'pick' || action.type === 'sendLibrary') {
-                nextAction.peer = getCurrentPeer();
-            }
-            enqueueAction(nextAction);
-        }
-    });
-    panelBridge.panelController = libraryPanel;
-
-    const PTT_PATH_KEYS = new Set([
-        'filepath', 'sourcepath', 'path', 'localpath', 'originpath', 'originfilepath', 'srcpath',
-        'downloadpath', 'realpath', 'absolutepath', 'audiopath', 'voicepath', 'pttpath',
-        'url', 'audiourl', 'voiceurl', 'ptturl'
-    ]);
-    const PTT_NAME_KEYS = new Set(['filename', 'name', 'originfilename', 'originalname', 'audioname', 'voicename', 'pttfilename']);
-    const PTT_MD5_KEYS = new Set(['md5hexstr', 'md5', 'filemd5', 'md5str', 'filemd5hex', 'originmd5', 'originalmd5']);
-    const PTT_DURATION_KEYS = new Set(['duration', 'voiceduration', 'durationseconds', 'seconds', 'second', 'time', 'playtime']);
-    const PTT_DURATION_MS_KEYS = new Set(['durationms', 'durationmilliseconds', 'timems', 'playtimems']);
-    const PTT_ID_KEYS = new Set(['fileuuid', 'filesubid', 'uuid', 'fileid', 'storeid', 'resid', 'resourceid']);
-
-    function normalizeFieldText(value) {
-        const text = String(value ?? '').trim();
-        return text && text !== 'undefined' && text !== 'null' && text !== '0' ? text : '';
-    }
-
-    function normalizeFieldKey(key) {
-        return String(key || '').replace(/[_\-\s]/g, '').toLowerCase();
-    }
-
-    function addUniqueText(list, value) {
-        const text = normalizeFieldText(value);
-        if (text && !list.includes(text)) {
-            list.push(text);
-        }
-    }
-
-    function collectFieldValues(value, keySet, results = [], depth = 0, seen = new WeakSet()) {
-        if (value === undefined || value === null || depth > 7 || results.length > 24) {
-            return results;
-        }
-        if (Array.isArray(value)) {
-            for (const item of value.slice(0, 64)) {
-                collectFieldValues(item, keySet, results, depth + 1, seen);
-            }
-            return results;
-        }
-        if (typeof value !== 'object' || value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
-            return results;
-        }
-        if (seen.has(value)) {
-            return results;
-        }
-        seen.add(value);
-        for (const [key, item] of Object.entries(value)) {
-            if (!keySet.has(normalizeFieldKey(key)) || item === undefined || item === null || typeof item === 'object') {
-                continue;
-            }
-            addUniqueText(results, item);
-        }
-        for (const item of Object.values(value)) {
-            collectFieldValues(item, keySet, results, depth + 1, seen);
-        }
-        return results;
-    }
-
-    function firstFieldValue(roots, keySet) {
-        for (const root of roots) {
-            const values = collectFieldValues(root, keySet);
-            if (values.length) {
-                return values[0];
-            }
-        }
-        return '';
-    }
-
-    function normalizeDurationSeconds(value, isMilliseconds = false) {
-        const number = Number(value);
-        if (!Number.isFinite(number) || number <= 0) {
-            return 0;
-        }
-        if (isMilliseconds || number > 1000) {
-            return Math.max(1, Math.ceil(number / 1000));
-        }
-        return Math.max(1, Math.ceil(number));
-    }
-
-    function firstDurationSeconds(roots) {
-        for (const root of roots) {
-            const msDuration = normalizeDurationSeconds(firstFieldValue([root], PTT_DURATION_MS_KEYS), true);
-            if (msDuration) {
-                return msDuration;
-            }
-            const duration = normalizeDurationSeconds(firstFieldValue([root], PTT_DURATION_KEYS));
-            if (duration) {
-                return duration;
-            }
-        }
-        return 0;
-    }
-
-    function sanitizePttElement(pttElement) {
-        if (!pttElement || typeof pttElement !== 'object') {
-            return null;
-        }
-        const nested = pttElement.pttElement || pttElement;
-        const roots = [nested, pttElement].filter(Boolean);
-        const paths = [];
-        const names = [];
-        const ids = [];
-        for (const root of roots) {
-            collectFieldValues(root, PTT_PATH_KEYS, paths);
-            collectFieldValues(root, PTT_NAME_KEYS, names);
-            collectFieldValues(root, PTT_ID_KEYS, ids);
-        }
-        const ptt = {
-            filePath: paths[0] || '',
-            sourcePath: paths[1] || '',
-            fileName: names[0] || '',
-            md5HexStr: firstFieldValue(roots, PTT_MD5_KEYS),
-            duration: firstDurationSeconds(roots),
-            fileUuid: ids[0] || '',
-            fileSubId: ids[1] || '',
-            fileId: ids[2] || '',
-            paths,
-            names,
-            ids
-        };
-        return ptt.filePath || ptt.fileName || ptt.md5HexStr || ptt.fileUuid || ptt.fileSubId || ptt.fileId ? ptt : null;
-    }
-
-    function getPttIdentity(ptt) {
-        return ptt?.filePath ||
-            ptt?.md5HexStr ||
-            ptt?.fileName ||
-            ptt?.fileUuid ||
-            ptt?.fileSubId ||
-            ptt?.fileId ||
-            '';
-    }
-
-    function dedupePtts(items) {
-        const result = [];
-        const seen = new Set();
-        for (const item of items || []) {
-            const ptt = sanitizePttElement(item);
-            const key = getPttIdentity(ptt);
-            if (!key || seen.has(key)) {
-                continue;
-            }
-            seen.add(key);
-            result.push(ptt);
-        }
-        return result;
-    }
-
-    function collectPttElementsFromValue(value, results = [], depth = 0, seen = new WeakSet()) {
-        if (!value || depth > 5 || results.length > 16) {
-            return results;
-        }
-        if (Array.isArray(value)) {
-            for (const item of value.slice(0, 32)) {
-                collectPttElementsFromValue(item, results, depth + 1, seen);
-            }
-            return results;
-        }
-        if (typeof value !== 'object' || value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
-            return results;
-        }
-        if (seen.has(value)) {
-            return results;
-        }
-        seen.add(value);
-        if (Number(value.elementType) === 4 || value.pttElement) {
-            const ptt = sanitizePttElement(value);
-            if (ptt) {
-                results.push(ptt);
-            }
-        }
-        const priorityKeys = [
-            'pttElement',
-            'msgElements',
-            'elements',
-            'element',
-            'msgElement',
-            'records',
-            'msgList',
-            'payload',
-            'message',
-            'msg',
-            'msgRecord',
-            'item',
-            'data',
-            'result'
-        ];
-        for (const key of priorityKeys) {
-            collectPttElementsFromValue(value[key], results, depth + 1, seen);
-        }
-        for (const [key, item] of Object.entries(value)) {
-            if (priorityKeys.includes(key)) {
-                continue;
-            }
-            collectPttElementsFromValue(item, results, depth + 1, seen);
-        }
-        return results;
-    }
-
-    function collectVuePttsFromElement(element, ptts) {
-        if (!(element instanceof Element)) {
-            return;
-        }
-        for (const instance of getVueInstances(element)) {
-            for (const source of [instance.props, instance.setupState, instance.ctx, instance.proxy]) {
-                collectPttElementsFromValue(source, ptts);
-            }
-        }
-    }
-
-    function collectPttsFromContextEvent(event) {
-        const record = findMessageRecordFromContextEvent(event);
-        if (record) {
-            const recordPtts = [];
-            collectPttElementsFromValue(record.elements, recordPtts);
-            if (recordPtts.length) {
-                return dedupePtts(recordPtts);
-            }
-        }
-        const ptts = [];
-        const candidates = [];
-        const seen = new Set();
-        const addCandidate = element => {
-            if (!(element instanceof Element) || seen.has(element)) {
-                return;
-            }
-            seen.add(element);
-            candidates.push(element);
-        };
-        for (const element of (event.composedPath?.() || []).filter(item => item instanceof Element).slice(0, 28)) {
-            addCandidate(element);
-            addCandidate(element.closest?.('.message.vue-component'));
-            addCandidate(element.closest?.('.message'));
-            addCandidate(element.closest?.('.ml-item'));
-        }
-        for (const messageElement of candidates.filter(element => element.matches?.('.message,.ml-item')).slice(0, 1)) {
-            for (const element of Array.from(messageElement.querySelectorAll?.('*') || []).slice(0, 100)) {
-                addCandidate(element);
-            }
-        }
-        for (const element of candidates) {
-            collectVuePttsFromElement(element, ptts);
-        }
-        return dedupePtts(ptts);
-    }
-
-    function distanceToRect(point, rect) {
-        const dx = point.x < rect.left ? rect.left - point.x : point.x > rect.right ? point.x - rect.right : 0;
-        const dy = point.y < rect.top ? rect.top - point.y : point.y > rect.bottom ? point.y - rect.bottom : 0;
-        return Math.hypot(dx, dy);
-    }
-
-    function getNativeMenuItemElements(menu) {
-        const selectors = ['.q-context-menu-item', '[class*="context-menu-item"]', '[role="menuitem"]', 'li', 'button'];
-        const candidates = [];
-        for (const selector of selectors) {
-            candidates.push(...Array.from(menu.querySelectorAll(selector)));
-        }
-        const seen = new Set();
-        return candidates
-            .filter(item => {
-                if (!item || seen.has(item) || item.classList?.contains('qqnt-toolbox-voice-save-item')) {
-                    return false;
-                }
-                seen.add(item);
-                return !candidates.some(parent => parent !== item && parent.contains?.(item));
-            })
-            .slice(0, 24);
-    }
-
-    function findNativeContextMenuNear(point) {
-        const menus = Array.from(document.querySelectorAll('.q-context-menu, [class*="context-menu"]'))
-            .filter(menu => {
-                if (!isVisible(menu)) {
-                    return false;
-                }
-                const rect = menu.getBoundingClientRect?.();
-                return rect && rect.width >= 40 && rect.height >= 24 && getNativeMenuItemElements(menu).length > 0;
-            });
-        return menus
-            .map(menu => {
-                const rect = menu.getBoundingClientRect();
-                return { menu, rect, distance: distanceToRect(point, rect) };
-            })
-            .filter(item => item.distance <= 220 || (
-                point.x >= item.rect.left - 48 &&
-                point.x <= item.rect.right + 48 &&
-                point.y >= item.rect.top - 48 &&
-                point.y <= item.rect.bottom + 48
-            ))
-            .sort((a, b) => a.distance - b.distance || (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0]?.menu || null;
-    }
-
-    function menuLooksLikeVoiceContextMenu(menu) {
-        const text = compactText(menu);
-        return /\u8f6c\u6587\u5b57|\u8bed\u97f3|voice|audio|ptt/i.test(text);
-    }
-
-    function menuLooksLikeFileContextMenu(menu) {
-        const text = compactText(menu);
-        return /\u53e6\u5b58\u4e3a|\u6253\u5f00\u6587\u4ef6\u5939|openfolder|saveas/i.test(text) && !menuLooksLikeVoiceContextMenu(menu);
-    }
-
-    function setNativeMenuItemLabel(item, label) {
-        const text = item.querySelector?.('.q-context-menu-item__text,[class*="context-menu-item__text"]');
-        if (text) {
-            text.textContent = label;
-            return;
-        }
-        const textNode = Array.from(item.childNodes || [])
-            .find(node => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim());
-        if (textNode) {
-            textNode.nodeValue = label;
-            return;
-        }
-        item.append(document.createTextNode(label));
-    }
-
-    function setNativeMenuItemSaveIcon(item) {
-        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
-        if (!icon) {
-            return;
-        }
-        icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M5 19h14"/></svg>';
-        icon.style.display = icon.style.display || 'flex';
-        icon.style.alignItems = 'center';
-        icon.style.justifyContent = 'center';
-        icon.style.background = 'transparent';
-        icon.style.backgroundImage = 'none';
-        icon.style.maskImage = 'none';
-        icon.style.webkitMaskImage = 'none';
-        icon.querySelector('svg')?.setAttribute('aria-hidden', 'true');
-    }
-
-    function createPttSaveMenuItem(menu, ptt) {
-        const template = getNativeMenuItemElements(menu)[0];
-        const item = template?.cloneNode(true) || document.createElement('div');
-        item.classList?.add('qqnt-toolbox-voice-save-item');
-        item.removeAttribute('id');
-        item.setAttribute('role', item.getAttribute('role') || 'menuitem');
-        item.setAttribute('tabindex', '-1');
-        setNativeMenuItemLabel(item, '\u4fdd\u5b58');
-        setNativeMenuItemSaveIcon(item);
-        const stop = event => {
-            event.preventDefault();
-            event.stopPropagation();
-            event.stopImmediatePropagation?.();
-        };
-        item.addEventListener('pointerdown', stop, true);
-        item.addEventListener('mousedown', stop, true);
-        item.addEventListener('click', event => {
-            stop(event);
-            enqueueAction({ type: 'savePtt', ptt });
-            menu.remove();
-        }, true);
-        return item;
-    }
-
-    function removePttSaveMenuItems() {
-        document.querySelectorAll('.qqnt-toolbox-voice-save-item').forEach(item => item.remove());
-    }
-
-    function insertPttSaveMenu(point, ptt, menu = null, options = {}) {
-        if (!isVoiceSaveInContextMenuEnabled()) {
-            return false;
-        }
-        menu = menu || findNativeContextMenuNear(point);
-        if (!menu || menu.querySelector('.qqnt-toolbox-voice-save-item')) {
-            return Boolean(menu);
-        }
-        if (!options.allowUnhintedMenu && !menuLooksLikeVoiceContextMenu(menu)) {
-            return true;
-        }
-        const items = getNativeMenuItemElements(menu);
-        const afterItem = items.find(item => compactText(item) === '\u6536\u85cf') || items[items.length - 1];
-        const saveItem = createPttSaveMenuItem(menu, ptt);
-        if (afterItem?.parentElement) {
-            afterItem.parentElement.insertBefore(saveItem, afterItem.nextSibling);
-        } else {
-            menu.append(saveItem);
-        }
-        return true;
-    }
-
-    function schedulePttSaveMenu(event) {
-        if (!isVoiceSaveInContextMenuEnabled()) {
-            return;
-        }
-        const point = { x: event.clientX, y: event.clientY };
-        let directPtt = null;
-        let scannedDirect = false;
-        const run = () => {
-            if (!isVoiceSaveInContextMenuEnabled()) {
-                removePttSaveMenuItems();
-                return true;
-            }
-            const menu = findNativeContextMenuNear(point);
-            if (!menu) {
-                return Boolean(menu);
-            }
-            if (menuLooksLikeFileContextMenu(menu)) {
-                return true;
-            }
-            if (!scannedDirect) {
-                scannedDirect = true;
-                directPtt = collectPttsFromContextEvent(event)[0] || null;
-            }
-            return directPtt ? insertPttSaveMenu(point, directPtt, menu, { allowUnhintedMenu: true }) : true;
-        };
-        setTimeout(run, 0);
-        setTimeout(run, 48);
-        setTimeout(run, 140);
-    }
-
-    function install() {
-        if (window.__voiceFileSenderInstalled) {
-            return;
-        }
-        window.__voiceFileSenderInstalled = true;
-        document.addEventListener('dragover', event => {
-            if (!isVoiceFeatureEnabled()) {
-                return;
-            }
-            if (!getVoiceDropTarget(event) || getDropMediaPaths(event.dataTransfer).length === 0) {
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            event.dataTransfer.dropEffect = 'copy';
-        }, true);
-        document.addEventListener('drop', event => {
-            if (!isVoiceFeatureEnabled()) {
-                return;
-            }
-            const panel = getVoiceDropTarget(event);
-            const paths = getDropMediaPaths(event.dataTransfer);
-            if (!panel || paths.length === 0) {
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            enqueueAction({
-                type: 'drop',
-                paths,
-                peer: getCurrentPeer()
-            });
-        }, true);
-        document.addEventListener('contextmenu', event => {
-            if (!isVoiceFeatureEnabled()) {
-                return;
-            }
-            const trigger = findVoiceLibraryTriggerFromEvent(event);
-            if (trigger) {
-                getBridge().lastLibraryTrigger = trigger;
-                event.preventDefault();
-                event.stopPropagation();
-                event.stopImmediatePropagation?.();
-                openLibraryPanelDebounced();
-                return;
-            }
-            schedulePttSaveMenu(event);
-        }, true);
-        for (const eventName of ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick', 'contextmenu', 'wheel', 'dragover', 'drop', 'keydown', 'keyup']) {
-            document.addEventListener(eventName, blockDocumentWhileLibraryOpen, true);
-        }
-        window.addEventListener('resize', () => updateLibraryPanelPlacement(), true);
-        window.addEventListener('scroll', () => updateLibraryPanelPlacement(), true);
-    }
-
-    const bridge = getBridge();
-    bridge.enabled = window.__voiceFileSenderEnabled !== false;
-    bridge.saveInContextMenu = window.__voiceFileSenderSaveInContextMenuEnabled !== false;
-    bridge.setEnabled = enabled => {
-        bridge.enabled = enabled !== false;
-        if (!bridge.enabled) {
-            closeLibraryPanel();
-            removePttSaveMenuItems();
-        }
-    };
-    bridge.setSaveInContextMenuEnabled = enabled => {
-        bridge.saveInContextMenu = enabled !== false;
-        if (!bridge.saveInContextMenu) {
-            removePttSaveMenuItems();
-        }
-    };
-    bridge.setStatus = (text, options = {}) => libraryPanel.setStatus(text, options);
-    bridge.setLibrary = payload => libraryPanel.setLibrary(payload);
-    bridge.playPreview = payload => libraryPanel.playPreview(payload);
-    install();
-
-    return new Promise(resolve => {
-        const nextBridge = getBridge();
-        nextBridge.resolve = resolve;
-        flushActionQueue();
-    });
-}
-
 const windowStates = new WeakMap();
+const PTT_FORWARD_TTL_MS = 2 * 60 * 1000;
 
 function getWindowState(browserWindow) {
     let state = windowStates.get(browserWindow);
@@ -3754,6 +1198,131 @@ function rememberNativePeerAliases(browserWindow, args) {
 function handleVoiceNativeSend(browserWindow, _channel, args) {
     rememberNativePeerAliases(browserWindow, args);
     return false;
+}
+
+function findForwardRequestPayload(value, sourceMsgId, depth = 0, seen = new WeakSet()) {
+    if (!value || depth > 8 || typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
+        return null;
+    }
+    if (seen.has(value)) {
+        return null;
+    }
+    seen.add(value);
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = findForwardRequestPayload(item, sourceMsgId, depth + 1, seen);
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    }
+    if (Array.isArray(value.msgIds) && value.msgIds.some(msgId => String(msgId) === sourceMsgId)) {
+        return value;
+    }
+    for (const item of Object.values(value)) {
+        const found = findForwardRequestPayload(item, sourceMsgId, depth + 1, seen);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+}
+
+function replyToBlockedNativeRequest(event, request, result = { result: 0 }) {
+    const sender = event?.sender;
+    if (!sender || sender.isDestroyed?.() || !request?.callbackId) {
+        return;
+    }
+    const peerId = Number(request.peerId) || sender.id;
+    setImmediate(() => {
+        if (!sender.isDestroyed?.()) {
+            sender.send(`RM_IPCFROM_MAIN${peerId}`, {
+                callbackId: request.callbackId,
+                promiseStatue: 'full',
+                promiseStatus: 'full',
+                type: 'response',
+                eventName: request.eventName,
+                peerId
+            }, result);
+        }
+    });
+}
+
+function handleVoiceNativeRequest(browserWindow, channel, args) {
+    const state = getWindowState(browserWindow);
+    const pending = state.pendingNativePttForward;
+    if (!pending) {
+        return false;
+    }
+    if (pending.expiresAt < Date.now()) {
+        state.pendingNativePttForward = null;
+        return false;
+    }
+    const command = args.find(value => value?.cmdName && value?.payload !== undefined);
+    if (!command || !/forward/i.test(String(command.cmdName || ''))) {
+        return false;
+    }
+    const payload = findForwardRequestPayload(command.payload, pending.sourceMsgId);
+    if (!payload) {
+        return false;
+    }
+    const peers = normalizeForwardTargets(payload.dstContacts);
+    state.pendingNativePttForward = null;
+    replyToBlockedNativeRequest(args[0], args.find(value => value?.callbackId), { result: 0 });
+    if (!peers.length) {
+        setInjectedStatus(browserWindow, '\u8f6c\u53d1\u76ee\u6807\u8bfb\u53d6\u5931\u8d25', {
+            disabled: false,
+            error: true,
+            resetAfterMs: 2200
+        }).catch(() => {});
+        return true;
+    }
+    Promise.resolve().then(async () => {
+        for (const peer of peers) {
+            await sendPttInfoAsPtt(browserWindow, peer, pending.ptt);
+        }
+    }).catch(error => setInjectedStatus(browserWindow, error?.message || String(error), {
+        disabled: false,
+        error: true,
+        resetAfterMs: 2600
+    }));
+    return true;
+}
+
+function prepareNativePttForward(browserWindow, ptt, sourceMsgId) {
+    if (!voiceForwardInContextMenuEnabled) {
+        return;
+    }
+    ptt = sanitizePttInfo(ptt);
+    sourceMsgId = normalizePeerText(sourceMsgId);
+    if (!ptt || !sourceMsgId) {
+        throw new Error('\u65e0\u6cd5\u8bfb\u53d6\u5f85\u8f6c\u53d1\u7684\u8bed\u97f3\u6d88\u606f\u3002');
+    }
+    getWindowState(browserWindow).pendingNativePttForward = {
+        expiresAt: Date.now() + PTT_FORWARD_TTL_MS,
+        ptt,
+        sourceMsgId
+    };
+}
+
+function normalizeForwardTargets(dstContacts) {
+    const seen = new Set();
+    return (Array.isArray(dstContacts) ? dstContacts : [])
+        .map(contact => ({
+            chatType: Number(contact?.chatType) || 0,
+            peerUid: normalizePeerText(contact?.peerUid),
+            peerUin: normalizePeerText(contact?.peerUin),
+            guildId: normalizePeerText(contact?.guildId)
+        }))
+        .filter(peer => {
+            const key = `${peer.chatType}:${peer.peerUid}`;
+            if (![1, 2, 100].includes(peer.chatType) || !peer.peerUid || seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
 }
 
 async function generateMsgUniqueId(browserWindow, chatType) {
@@ -3911,7 +1480,7 @@ function normalizeSendPeer(browserWindow, peer) {
 
 async function sendMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) {
     peer = normalizeSendPeer(browserWindow, peer);
-    if (!isSupportedMediaPath(mediaPath)) {
+    if (!isSupportedMediaPath(mediaPath) && !isSilkFile(mediaPath)) {
         throw new Error(`Unsupported audio or video file: ${mediaPath}`);
     }
     const silkResult = await encodeMediaFileToSilk(mediaPath, options);
@@ -3934,27 +1503,18 @@ async function sendMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) 
 }
 
 async function sendSilkPathAsPtt(browserWindow, peer, silkPath, durationSeconds = 0) {
-    peer = normalizeSendPeer(browserWindow, peer);
     if (!silkPath || !fsSync.existsSync(silkPath)) {
         throw new Error(`Voice file was not found: ${silkPath}`);
     }
-    if (!isSilkFile(silkPath)) {
-        return await sendMediaPathAsPtt(browserWindow, peer, silkPath);
-    }
-    const silkData = await fs.readFile(silkPath);
-    const pttElement = await createPttElement(
-        silkPath,
-        durationSeconds,
-        await calculateSilkWaveAmplitudes(silkData)
-    );
-    const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
-    const msgAttributeInfos = makeSendAttributeInfos(attrId);
-    return await sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos, attrId);
+    return await sendMediaPathAsPtt(browserWindow, peer, silkPath, {
+        durationMs: Number(durationSeconds) > 0 ? Number(durationSeconds) * 1000 : undefined
+    });
 }
 
 async function waitForInjectedAction(browserWindow) {
     const source = `window.__voiceFileSenderEnabled = ${JSON.stringify(voiceFeatureEnabled)};` +
         `window.__voiceFileSenderSaveInContextMenuEnabled = ${JSON.stringify(voiceSaveInContextMenuEnabled)};` +
+        `window.__voiceFileSenderForwardInContextMenuEnabled = ${JSON.stringify(voiceForwardInContextMenuEnabled)};` +
         `(${injectedVoiceFileSenderUi.toString()})((${createVoiceLibraryPanel.toString()}), ${JSON.stringify(VOICE_LIBRARY_PANEL_CSS)})`;
     return await browserWindow.webContents.executeJavaScript(source, true);
 }
@@ -3968,7 +1528,6 @@ async function sendLibraryItemAsPtt(browserWindow, peer, itemId) {
         return await sendSilkPathAsPtt(browserWindow, peer, item.path, Number(item.duration) || 0);
     }
     return await sendMediaPathAsPtt(browserWindow, peer, item.path, {
-        allowSilk: item.kind === 'ptt',
         durationMs: Number(item.duration) > 0 ? Number(item.duration) * 1000 : undefined
     });
 }
@@ -3979,7 +1538,6 @@ async function sendPttInfoAsPtt(browserWindow, peer, ptt) {
         throw new Error('The voice file was not found in QQNT cache. Play it once, then try again.');
     }
     return await sendMediaPathAsPtt(browserWindow, peer, sourcePath, {
-        allowSilk: true,
         durationMs: Number(ptt?.duration) > 0 ? Number(ptt.duration) * 1000 : undefined
     });
 }
@@ -4009,6 +1567,13 @@ async function handleInjectedAction(browserWindow, action) {
         }
         await addPttToLibrary(action.ptt);
         await refreshInjectedLibrary(browserWindow, '已保存', action.folder || '');
+        return;
+    }
+    if (action.type === 'prepareNativePttForward') {
+        if (!voiceForwardInContextMenuEnabled) {
+            return;
+        }
+        prepareNativePttForward(browserWindow, action.ptt, action.sourceMsgId);
         return;
     }
     if (action.type === 'pickSave') {
@@ -4121,6 +1686,7 @@ function setupBrowserWindow(browserWindow) {
         return;
     }
     addNativeSendHandler(browserWindow, handleVoiceNativeSend);
+    addNativeRequestHandler(browserWindow, handleVoiceNativeRequest);
     const start = () => runInjectedUiLoop(browserWindow).catch(() => {});
     browserWindow.webContents.once('dom-ready', () => setTimeout(start, 500));
     browserWindow.webContents.on('did-finish-load', () => setTimeout(start, 500));
@@ -4153,8 +1719,16 @@ async function setInjectedSaveInContextMenuEnabled(browserWindow, enabled) {
     await browserWindow.webContents.executeJavaScript(source, true).catch(() => {});
 }
 
+async function setInjectedForwardInContextMenuEnabled(browserWindow, enabled) {
+    if (!browserWindow || browserWindow.isDestroyed()) {
+        return;
+    }
+    const source = `window.__voiceFileSenderForwardInContextMenuEnabled = ${JSON.stringify(enabled)}; window.__voiceFileSenderBridge?.setForwardInContextMenuEnabled?.(${JSON.stringify(enabled)});`;
+    await browserWindow.webContents.executeJavaScript(source, true).catch(() => {});
+}
+
 function setEnabled(enabled) {
-    voiceFeatureEnabled = enabled !== false;
+    voiceFeatureEnabled = enabled === true;
     for (const browserWindow of BrowserWindow.getAllWindows()) {
         setInjectedEnabled(browserWindow, voiceFeatureEnabled);
     }
@@ -4164,9 +1738,16 @@ function setEnabled(enabled) {
 }
 
 function setSaveInContextMenuEnabled(enabled) {
-    voiceSaveInContextMenuEnabled = enabled !== false;
+    voiceSaveInContextMenuEnabled = enabled === true;
     for (const browserWindow of BrowserWindow.getAllWindows()) {
         setInjectedSaveInContextMenuEnabled(browserWindow, voiceSaveInContextMenuEnabled);
+    }
+}
+
+function setForwardInContextMenuEnabled(enabled) {
+    voiceForwardInContextMenuEnabled = enabled === true;
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        setInjectedForwardInContextMenuEnabled(browserWindow, voiceForwardInContextMenuEnabled);
     }
 }
 
@@ -4181,8 +1762,8 @@ module.exports = {
     onBrowserWindowCreated,
     setEnabled,
     setSaveInContextMenuEnabled,
+    setForwardInContextMenuEnabled,
     setFakeDurationSeconds,
-    createPttPreviewItem,
     sendPttInfoAsPtt,
     sanitizePttInfo,
     runTool

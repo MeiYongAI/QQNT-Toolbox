@@ -51,18 +51,6 @@ $runtimeFiles = @(
     'manifest.json',
     'package.json',
     'native/poke-bridge.win32-x64.node',
-    'src/main.js',
-    'src/native-ipc.js',
-    'src/png-variant.js',
-    'src/poke-protocol.js',
-    'src/preload.js',
-    'src/repeat-message.js',
-    'src/recall-viewer-preload.js',
-    'src/recall-viewer.html',
-    'src/recall-viewer.js',
-    'src/renderer.js',
-    'src/settings.css',
-    'src/voice-file-sender.js',
     'node_modules/@zip.js/zip.js/LICENSE',
     'node_modules/@zip.js/zip.js/index.cjs',
     'node_modules/@zip.js/zip.js/package.json',
@@ -72,6 +60,12 @@ $runtimeFiles = @(
     'node_modules/silk-wasm/lib/silk_wasm.wasm'
 )
 $runtimeFiles | ForEach-Object { Copy-ReleaseFile $_ }
+Get-ChildItem -LiteralPath (Join-Path $repoRoot 'src') -Recurse -File | ForEach-Object {
+    if (-not $_.FullName.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Source file escaped the repository: $($_.FullName)"
+    }
+    Copy-ReleaseFile $_.FullName.Substring($rootPrefix.Length)
+}
 
 $assetPath = Join-Path $distRoot "QQNT-Toolbox-v$Version.zip"
 if (Test-Path -LiteralPath $assetPath) {
@@ -94,9 +88,16 @@ try {
     }
     foreach ($required in @(
         'QQNT-Toolbox/manifest.json',
+        'QQNT-Toolbox/src/ipc-channels.js',
         'QQNT-Toolbox/src/native-ipc.js',
+        'QQNT-Toolbox/src/recall-image-url.js',
+        'QQNT-Toolbox/src/recall-viewer.html',
+        'QQNT-Toolbox/src/recall-viewer.js',
+        'QQNT-Toolbox/src/recall-viewer-preload.js',
         'QQNT-Toolbox/src/repeat-message.js',
         'QQNT-Toolbox/src/settings.css',
+        'QQNT-Toolbox/src/voice/media.js',
+        'QQNT-Toolbox/src/voice/renderer-ui.js',
         'QQNT-Toolbox/native/poke-bridge.win32-x64.node',
         'QQNT-Toolbox/node_modules/silk-wasm/lib/silk_wasm.wasm'
     )) {

@@ -44,28 +44,17 @@
         return avatar;
     }
 
-    function formatDate(value) {
+    function formatMessageTime(value) {
         const timestamp = Number(value);
         if (!timestamp) {
-            return '未知时间';
+            return '';
         }
         const date = new Date(timestamp > 100000000000 ? timestamp : timestamp * 1000);
         if (Number.isNaN(date.getTime())) {
-            return '未知时间';
+            return '';
         }
-        const parts = new Intl.DateTimeFormat('zh-CN', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        }).formatToParts(date).reduce((result, part) => {
-            result[part.type] = part.value;
-            return result;
-        }, {});
-        return `${parts.year}年${parts.month}月${parts.day}日 ${parts.hour}:${parts.minute}:${parts.second}`;
+        const pad = part => String(part).padStart(2, '0');
+        return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     }
 
     function formatDuration(value) {
@@ -96,77 +85,6 @@
         toastTimer = window.setTimeout(() => toast.remove(), duration);
     }
 
-    function getCopyPartText(part) {
-        if (part.type === 'text' || part.type === 'mention') {
-            return part.text || '';
-        }
-        if (part.type === 'image') {
-            return `[图片]${part.name ? ` ${part.name}` : ''}`;
-        }
-        if (part.type === 'voice') {
-            const label = `[语音 ${formatDuration(part.duration)}]`;
-            return part.transcript ? `${label} ${part.transcript}` : label;
-        }
-        if (part.type === 'reply') {
-            return `回复：${part.text || '[消息]'}`;
-        }
-        if (part.type === 'file') {
-            return `[文件] ${part.name || '文件'}`;
-        }
-        if (part.type === 'video') {
-            return `[视频] ${part.name || '视频'}`;
-        }
-        if (part.type === 'face') {
-            return `[表情] ${part.name || '表情'}`;
-        }
-        if (part.type === 'card') {
-            return [part.title || '卡片消息', part.subtitle || ''].filter(Boolean).join('\n');
-        }
-        if (part.type === 'forward') {
-            const forward = parseForwardPart(part);
-            return [forward.title, forward.summary].filter(Boolean).join('\n');
-        }
-        return part.text || '暂不支持的消息';
-    }
-
-    function getMessageCopyText(message) {
-        const segments = [];
-        let textRun = '';
-        const flushText = () => {
-            if (textRun) {
-                segments.push(textRun);
-                textRun = '';
-            }
-        };
-        for (const part of Array.isArray(message?.parts) ? message.parts : []) {
-            if (part.type === 'text' || part.type === 'mention') {
-                textRun += part.text || '';
-                continue;
-            }
-            flushText();
-            const value = String(getCopyPartText(part) || '').trim();
-            if (value) {
-                segments.push(value);
-            }
-        }
-        flushText();
-        return segments.join('\n').trim();
-    }
-
-    async function copyMessage(message) {
-        const text = getMessageCopyText(message);
-        if (!text) {
-            showToast('没有可复制的内容');
-            return;
-        }
-        try {
-            await api.copyText(text);
-            showToast('已复制', 1200);
-        } catch {
-            showToast('复制失败');
-        }
-    }
-
     function hasSelectionWithin(element) {
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed || !selection.toString().trim() || selection.rangeCount === 0) {
@@ -191,17 +109,6 @@
         for (const eventName of ['pointerdown', 'mousedown', 'click', 'dblclick']) {
             element.addEventListener(eventName, event => event.stopPropagation());
         }
-    }
-
-    function createMessageAction(label, handler) {
-        const button = createElement('button', 'message-action', label);
-        button.type = 'button';
-        button.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            handler();
-        });
-        return button;
     }
 
     function applyImageDimensions(imageItem, width, height) {
@@ -488,6 +395,7 @@
             const avatar = createAvatar(message.avatarUrl, message.sender, 'message-avatar');
             const box = createElement('div', 'message-box');
             const sender = createElement('p', 'sender', message.sender || '未知发送者');
+            const messageTime = formatMessageTime(message.recallTime || message.msgTime);
             const content = createElement('div', 'message-content');
             const parts = createElement('div', 'message-parts');
             content.tabIndex = 0;
@@ -533,19 +441,10 @@
                 }
             });
 
-            const detail = createElement(
-                'div',
-                'recall-detail',
-                `${formatDate(message.recallTime || message.msgTime)} · ${message.operator || '未知用户'} 撤回`
-            );
-            const actions = createElement('div', 'message-actions');
-            actions.append(
-                createMessageAction('复制', () => copyMessage(message)),
-                createMessageAction('定位', () => jumpToMessage(message))
-            );
-            const meta = createElement('div', 'message-meta');
-            meta.append(detail, actions);
-            box.append(sender, content, meta);
+            box.append(sender, content);
+            if (messageTime) {
+                box.appendChild(createElement('time', 'message-time', messageTime));
+            }
             item.append(avatar, box);
             fragment.appendChild(item);
         }

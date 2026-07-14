@@ -86,6 +86,29 @@ test('shares one send patch across handlers and honors blocking', () => {
     assert.deepEqual(browserWindow.webContents.sent, [['normal', 1]]);
 });
 
+test('shares one request patch across handlers and honors blocking', () => {
+    const browserWindow = new FakeBrowserWindow(14);
+    const calls = [];
+    let delivered = 0;
+    const channel = 'RM_IPCFROM_RENDERER14';
+    ipcMain.on(channel, () => {
+        delivered += 1;
+    });
+    nativeIpc.addNativeRequestHandler(browserWindow, (_window, requestChannel, args) => {
+        calls.push(`${requestChannel}:${args[2]?.cmdName}`);
+        return args[2]?.cmdName === 'blocked';
+    });
+
+    const event = { sender: browserWindow.webContents };
+    assert.equal(ipcMain.emit(channel, event, {}, { cmdName: 'normal' }), true);
+    assert.equal(ipcMain.emit(channel, event, {}, { cmdName: 'blocked' }), true);
+    assert.equal(delivered, 1);
+    assert.deepEqual(calls, [
+        `${channel}:normal`,
+        `${channel}:blocked`
+    ]);
+});
+
 test('resolves native invoke responses through the shared waiter', async () => {
     const browserWindow = new FakeBrowserWindow(12);
     const channel = 'RM_IPCFROM_RENDERER12';
@@ -131,4 +154,22 @@ test('matches message events and rejects waiters when a window closes', async ()
     const pending = nativeIpc.createNativeEventWaiter(browserWindow, 'never', 10000);
     browserWindow.close();
     await assert.rejects(pending.promise, /closed before the native response/);
+});
+
+test('supports predicate matching for correlated native events', async () => {
+    const browserWindow = new FakeBrowserWindow(15);
+    const completed = nativeIpc.createNativeEventWaiter(browserWindow, (_response, result) =>
+        result?.cmdName === 'nodeIKernelMsgListener/onRichMediaDownloadComplete' &&
+        result?.payload?.msgId === 'wanted' &&
+        result?.payload?.msgElementId === 'element-2'
+    );
+    browserWindow.webContents.send('RM_IPCFROM_MAIN15', {}, {
+        cmdName: 'nodeIKernelMsgListener/onRichMediaDownloadComplete',
+        payload: { msgId: 'other', msgElementId: 'element-1', filePath: 'wrong.jpg' }
+    });
+    browserWindow.webContents.send('RM_IPCFROM_MAIN15', {}, {
+        cmdName: 'nodeIKernelMsgListener/onRichMediaDownloadComplete',
+        payload: { msgId: 'wanted', msgElementId: 'element-2', filePath: 'right.jpg' }
+    });
+    assert.equal((await completed.promise).payload.filePath, 'right.jpg');
 });

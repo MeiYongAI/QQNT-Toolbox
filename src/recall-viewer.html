@@ -220,6 +220,16 @@
             overflow-wrap: anywhere;
             user-select: text;
         }
+        .message-time {
+            display: block;
+            margin-top: 2px;
+            padding-left: 8px;
+            color: var(--secondary-text);
+            font-size: 11px;
+            line-height: 14px;
+            white-space: nowrap;
+            user-select: text;
+        }
         .message-content {
             display: inline-block;
             width: fit-content;
@@ -329,51 +339,6 @@
             max-width: 100%;
             flex-direction: column;
             gap: 6px;
-        }
-        .message-meta {
-            display: flex;
-            width: 100%;
-            min-height: 26px;
-            margin-top: 2px;
-            padding: 0 4px 0 8px;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-        .recall-detail {
-            min-width: 0;
-            margin: 0;
-            color: var(--secondary-text);
-            font-size: 11px;
-            line-height: 14px;
-            overflow-wrap: anywhere;
-            user-select: text;
-        }
-        .message-actions {
-            display: flex;
-            flex: 0 0 auto;
-            align-items: center;
-            gap: 2px;
-            user-select: none;
-        }
-        .message-action {
-            height: 24px;
-            padding: 0 6px;
-            border: 0;
-            border-radius: 4px;
-            color: var(--secondary-text);
-            background: transparent;
-            font: inherit;
-            font-size: 12px;
-            line-height: 1;
-            letter-spacing: 0;
-            cursor: pointer;
-        }
-        .message-action:hover,
-        .message-action:focus-visible {
-            color: var(--message-text);
-            background: var(--subtle-bg);
-            outline: none;
         }
         .reply-preview {
             max-width: 100%;

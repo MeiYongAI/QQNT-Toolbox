@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const { ipcMain } = require('electron');
 
 const windowStates = new WeakMap();
+const requestWindows = new Map();
+let requestInterceptorInstalled = false;
 
 function safeJson(value) {
     try {
@@ -154,6 +156,13 @@ function matchesNativeResponse(waitResponse, callbackId, response, result) {
     if (waitResponse === true) {
         return response?.callbackId === callbackId;
     }
+    if (typeof waitResponse === 'function') {
+        try {
+            return waitResponse(response, result, callbackId) === true;
+        } catch {
+            return false;
+        }
+    }
     if (typeof waitResponse === 'object' && waitResponse) {
         const cmdName = waitResponse.cmdName;
         if (cmdName && response?.cmdName !== cmdName && result?.cmdName !== cmdName) {
@@ -185,6 +194,7 @@ function getWindowState(browserWindow) {
     if (!state) {
         state = {
             handlers: new Map(),
+            requestHandlers: new Map(),
             installed: false,
             originalSend: null,
             waiters: new Set(),
@@ -216,7 +226,43 @@ function disposeWindow(browserWindow, state) {
         }
     }
     state.handlers.clear();
+    state.requestHandlers.clear();
+    requestWindows.delete(browserWindow);
     windowStates.delete(browserWindow);
+}
+
+function installNativeRequestInterceptor() {
+    if (requestInterceptorInstalled) {
+        return;
+    }
+    const originalEmit = ipcMain.emit;
+    ipcMain.emit = function(channel, ...args) {
+        let blocked = false;
+        if (typeof channel === 'string' && channel.startsWith('RM_IPCFROM_RENDERER')) {
+            const sender = args[0]?.sender;
+            for (const [browserWindow, state] of requestWindows) {
+                if (browserWindow.webContents !== sender) {
+                    continue;
+                }
+                for (const [handler, onError] of Array.from(state.requestHandlers)) {
+                    try {
+                        blocked = handler(browserWindow, channel, args) === true || blocked;
+                    } catch (error) {
+                        try {
+                            onError?.(error);
+                        } catch {
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        if (blocked) {
+            return true;
+        }
+        return Reflect.apply(originalEmit, this, [channel, ...args]);
+    };
+    requestInterceptorInstalled = true;
 }
 
 function notifyNativeWaiters(state, channel, args) {
@@ -272,6 +318,18 @@ function addNativeSendHandler(browserWindow, handler, onError) {
     const state = getWindowState(browserWindow);
     state.handlers.set(handler, onError);
     return () => state.handlers.delete(handler);
+}
+
+function addNativeRequestHandler(browserWindow, handler, onError) {
+    if (typeof handler !== 'function') {
+        throw new TypeError('A native request handler is required.');
+    }
+    installNativeIpc(browserWindow);
+    installNativeRequestInterceptor();
+    const state = getWindowState(browserWindow);
+    state.requestHandlers.set(handler, onError);
+    requestWindows.set(browserWindow, state);
+    return () => state.requestHandlers.delete(handler);
 }
 
 function createNativeEventWaiter(browserWindow, waitResponse, timeoutMs = 10000) {
@@ -369,6 +427,7 @@ async function qqNativeInvoke(browserWindow, eventName, cmdName, payload = [], w
 }
 
 module.exports = {
+    addNativeRequestHandler,
     addNativeSendHandler,
     createNativeEventWaiter,
     installNativeIpc,

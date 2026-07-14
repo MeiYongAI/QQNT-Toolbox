@@ -1,6 +1,6 @@
 let initializeToolboxSettings = async () => {};
 
-(() => {
+(async () => {
     const PANEL_ID = 'qqnt-toolbox-panel';
     const SETTINGS_ID = 'qqnt-toolbox-settings';
     const STYLE_ID = 'qqnt-toolbox-style';
@@ -11,6 +11,7 @@ let initializeToolboxSettings = async () => {};
     const ACTIVE_REPEAT_PEER_KEY_PREFIX = 'qqnt-toolbox-active-repeat-peer';
     const MSG_TYPE_GRAY_TIPS = 5;
     const SEND_STATUS_SUCCESS_NO_SEQ = 3;
+    const TEMP_POKE_CHAT_TYPES = new Set([99, 100, 101, 102, 103, 111, 117, 119]);
     const PROFILE_CARD_HOVER_TRIGGER_SELECTOR = [
         '[class*="avatar"]',
         '.chat-header .panel-header__title',
@@ -43,22 +44,23 @@ let initializeToolboxSettings = async () => {};
     };
     const DEFAULT_CONFIG = {
         fileRetryFixer: {
-            enabled: true,
-            image: true,
-            video: true,
-            audio: true,
+            enabled: false,
+            image: false,
+            video: false,
+            audio: false,
             otherFiles: false,
             deleteFailedMessage: false,
             archivePassword: ''
         },
         repeatMessage: {
-            enabled: true,
+            enabled: false,
             doubleClick: false,
-            showInContextMenu: true
+            showInContextMenu: false
         },
         voiceMessage: {
-            enabled: true,
-            saveInContextMenu: true,
+            enabled: false,
+            saveInContextMenu: false,
+            forwardInContextMenu: false,
             fakeDurationEnabled: false,
             fakeDurationSeconds: 1
         },
@@ -70,7 +72,7 @@ let initializeToolboxSettings = async () => {};
             autoPokeBack: false,
             autoPokeBackLimit: 1,
             doubleClickAvatarPoke: false,
-            rightClickAvatarPoke: true
+            rightClickAvatarPoke: false
         },
         floatingPanel: {
             enabled: true,
@@ -79,8 +81,8 @@ let initializeToolboxSettings = async () => {};
         preventRecall: {
             enabled: false,
             preventSelfMsg: false,
-            persistedFiles: true,
-            redirectPicPath: true,
+            persistedFiles: false,
+            redirectPicPath: false,
             customColor: false,
             customTextColor: {
                 light: '#ff6666',
@@ -113,7 +115,6 @@ let initializeToolboxSettings = async () => {};
             enabled: false
         }
     };
-
     let currentConfig = clonePlain(DEFAULT_CONFIG);
     let configReady = false;
     let repeatObserver = null;
@@ -135,6 +136,8 @@ let initializeToolboxSettings = async () => {};
     let pendingAvatarPoke = null;
     let suppressAvatarClicksUntil = 0;
     let pokeAccountRegistration = null;
+    let nativeMenuSuppressionObserver = null;
+    let nativeMenuSuppressionTimer = 0;
     let activeRepeatPeerSignature = '';
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
@@ -180,6 +183,18 @@ let initializeToolboxSettings = async () => {};
 
     function getBridge() {
         return window.qqnt_toolbox || null;
+    }
+
+    async function waitForBridge(timeoutMs = 5000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const bridge = getBridge();
+            if (bridge?.getConfig) {
+                return bridge;
+            }
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        return getBridge();
     }
 
     function getByPath(object, path) {
@@ -1302,6 +1317,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'voiceMessage.enabled',
                     child: true
                 }),
+                createSwitchItem(text('右键转发语音'), text('在语音消息右键菜单中显示“转发”'), 'voiceMessage.forwardInContextMenu', {
+                    requires: 'voiceMessage.enabled',
+                    child: true
+                }),
                 createSwitchItem(text('修改语音时长'), text('仅改变发送后的显示时长'), 'voiceMessage.fakeDurationEnabled', {
                     requires: 'voiceMessage.enabled',
                     child: true
@@ -1330,10 +1349,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('拦截自己的撤回操作'), text('本人发起的撤回也将被拦截'), 'preventRecall.preventSelfMsg', {
                     requires: 'preventRecall.enabled'
                 }),
-                createSwitchItem(text('持久化保存'), text('将撤回记录保存在插件的数据目录中'), 'preventRecall.persistedFiles', {
+                createSwitchItem(text('持久化保存'), text('按当前账号保存撤回记录'), 'preventRecall.persistedFiles', {
                     requires: 'preventRecall.enabled'
                 }),
-                createSwitchItem(text('重定向图片储存路径'), text('将被撤回图片保存到插件的数据目录下'), 'preventRecall.redirectPicPath', {
+                createSwitchItem(text('重定向图片储存路径'), text('按当前账号保存被撤回图片'), 'preventRecall.redirectPicPath', {
                     requires: 'preventRecall.enabled'
                 }),
                 createActionItem(text('查看重定向图片'), text('打开重定向图片储存路径'), 'openRecallImageDir', {
@@ -1347,10 +1366,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'preventRecall.customColor',
                     child: true
                 }),
-                createActionItem(text('查看撤回消息'), text('查看所有的撤回数据'), 'viewRecallMessages', {
+                createActionItem(text('查看撤回消息'), text('查看当前账号的撤回数据'), 'viewRecallMessages', {
                     label: text('查看')
                 }),
-                createActionItem(text('清理撤回缓存'), text('清理内存和本地撤回数据'), 'clearRecallCache', {
+                createActionItem(text('清理撤回缓存'), text('清理当前账号的内存和本地数据'), 'clearRecallCache', {
                     label: text('清理'),
                     danger: true
                 })
@@ -1399,7 +1418,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 .find(item => item?.manifest?.slug === 'qqnt_toolbox');
             meta.append(
                 createElement('span', 'qqnt-toolbox-settings-name', 'QQNT Toolbox'),
-                createElement('span', 'qqnt-toolbox-settings-version', `v${plugin?.manifest?.version || '0.6.3'}`)
+                createElement('span', 'qqnt-toolbox-settings-version', `v${plugin?.manifest?.version || '0.6.4'}`)
             );
             panel.append(meta, body);
             options.mount?.appendChild(panel);
@@ -2510,7 +2529,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             messageBadgeResizeObserver?.unobserve(messageElement);
             return;
         }
-        const target = getMessageBadgeTarget(messageElement, record);
+        const target = getRepeatButtonTarget(messageElement, record);
         const host = getMessageLayoutHost(messageElement);
         anchors.forEach(anchor => {
             if (anchor !== host) {
@@ -3015,11 +3034,37 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return null;
     }
 
-    function getPokePayload(avatar) {
+    function getPokeChatContext(avatar) {
         const record = findMessageRecordFromElement(avatar);
         const aioData = getCurrentAioData() || {};
         const header = aioData.header || {};
-        const chatType = Number(record?.chatType || aioData.chatType || header.chatType || 0);
+        const chatTypes = [
+            aioData.chatType,
+            aioData.type,
+            aioData.aioType,
+            aioData.peer?.chatType,
+            aioData.contact?.chatType,
+            header.chatType,
+            header.type,
+            header.peer?.chatType,
+            header.contact?.chatType,
+            record?.chatType,
+            record?.peer?.chatType
+        ].map(Number).filter(value => Number.isFinite(value) && value > 0);
+        return {
+            record,
+            aioData,
+            header,
+            chatType: chatTypes[0] || 0,
+            isTemporary: chatTypes.some(value => TEMP_POKE_CHAT_TYPES.has(value))
+        };
+    }
+
+    function getPokePayload(avatar, context = getPokeChatContext(avatar)) {
+        const { record, aioData, header, chatType, isTemporary } = context;
+        if (isTemporary) {
+            return null;
+        }
         const peerUid = normalizeText(
             record?.peerUid ||
             record?.peer?.peerUid ||
@@ -3112,6 +3157,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             pendingAvatarPoke = null;
             return;
         }
+        const context = getPokeChatContext(avatar);
+        if (context.isTemporary) {
+            stopAvatarEvent(event);
+            suppressAvatarClicksUntil = now + 650;
+            pendingAvatarPoke = null;
+            return;
+        }
+        const payload = getPokePayload(avatar, context);
+        if (!payload) {
+            pendingAvatarPoke = null;
+            return;
+        }
         const isSecondPress = pending && pending.avatar === avatar && now - pending.time <= 480 &&
             Math.hypot(event.clientX - pending.x, event.clientY - pending.y) <= 20;
         if (isSecondPress) {
@@ -3129,7 +3186,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             x: event.clientX,
             y: event.clientY,
             avatar,
-            payload: getPokePayload(avatar)
+            payload
         };
         pendingAvatarPoke = next;
         window.setTimeout(() => {
@@ -3154,7 +3211,17 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         const avatar = getPokeAvatarFromEvent(event);
-        const payload = avatar && getPokePayload(avatar);
+        if (!avatar) {
+            return;
+        }
+        const context = getPokeChatContext(avatar);
+        if (context.isTemporary) {
+            stopAvatarEvent(event);
+            suppressAvatarClicksUntil = performance.now() + 650;
+            pendingAvatarPoke = null;
+            return;
+        }
+        const payload = getPokePayload(avatar, context);
         if (!payload) {
             return;
         }
@@ -3719,9 +3786,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             .slice(0, 28);
     }
 
-    function findNativeContextMenuNear(point) {
-        const menus = Array.from(document.querySelectorAll('.q-context-menu, [class*="context-menu"], [role="menu"]'))
+    function getVisibleNativeContextMenus() {
+        return Array.from(document.querySelectorAll('.q-context-menu, [class*="context-menu"], [role="menu"]'))
             .filter(menu => {
+                if (menu.id === POKE_FALLBACK_MENU_ID) {
+                    return false;
+                }
                 if (menu.matches('.q-context-menu-item, [class*="context-menu-item"], [role="menuitem"]')) {
                     return false;
                 }
@@ -3731,6 +3801,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 const rect = menu.getBoundingClientRect();
                 return rect.width >= 40 && rect.height >= 24 && getNativeMenuItemElements(menu).length > 0;
             });
+    }
+
+    function findNativeContextMenuNear(point) {
+        const menus = getVisibleNativeContextMenus();
         return menus
             .map(menu => {
                 const rect = menu.getBoundingClientRect();
@@ -3876,13 +3950,40 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         item.addEventListener('click', event => {
             stop(event);
             sendAvatarPoke(payload, avatar, 'context-menu');
-            menu.remove();
+            if (menu.id === POKE_FALLBACK_MENU_ID) {
+                removeFallbackPokeMenu();
+            } else {
+                menu.remove();
+            }
         }, true);
         return item;
     }
 
     function removeFallbackPokeMenu() {
+        nativeMenuSuppressionObserver?.disconnect();
+        nativeMenuSuppressionObserver = null;
+        window.clearTimeout(nativeMenuSuppressionTimer);
+        nativeMenuSuppressionTimer = 0;
         document.getElementById(POKE_FALLBACK_MENU_ID)?.remove();
+    }
+
+    function suppressNativeContextMenus() {
+        nativeMenuSuppressionObserver?.disconnect();
+        window.clearTimeout(nativeMenuSuppressionTimer);
+        const removeCompetingMenus = () => {
+            getVisibleNativeContextMenus().forEach(menu => menu.remove());
+        };
+        removeCompetingMenus();
+        nativeMenuSuppressionObserver = new MutationObserver(removeCompetingMenus);
+        nativeMenuSuppressionObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+        nativeMenuSuppressionTimer = window.setTimeout(() => {
+            nativeMenuSuppressionObserver?.disconnect();
+            nativeMenuSuppressionObserver = null;
+            nativeMenuSuppressionTimer = 0;
+        }, 900);
     }
 
     function showFallbackPokeMenu(point, payload, avatar, requestId) {
@@ -3901,6 +4002,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const rect = menu.getBoundingClientRect();
         menu.style.left = `${Math.max(8, Math.min(point.x, window.innerWidth - rect.width - 8))}px`;
         menu.style.top = `${Math.max(8, Math.min(point.y, window.innerHeight - rect.height - 8))}px`;
+        suppressNativeContextMenus();
         return true;
     }
 
@@ -4096,7 +4198,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     async function loadConfig() {
-        const bridge = getBridge();
+        const bridge = await waitForBridge();
         if (!bridge?.getConfig) {
             configReady = true;
             syncMessageBadgeObserver(true);
@@ -4180,7 +4282,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         document.querySelectorAll('.qqnt-toolbox-poke-menu-item').forEach(item => item.remove());
         document.querySelectorAll('.qqnt-toolbox-poke-recall-menu-item').forEach(item => item.remove());
         const avatar = getPokeAvatarFromEvent(event);
-        const payload = avatar && getPokePayload(avatar);
+        const pokeContext = avatar ? getPokeChatContext(avatar) : null;
+        if (pokeContext?.isTemporary && isFeatureEnabled('entertainment.rightClickAvatarPoke')) {
+            stopAvatarEvent(event);
+            suppressNativeContextMenus();
+            return;
+        }
+        const payload = avatar && getPokePayload(avatar, pokeContext);
         if (payload) {
             if (!supportsNativeNudge() && Number(payload.chatType) === 1) {
                 event.preventDefault();
@@ -4209,7 +4317,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('pointerdown', event => {
         const menu = document.getElementById(POKE_FALLBACK_MENU_ID);
         if (menu && !menu.contains(event.target)) {
-            menu.remove();
+            removeFallbackPokeMenu();
         }
     }, true);
 
@@ -4243,8 +4351,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     window.addEventListener('scroll', scheduleRepeatEntrypointRefresh, true);
     window.addEventListener('focus', rememberActiveRepeatPeer);
 
-    loadConfig();
-    subscribeConfig();
+    loadConfig().then(subscribeConfig).catch(() => {});
     installProfileCardHoverBlocker();
     installPokeInteractions();
     installRepeatEntrypoints();

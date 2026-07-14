@@ -1,6 +1,6 @@
 {
   "name": "qqnt-toolbox",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "适用于 LiteLoaderQQNT 的 QQNT 工具箱插件。",
   "private": true,
   "license": "AGPL-3.0-only",
@@ -11,8 +11,8 @@
   "scripts": {
     "build:native": "cmd /d /c native\\build.cmd",
     "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\build-release.ps1",
-    "check": "node --check src/main.js && node --check src/native-ipc.js && node --check src/png-variant.js && node --check src/poke-protocol.js && node --check src/preload.js && node --check src/repeat-message.js && node --input-type=module --check < src/renderer.js && node --check src/voice-file-sender.js && node --check src/recall-viewer-preload.js && node --check src/recall-viewer.js",
-    "test": "node --test test/native-ipc.test.js test/repeat-message.test.js"
+    "check": "node tools/check-syntax.js",
+    "test": "node --test test/native-ipc.test.js test/preload-contract.test.js test/recall-image-url.test.js test/repeat-message.test.js test/voice-media.test.js"
   },
   "dependencies": {
     "@zip.js/zip.js": "2.8.26",
