@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
+const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
 const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
@@ -23,6 +24,11 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     openRecallDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_DIR),
     openRecallImageDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_IMAGE_DIR),
     viewRecallMessages: () => ipcRenderer.invoke(CHANNEL_VIEW_RECALL_MESSAGES),
+    onInlineMediaPreview: callback => {
+        const listener = (_event, payload) => callback(payload);
+        ipcRenderer.on(CHANNEL_INLINE_MEDIA_PREVIEW, listener);
+        return () => ipcRenderer.removeListener(CHANNEL_INLINE_MEDIA_PREVIEW, listener);
+    },
     onConfigChanged: callback => {
         const listener = (_event, config) => callback(config);
         ipcRenderer.on(CHANNEL_CONFIG_CHANGED, listener);

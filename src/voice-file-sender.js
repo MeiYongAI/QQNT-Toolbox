@@ -8,7 +8,6 @@ const crypto = require('crypto');
 
 const {
     addNativeRequestHandler,
-    addNativeSendHandler,
     createNativeEventWaiter,
     isNativeFailure,
     qqNativeInvoke,
@@ -683,6 +682,20 @@ async function createLibraryPreviewItem(itemId) {
     };
 }
 
+async function createPttPreviewItem(ptt) {
+    const sourcePath = resolvePttSourcePath(ptt);
+    if (!sourcePath) {
+        throw new Error('The voice file was not found in QQNT cache.');
+    }
+    const fileName = normalizeFieldText(ptt?.fileName) || path.basename(sourcePath);
+    const cacheKey = normalizeFieldText(ptt?.md5HexStr) || normalizeFieldText(ptt?.fileUuid) || fileName;
+    return {
+        title: path.basename(fileName, path.extname(fileName)) || '语音',
+        duration: Number(ptt?.duration) || await detectLibraryDurationSeconds(sourcePath),
+        previewPath: await createAudioPreviewFile(sourcePath, cacheKey)
+    };
+}
+
 function getSilkDurationSeconds(silkResult) {
     const durationMs = Number(silkResult?.duration) || estimateSilkDurationMs(silkResult?.data || Buffer.alloc(0));
     return Math.max(1, Math.ceil(durationMs / 1000));
@@ -1150,54 +1163,11 @@ function normalizePeerText(value) {
     return text && text !== 'undefined' && text !== 'null' && text !== '0' ? text : '';
 }
 
-function collectNativePeerAliases(value, results = [], depth = 0, seen = new WeakSet()) {
-    if (!value || depth > 7 || results.length > 80) {
-        return results;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            collectNativePeerAliases(item, results, depth + 1, seen);
-        }
-        return results;
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
-        return results;
-    }
-    if (seen.has(value)) {
-        return results;
-    }
-    seen.add(value);
-
-    const chatType = Number(value.chatType || value.type || value.aioType || value.peer?.chatType || value.header?.chatType) || 0;
-    const addAlias = (peerUid, peerUin) => {
-        peerUid = normalizePeerText(peerUid);
-        peerUin = normalizePeerText(peerUin);
-        if ((chatType === 1 || chatType === 100 || !chatType) && peerUid.startsWith('u_') && /^\d+$/.test(peerUin)) {
-            results.push({ peerUin, peerUid });
-        }
-    };
-    addAlias(value.peerUid || value.peer?.peerUid || value.header?.peerUid, value.peerUin || value.peer?.peerUin || value.header?.peerUin);
-    addAlias(value.senderUid || value.sender?.uid || value.sender?.peerUid, value.senderUin || value.sender?.uin || value.sender?.peerUin);
-    addAlias(value.uid || value.peer?.uid || value.header?.uid, value.uin || value.chatUin || value.peer?.uin || value.header?.uin);
-
-    for (const key of ['payload', 'msgList', 'elements', 'records', 'data', 'result', 'msgElements', 'peer', 'header', 'sender', 'sendMember']) {
-        collectNativePeerAliases(value[key], results, depth + 1, seen);
-    }
-    return results;
-}
-
-function rememberNativePeerAliases(browserWindow, args) {
+function rememberNativePeerAliases(browserWindow, aliases) {
     const state = getWindowState(browserWindow);
-    for (const arg of args) {
-        for (const alias of collectNativePeerAliases(arg)) {
-            state.peerUidByUin.set(alias.peerUin, alias.peerUid);
-        }
+    for (const alias of Array.isArray(aliases) ? aliases : []) {
+        state.peerUidByUin.set(alias.peerUin, alias.peerUid);
     }
-}
-
-function handleVoiceNativeSend(browserWindow, _channel, args) {
-    rememberNativePeerAliases(browserWindow, args);
-    return false;
 }
 
 function findForwardRequestPayload(value, sourceMsgId, depth = 0, seen = new WeakSet()) {
@@ -1685,7 +1655,6 @@ function setupBrowserWindow(browserWindow) {
     if (!voiceFeatureEnabled || !browserWindow || browserWindow.isDestroyed()) {
         return;
     }
-    addNativeSendHandler(browserWindow, handleVoiceNativeSend);
     addNativeRequestHandler(browserWindow, handleVoiceNativeRequest);
     const start = () => runInjectedUiLoop(browserWindow).catch(() => {});
     browserWindow.webContents.once('dom-ready', () => setTimeout(start, 500));
@@ -1760,10 +1729,12 @@ function setFakeDurationSeconds(value) {
 
 module.exports = {
     onBrowserWindowCreated,
+    rememberNativePeerAliases,
     setEnabled,
     setSaveInContextMenuEnabled,
     setForwardInContextMenuEnabled,
     setFakeDurationSeconds,
+    createPttPreviewItem,
     sendPttInfoAsPtt,
     sanitizePttInfo,
     runTool

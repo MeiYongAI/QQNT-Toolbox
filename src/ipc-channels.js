@@ -3,6 +3,7 @@
 const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
+const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
 const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
@@ -19,6 +20,7 @@ module.exports = Object.freeze({
     CHANNEL_GET_CONFIG,
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
+    CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_SEND_POKE,
     CHANNEL_RECALL_POKE,

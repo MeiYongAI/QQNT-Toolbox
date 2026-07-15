@@ -5,6 +5,23 @@ let initializeToolboxSettings = async () => {};
     const SETTINGS_ID = 'qqnt-toolbox-settings';
     const STYLE_ID = 'qqnt-toolbox-style';
     const SETTINGS_STYLE_ID = 'qqnt-toolbox-settings-style';
+    const INLINE_MEDIA_PREVIEW_ID = 'qqnt-toolbox-inline-media-preview';
+    const MESSAGE_MEDIA_SELECTOR = [
+        '.pic-element',
+        '.mix-message__container--pic',
+        '.video-element',
+        '.msg-preview--video',
+        '[class*="video-message"]',
+        '.file-element',
+        '[class*="file-message"]'
+    ].join(',');
+    const VIDEO_FILE_EXTENSIONS = new Set([
+        '3g2', '3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg',
+        'mts', 'ogv', 'ts', 'vob', 'webm', 'wmv'
+    ]);
+    const IMAGE_FILE_EXTENSIONS = new Set([
+        'apng', 'bmp', 'gif', 'jfif', 'jpeg', 'jpg', 'png', 'webp'
+    ]);
     const POKE_FALLBACK_MENU_ID = 'qqnt-toolbox-poke-fallback-menu';
     const POKE_RECALL_NOTICE = '若对方QQ版本过低，可能无法撤回。';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
@@ -90,6 +107,9 @@ let initializeToolboxSettings = async () => {};
             }
         },
         interfaceTweaks: {
+            inlineMediaViewer: false,
+            singleClickMediaViewer: false,
+            showFullUnreadCount: false,
             imageViewerOptimization: false,
             disableImageQrScan: false,
             singleImageViewer: false,
@@ -123,10 +143,15 @@ let initializeToolboxSettings = async () => {};
     let pokeMenuRequestId = 0;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
+    let unreadCountObserver = null;
+    let unreadCountObservedRoot = null;
+    let unreadCountRefreshTimer = 0;
     let preventDragActive = false;
     let replyAtEditor = null;
     let replyAtCleanupBusy = false;
     let imageViewerDrag = null;
+    let inlineMediaPreviewPreviousFocus = null;
+    let inlineMediaPreviewOpenedAt = 0;
     let messageBadgeObserver = null;
     let messageBadgeResizeObserver = null;
     let messageBadgeRefreshTimer = 0;
@@ -321,6 +346,113 @@ let initializeToolboxSettings = async () => {};
     user-select: none;
     display: flex;
     flex-direction: column;
+}
+#${INLINE_MEDIA_PREVIEW_ID} {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 32px;
+    overflow: hidden;
+    outline: none;
+    background: rgba(0, 0, 0, .72);
+    cursor: zoom-out;
+    user-select: none;
+    -webkit-app-region: no-drag;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > img,
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    transform-origin: center;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > img {
+    pointer-events: none;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
+    background: #000;
+    cursor: default;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 42px;
+    height: 42px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: #fff;
+    background: rgba(24, 24, 24, .68);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .24);
+    cursor: pointer;
+    transform: translateY(-50%);
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav:hover:not(:disabled) {
+    background: rgba(50, 50, 50, .88);
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav:disabled {
+    opacity: .24;
+    cursor: default;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav[hidden],
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-counter[hidden] {
+    display: none;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--previous {
+    left: 18px;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--next {
+    right: 18px;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav-icon {
+    width: 11px;
+    height: 11px;
+    border-top: 2px solid currentColor;
+    border-right: 2px solid currentColor;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--previous .qqnt-toolbox-media-nav-icon {
+    margin-left: 4px;
+    transform: rotate(-135deg);
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--next .qqnt-toolbox-media-nav-icon {
+    margin-right: 4px;
+    transform: rotate(45deg);
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-counter {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    z-index: 2;
+    min-width: 48px;
+    box-sizing: border-box;
+    padding: 5px 10px;
+    border-radius: 14px;
+    color: #fff;
+    background: rgba(24, 24, 24, .68);
+    font: 12px/18px var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    text-align: center;
+    pointer-events: none;
+    transform: translateX(-50%);
 }
 #${PANEL_ID}[hidden] {
     display: none;
@@ -805,6 +937,21 @@ body.qqnt-toolbox-remove-vip-color .recent-contact .viewport-list .recent-contac
 body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-header__contact-name {
     color: unset !important;
 }
+.recent-contact-item .q-badge-num.qqnt-toolbox-full-unread-count {
+    width: auto !important;
+    min-width: 18px !important;
+    max-width: none !important;
+    padding-right: 5px !important;
+    padding-left: 5px !important;
+    box-sizing: border-box !important;
+    font-variant-numeric: tabular-nums;
+}
+.recent-contact-item .q-badge-num.qqnt-toolbox-full-unread-count > i {
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    overflow: visible !important;
+}
 .qqnt-toolbox-hidden {
     display: none !important;
 }
@@ -1268,6 +1415,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         body.append(
             createCategoryTitle(text('功能')),
             createSection('interface', text('界面调整'), [
+                createSwitchItem(text('窗口内查看媒体'), text('图片和视频不再打开独立预览窗口'), 'interfaceTweaks.inlineMediaViewer'),
+                createSwitchItem(text('单击查看媒体'), text('只改变打开手势，不受查看器类型影响'), 'interfaceTweaks.singleClickMediaViewer'),
+                createSwitchItem(text('显示完整未读数'), text('消息列表未读数不再以 99+ 封顶'), 'interfaceTweaks.showFullUnreadCount'),
                 createSwitchItem(text('图片查看器优化'), text('点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
                 createSwitchItem(text('图片自动二维码识别'), text('关闭可避免加载本地识码模型'), 'interfaceTweaks.disableImageQrScan', {
                     inverted: true
@@ -2091,6 +2241,113 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
     }
 
+    function normalizeUnreadCount(value) {
+        const candidate = value && typeof value === 'object' && 'value' in value ? value.value : value;
+        const count = Number(candidate);
+        return Number.isSafeInteger(count) && count >= 0 ? count : null;
+    }
+
+    function getRecentContactUnreadCount(item, badge) {
+        const values = [
+            findVueValue(badge, ['props.count', 'ctx.count', 'proxy.count', 'vnode.props.count']),
+            findVueValue(item, [
+                'proxy.unreadCnt',
+                'ctx.unreadCnt',
+                'proxy.rCItemData.unreadCnt',
+                'ctx.rCItemData.unreadCnt'
+            ])
+        ];
+        const label = badge.closest('[aria-label*="未读"]')?.getAttribute('aria-label') || '';
+        values.push(label.match(/(\d+)\s*条未读/)?.[1]);
+        for (const value of values) {
+            const count = normalizeUnreadCount(value);
+            if (count !== null) {
+                return count;
+            }
+        }
+        return null;
+    }
+
+    function setUnreadBadgeText(badge, count, full) {
+        const textElement = badge.querySelector('i') || badge;
+        const content = full || count <= 99 ? String(count) : '99+';
+        if (textElement.textContent !== content) {
+            textElement.textContent = content;
+        }
+        const labelHost = badge.closest('[aria-label*="未读"]');
+        const label = `${count}条未读`;
+        if (labelHost && labelHost.getAttribute('aria-label') !== label) {
+            labelHost.setAttribute('aria-label', label);
+        }
+    }
+
+    function restoreFullUnreadCounts() {
+        document.querySelectorAll('.q-badge-num.qqnt-toolbox-full-unread-count').forEach(badge => {
+            const item = badge.closest('.recent-contact-item');
+            const count = getRecentContactUnreadCount(item, badge) ??
+                normalizeUnreadCount(badge.dataset.qqntToolboxUnreadCount);
+            if (count !== null) {
+                setUnreadBadgeText(badge, count, false);
+            }
+            badge.classList.remove('qqnt-toolbox-full-unread-count');
+            delete badge.dataset.qqntToolboxUnreadCount;
+        });
+    }
+
+    function applyFullUnreadCounts() {
+        if (!isConfigEnabled('interfaceTweaks.showFullUnreadCount')) {
+            restoreFullUnreadCounts();
+            return;
+        }
+        document.querySelectorAll('.recent-contact-item').forEach(item => {
+            const badge = item.querySelector('.summary-bubble .q-badge-num');
+            if (!badge) {
+                return;
+            }
+            const count = getRecentContactUnreadCount(item, badge);
+            if (count === null || count <= 0) {
+                return;
+            }
+            badge.dataset.qqntToolboxUnreadCount = String(count);
+            badge.classList.add('qqnt-toolbox-full-unread-count');
+            setUnreadBadgeText(badge, count, true);
+        });
+    }
+
+    function scheduleUnreadCountRefresh() {
+        if (unreadCountRefreshTimer) {
+            return;
+        }
+        unreadCountRefreshTimer = window.setTimeout(() => {
+            unreadCountRefreshTimer = 0;
+            applyFullUnreadCounts();
+        }, 40);
+    }
+
+    function syncUnreadCountObserver() {
+        if (!isConfigEnabled('interfaceTweaks.showFullUnreadCount')) {
+            unreadCountObserver?.disconnect();
+            unreadCountObserver = null;
+            unreadCountObservedRoot = null;
+            restoreFullUnreadCounts();
+            return;
+        }
+        const root = document.querySelector('.recent-contact-list--wrapper .viewport-list, .recent-contact .viewport-list');
+        if (root !== unreadCountObservedRoot) {
+            unreadCountObserver?.disconnect();
+            unreadCountObservedRoot = root;
+            unreadCountObserver = root ? new MutationObserver(scheduleUnreadCountRefresh) : null;
+            unreadCountObserver?.observe(root, {
+                childList: true,
+                subtree: true,
+                characterData: true,
+                attributes: true,
+                attributeFilter: ['aria-label']
+            });
+        }
+        applyFullUnreadCounts();
+    }
+
     function applyInterfaceTweaks() {
         if (!document.body) {
             return;
@@ -2110,6 +2367,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (controlWidth) {
             document.querySelector('.topbar.container-topbar .topbar-content')?.style.setProperty('padding-right', `${controlWidth - 10}px`);
         }
+        syncUnreadCountObserver();
         applySimplifyTweaks();
     }
 
@@ -2299,6 +2557,372 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     function isImageViewerWindow() {
         return location.hash === '#/image-viewer' || Boolean(document.querySelector('.main-area.main-area--image, .main-area--image'));
+    }
+
+    function closeInlineMediaPreview() {
+        const layer = document.getElementById(INLINE_MEDIA_PREVIEW_ID);
+        layer?.querySelector('video')?.pause?.();
+        layer?.remove();
+        if (inlineMediaPreviewPreviousFocus instanceof HTMLElement && inlineMediaPreviewPreviousFocus.isConnected) {
+            inlineMediaPreviewPreviousFocus.focus({ preventScroll: true });
+        }
+        inlineMediaPreviewPreviousFocus = null;
+        inlineMediaPreviewOpenedAt = 0;
+    }
+
+    function openInlineMediaPreview(payload) {
+        const items = (Array.isArray(payload?.items) ? payload.items : [payload])
+            .map(item => ({
+                type: item?.type === 'video' ? 'video' : 'image',
+                src: normalizeText(item?.src),
+                name: normalizeText(item?.name)
+            }))
+            .filter(item => item.src);
+        let index = Math.min(Math.max(Number(payload?.index) || 0, 0), items.length - 1);
+        if (!items.length || !document.body || isImageViewerWindow()) {
+            return;
+        }
+        injectStyle();
+        closeInlineMediaPreview();
+        inlineMediaPreviewPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const layer = document.createElement('div');
+        layer.id = INLINE_MEDIA_PREVIEW_ID;
+        layer.tabIndex = -1;
+        layer.setAttribute('role', 'dialog');
+        layer.setAttribute('aria-modal', 'true');
+        const stage = document.createElement('div');
+        stage.className = 'qqnt-toolbox-media-stage';
+        const createNavButton = (direction, label) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = `qqnt-toolbox-media-nav qqnt-toolbox-media-nav--${direction}`;
+            button.setAttribute('aria-label', label);
+            button.title = label;
+            const icon = document.createElement('span');
+            icon.className = 'qqnt-toolbox-media-nav-icon';
+            button.append(icon);
+            return button;
+        };
+        const previous = createNavButton('previous', text('上一个'));
+        const next = createNavButton('next', text('下一个'));
+        const counter = document.createElement('div');
+        counter.className = 'qqnt-toolbox-media-counter';
+        let activeMedia = null;
+        let mediaScale = 1;
+        let mediaOffsetX = 0;
+        let mediaOffsetY = 0;
+        let wheelNavigationDelta = 0;
+        let wheelNavigationLockedUntil = 0;
+        const applyMediaTransform = () => {
+            if (!activeMedia) {
+                return;
+            }
+            activeMedia.style.transform =
+                `translate3d(${mediaOffsetX}px, ${mediaOffsetY}px, 0) scale(${mediaScale})`;
+        };
+        const render = () => {
+            stage.querySelector('video')?.pause?.();
+            stage.replaceChildren();
+            activeMedia = null;
+            mediaScale = 1;
+            mediaOffsetX = 0;
+            mediaOffsetY = 0;
+            wheelNavigationDelta = 0;
+            const item = items[index];
+            const isVideo = item.type === 'video';
+            layer.setAttribute('aria-label', text(isVideo ? '视频预览' : '图片预览'));
+            const media = document.createElement(isVideo ? 'video' : 'img');
+            media.src = item.src;
+            media.draggable = false;
+            activeMedia = media;
+            if (isVideo) {
+                media.controls = true;
+                media.autoplay = true;
+                media.preload = 'metadata';
+                media.playsInline = true;
+                media.addEventListener('canplay', () => media.play().catch(() => {}), { once: true });
+            } else {
+                media.alt = item.name || text('图片');
+            }
+            stage.append(media);
+            previous.disabled = index === 0;
+            next.disabled = index === items.length - 1;
+            previous.hidden = items.length < 2;
+            next.hidden = items.length < 2;
+            counter.hidden = items.length < 2;
+            counter.textContent = `${index + 1} / ${items.length}`;
+        };
+        const navigate = delta => {
+            const nextIndex = Math.min(Math.max(index + delta, 0), items.length - 1);
+            if (nextIndex === index) {
+                return;
+            }
+            index = nextIndex;
+            render();
+        };
+        layer.qqntToolboxNavigate = navigate;
+        previous.addEventListener('click', () => navigate(-1));
+        next.addEventListener('click', () => navigate(1));
+        layer.append(stage, previous, next, counter);
+        render();
+        const stopEvent = event => {
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        };
+        for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick']) {
+            layer.addEventListener(eventName, stopEvent);
+        }
+        for (const eventName of ['contextmenu', 'dragstart']) {
+            layer.addEventListener(eventName, event => {
+                event.preventDefault();
+                stopEvent(event);
+            }, { passive: false });
+        }
+        layer.addEventListener('wheel', event => {
+            event.preventDefault();
+            stopEvent(event);
+            if (!Number.isFinite(event.deltaY) || event.deltaY === 0) {
+                return;
+            }
+            if (!event.ctrlKey) {
+                const now = performance.now();
+                if (now < wheelNavigationLockedUntil) {
+                    wheelNavigationDelta = 0;
+                    return;
+                }
+                wheelNavigationDelta += event.deltaY;
+                if (Math.abs(wheelNavigationDelta) < 60) {
+                    return;
+                }
+                const direction = wheelNavigationDelta > 0 ? 1 : -1;
+                wheelNavigationDelta = 0;
+                wheelNavigationLockedUntil = now + 180;
+                navigate(direction);
+                return;
+            }
+            wheelNavigationDelta = 0;
+            if (!activeMedia) {
+                return;
+            }
+            const stageRect = stage.getBoundingClientRect();
+            const pointerX = event.clientX - stageRect.left - stageRect.width / 2;
+            const pointerY = event.clientY - stageRect.top - stageRect.height / 2;
+            const wheelDelta = Math.max(-160, Math.min(160, event.deltaY));
+            const nextScale = Math.max(.25, Math.min(8, mediaScale * Math.exp(-wheelDelta * .0018)));
+            if (nextScale === mediaScale) {
+                return;
+            }
+            const scaleRatio = nextScale / mediaScale;
+            mediaOffsetX = pointerX - (pointerX - mediaOffsetX) * scaleRatio;
+            mediaOffsetY = pointerY - (pointerY - mediaOffsetY) * scaleRatio;
+            mediaScale = nextScale;
+            applyMediaTransform();
+        }, { passive: false });
+        layer.addEventListener('click', event => {
+            stopEvent(event);
+            if (performance.now() - inlineMediaPreviewOpenedAt < 320) {
+                event.preventDefault();
+                return;
+            }
+            if (event.target instanceof Element && event.target.closest('.qqnt-toolbox-media-nav')) {
+                event.preventDefault();
+                return;
+            }
+            const isVideo = items[index].type === 'video';
+            if (!isVideo || event.target === layer || event.target === stage) {
+                event.preventDefault();
+                closeInlineMediaPreview();
+            }
+        });
+        document.body.append(layer);
+        inlineMediaPreviewOpenedAt = performance.now();
+        layer.focus({ preventScroll: true });
+    }
+
+    function getVideoOpenControl(element) {
+        const playControlSelector = [
+            'button',
+            '[role="button"]',
+            '[class~="play"]',
+            '[class*="video-play"]',
+            '[class*="play-btn"]',
+            '[class*="play-button"]',
+            '[class*="play-icon"]'
+        ].join(',');
+        const isUsableControl = control => {
+            if (!(control instanceof Element) || !element.contains(control)) {
+                return false;
+            }
+            const controlRect = control.getBoundingClientRect();
+            const x = controlRect.left + controlRect.width / 2;
+            const y = controlRect.top + controlRect.height / 2;
+            if (controlRect.width <= 0 || controlRect.height <= 0 ||
+                x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) {
+                return false;
+            }
+            const hit = document.elementFromPoint(x, y);
+            return hit === control || (hit instanceof Node && control.contains(hit));
+        };
+        const rect = element.getBoundingClientRect();
+        const center = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        if (center instanceof Element && element.contains(center)) {
+            const control = center.closest(playControlSelector);
+            if (isUsableControl(control)) {
+                return control;
+            }
+        }
+        return Array.from(element.querySelectorAll([
+            '[class~="play"]',
+            '[class*="video-play"]',
+            '[class*="play-btn"]',
+            '[class*="play-button"]',
+            '[class*="play-icon"]',
+            'button[aria-label*="播放"]',
+            '[role="button"][aria-label*="播放"]'
+        ].join(','))).find(isUsableControl) || null;
+    }
+
+    function hasFileMediaExtension(element, extensions) {
+        const file = element?.fileElement || element;
+        const source = normalizeText(
+            file?.fileName || file?.filePath || file?.sourcePath || file?.originPath || file?.localPath
+        ).split(/[?#]/, 1)[0];
+        const match = source.match(/\.([^.\\/]+)$/);
+        return Boolean(match && extensions.has(match[1].toLowerCase()));
+    }
+
+    function getSingleClickMediaTarget(event) {
+        const path = event.composedPath?.() || [event.target];
+        for (const item of path) {
+            if (!(item instanceof Element) || !item.matches(MESSAGE_MEDIA_SELECTOR)) {
+                continue;
+            }
+            if (!item.closest('.message, .ml-item') || item.closest(`#${INLINE_MEDIA_PREVIEW_ID}`)) {
+                continue;
+            }
+            const record = findMessageRecordFromElement(item);
+            const elements = Array.isArray(record?.elements) ? record.elements : [];
+            const hasVideo = elements.some(element =>
+                Number(element?.elementType) === 5 || Boolean(element?.videoElement)
+            );
+            const hasImage = elements.some(element =>
+                Number(element?.elementType) === 2 || Boolean(element?.picElement)
+            );
+            const hasVideoFile = elements.some(element =>
+                (Number(element?.elementType) === 3 || Boolean(element?.fileElement)) &&
+                hasFileMediaExtension(element, VIDEO_FILE_EXTENSIONS)
+            );
+            const hasImageFile = elements.some(element =>
+                (Number(element?.elementType) === 3 || Boolean(element?.fileElement)) &&
+                hasFileMediaExtension(element, IMAGE_FILE_EXTENSIONS)
+            );
+            const isFileMessage = item.matches('.file-element, [class*="file-message"]');
+            const isFileVideo = hasVideoFile && isFileMessage;
+            const isFileImage = hasImageFile && isFileMessage;
+            const isVideo = isFileVideo || item.matches('.video-element, .msg-preview--video, [class*="video-message"]') ||
+                (hasVideo && !hasImage);
+            const matchesRecord = isVideo ? (hasVideo || hasVideoFile) : (hasImage || hasImageFile);
+            if (matchesRecord) {
+                let element;
+                if (isFileVideo || isFileImage) {
+                    element = item.closest('.file-element') || item.closest('[class*="file-message"]') || item;
+                } else if (isVideo) {
+                    element = item.closest('.video-element, .msg-preview--video') || item;
+                } else {
+                    element = item.closest('.pic-element, .mix-message__container--pic') || item;
+                }
+                return {
+                    element,
+                    isVideo,
+                    openWithControl: isFileVideo,
+                    openControl: isVideo ? getVideoOpenControl(element) : element
+                };
+            }
+        }
+        return null;
+    }
+
+    function dispatchNativeMediaOpen(target, sourceEvent) {
+        if (target.openWithControl && target.openControl) {
+            const rect = target.openControl.getBoundingClientRect();
+            const clientX = rect.left + rect.width / 2;
+            const clientY = rect.top + rect.height / 2;
+            target.openControl.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window,
+                button: 0,
+                buttons: 0,
+                clientX,
+                clientY,
+                screenX: sourceEvent.screenX + clientX - sourceEvent.clientX,
+                screenY: sourceEvent.screenY + clientY - sourceEvent.clientY,
+                detail: 1
+            }));
+            return;
+        }
+        const activationTarget = sourceEvent.target instanceof Element &&
+            target.element.contains(sourceEvent.target)
+            ? sourceEvent.target
+            : target.element;
+        const eventOptions = {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            button: 0,
+            buttons: 0,
+            clientX: sourceEvent.clientX,
+            clientY: sourceEvent.clientY,
+            screenX: sourceEvent.screenX,
+            screenY: sourceEvent.screenY
+        };
+        activationTarget.dispatchEvent(new MouseEvent('dblclick', { ...eventOptions, detail: 2 }));
+    }
+
+    function handleSingleClickMedia(event) {
+        if (!isConfigEnabled('interfaceTweaks.singleClickMediaViewer') ||
+            event.button !== 0 || document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isImageViewerWindow()) {
+            return;
+        }
+        const target = getSingleClickMediaTarget(event);
+        if (!target) {
+            return;
+        }
+        const eventPath = event.composedPath?.() || [event.target];
+        if (target.isVideo && target.openControl && eventPath.some(item =>
+            item === target.openControl || (item instanceof Node && target.openControl?.contains?.(item))
+        )) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        queueMicrotask(() => dispatchNativeMediaOpen(target, event));
+    }
+
+    function handleInlineMediaPreviewKey(event) {
+        const layer = document.getElementById(INLINE_MEDIA_PREVIEW_ID);
+        if (!layer || !['Escape', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+        if (event.type !== 'keydown') {
+            return;
+        }
+        if (event.key === 'Escape') {
+            closeInlineMediaPreview();
+        } else {
+            layer.qqntToolboxNavigate?.(event.key === 'ArrowLeft' ? -1 : 1);
+        }
+    }
+
+    async function subscribeInlineMediaPreview() {
+        const bridge = await waitForBridge();
+        bridge?.onInlineMediaPreview?.(openInlineMediaPreview);
     }
 
     function isImageAllInViewport() {
@@ -4229,6 +4853,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
+            if (!isConfigEnabled('interfaceTweaks.inlineMediaViewer')) {
+                closeInlineMediaPreview();
+            }
         });
     }
 
@@ -4244,6 +4871,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     initializeToolboxSettings = initSettingWindow;
+
+    document.addEventListener('keydown', handleInlineMediaPreviewKey, true);
+    document.addEventListener('keyup', handleInlineMediaPreviewKey, true);
+    document.addEventListener('click', handleSingleClickMedia, true);
 
     document.addEventListener('keydown', event => {
         if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {
@@ -4352,6 +4983,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     window.addEventListener('focus', rememberActiveRepeatPeer);
 
     loadConfig().then(subscribeConfig).catch(() => {});
+    subscribeInlineMediaPreview().catch(() => {});
     installProfileCardHoverBlocker();
     installPokeInteractions();
     installRepeatEntrypoints();

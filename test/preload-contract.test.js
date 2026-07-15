@@ -68,7 +68,10 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.sendPoke({ id: 'poke' });
     await api.recallPoke({ id: 'recall-poke' });
     await api.viewRecallMessages();
+    const unsubscribePreview = api.onInlineMediaPreview(() => {});
     const unsubscribe = api.onConfigChanged(() => {});
+    assert.equal(runtime.listeners.length, 2);
+    unsubscribePreview();
     assert.equal(runtime.listeners.length, 1);
     unsubscribe();
     assert.equal(runtime.listeners.length, 0);

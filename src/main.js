@@ -14,10 +14,13 @@ const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const { createRepeatMessageHandler } = require('./repeat-message');
+const { classifyMediaFilePath, extractInlineMediaGallery } = require('./inline-media-preview');
+const { createLocalMediaServer } = require('./local-media-server');
 const {
     CHANNEL_GET_CONFIG,
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
+    CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_SEND_POKE,
     CHANNEL_RECALL_POKE,
@@ -31,12 +34,17 @@ const {
     CHANNEL_JUMP_RECALL_MESSAGE
 } = require('./ipc-channels');
 const {
+    addNativeRequestHandler,
     addNativeSendHandler,
     createNativeEventWaiter,
     isNativeFailure,
     qqNativeInvoke,
     unwrapNativeValue
 } = require('./native-ipc');
+const {
+    createNativeEventContext,
+    isNativeMainChannel
+} = require('./native-event-context');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
@@ -49,6 +57,9 @@ const RETRY_DELAY_MS = 800;
 const REPAIR_FILE_TTL_MS = 24 * 60 * 60 * 1000;
 const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
 const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
+const MEDIA_PREVIEW_FILE_WAIT_MS = 2 * 60 * 1000;
+const MAX_INLINE_MEDIA_PEERS = 40;
+const MAX_INLINE_MEDIA_PER_PEER = 500;
 const NUDGE_SEND_COMMAND = 'nodeIKernelMsgService/sendNudge';
 const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
 const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
@@ -122,6 +133,9 @@ const DEFAULT_CONFIG = {
         }
     },
     interfaceTweaks: {
+        inlineMediaViewer: false,
+        singleClickMediaViewer: false,
+        showFullUnreadCount: false,
         imageViewerOptimization: false,
         disableImageQrScan: false,
         singleImageViewer: false,
@@ -166,6 +180,7 @@ const recallViewerRecordIndex = new Map();
 const recallViewerState = {
     accountUin: ''
 };
+const inlineMediaServer = createLocalMediaServer();
 
 function isDebugEnabled() {
     return process.env.QQNT_TOOLBOX_DEBUG === '1' || configCache?.debug?.enabled === true;
@@ -830,7 +845,8 @@ function getWindowState(browserWindow) {
             peerUidByUin: new Map(),
             retriedRecords: new Map(),
             inFlightRecords: new Set(),
-            pluginAttrIds: new Map()
+            pluginAttrIds: new Map(),
+            inlineMediaByPeer: new Map()
         };
         windowStates.set(browserWindow, state);
     }
@@ -907,79 +923,84 @@ function closeExistingImageViewers(sender) {
     }
 }
 
-function installIpcMainInterceptor() {
-    if (globalThis.__qqntToolboxIpcMainInterceptorInstalled) {
+function isInlineMediaHost(browserWindow) {
+    if (!browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+        return false;
+    }
+    const url = browserWindow.webContents.getURL();
+    return ['#/main/message', '#/chat', '#/forward', '#/record'].some(route => url.includes(route));
+}
+
+async function showInlineMediaPreview(browserWindow, gallery) {
+    gallery = completeInlineMediaGallery(browserWindow, gallery);
+    const state = getWindowState(browserWindow);
+    const request = {};
+    const deadline = Date.now() + MEDIA_PREVIEW_FILE_WAIT_MS;
+    const selected = gallery.items[gallery.index];
+    state.inlineMediaPreviewRequest = request;
+    while (!fsSync.existsSync(selected.filePath)) {
+        if (Date.now() >= deadline || state.inlineMediaPreviewRequest !== request ||
+            browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+            return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (state.inlineMediaPreviewRequest !== request) {
         return;
     }
-    const originalEmit = ipcMain.emit;
-    ipcMain.emit = function(channel, ...args) {
-        try {
-            const tweaks = getInterfaceTweaksConfig();
-            const payload = args.slice(1);
-            if (tweaks.disableImageQrScan === true &&
-                typeof channel === 'string' && channel.startsWith('RM_IPCFROM_RENDERER')) {
-                const command = findIpcObject(payload, value => value?.cmdName === QR_SCAN_COMMAND);
-                if (command) {
-                    const request = findIpcObject(payload, value => typeof value?.callbackId === 'string');
-                    if (request && replyWithEmptyQrResult(args[0], request)) {
-                        return true;
-                    }
-                }
-            }
-            if (tweaks.singleImageViewer === true &&
-                findIpcObject(payload, value => value?.cmdName === OPEN_MEDIA_VIEWER_COMMAND)) {
-                closeExistingImageViewers(args[0]?.sender);
-            }
-        } catch (error) {
-            warn('IPC interceptor failed:', error?.message || error);
-        }
-        return Reflect.apply(originalEmit, this, [channel, ...args]);
-    };
-    globalThis.__qqntToolboxIpcMainInterceptorInstalled = true;
+    const selectedKey = getInlineMediaItemKey(selected);
+    const items = gallery.items.filter(item =>
+        item.type !== 'video' || fsSync.existsSync(item.filePath)
+    );
+    const index = Math.max(items.findIndex(item => getInlineMediaItemKey(item) === selectedKey), 0);
+    const previewItems = await Promise.all(items.map(async item => ({
+        type: item.type,
+        src: item.type === 'video' ? await inlineMediaServer.getUrl(item.filePath) : item.src,
+        name: item.name
+    })));
+    const sender = browserWindow.webContents;
+    sender.send(CHANNEL_INLINE_MEDIA_PREVIEW, {
+        index,
+        items: previewItems
+    });
 }
 
-function collectNativePeerAliases(value, results = [], depth = 0, seen = new WeakSet()) {
-    if (!value || depth > 7 || results.length > 100) {
-        return results;
+function handleToolboxNativeRequest(browserWindow, _channel, args) {
+    const command = args.find(value => value?.cmdName && value?.payload !== undefined);
+    if (!command) {
+        return false;
     }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            collectNativePeerAliases(item, results, depth + 1, seen);
+    const tweaks = getInterfaceTweaksConfig();
+    const request = args.find(value => typeof value?.callbackId === 'string');
+    if (tweaks.disableImageQrScan === true && command.cmdName === QR_SCAN_COMMAND) {
+        return Boolean(request && replyWithEmptyQrResult(args[0], request));
+    }
+    if (command.cmdName !== OPEN_MEDIA_VIEWER_COMMAND) {
+        return false;
+    }
+    if (tweaks.inlineMediaViewer === true && isInlineMediaHost(browserWindow)) {
+        const gallery = extractInlineMediaGallery(command);
+        if (!gallery) {
+            return false;
         }
-        return results;
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
-        return results;
-    }
-    if (seen.has(value)) {
-        return results;
-    }
-    seen.add(value);
-
-    const chatType = Number(value.chatType || value.type || value.aioType || value.peer?.chatType || value.header?.chatType) || 0;
-    const addAlias = (peerUid, peerUin) => {
-        peerUid = normalizeText(peerUid);
-        peerUin = normalizeText(peerUin);
-        if ((chatType === 1 || chatType === 100 || !chatType) && peerUid.startsWith('u_') && /^\d+$/.test(peerUin)) {
-            results.push({ peerUin, peerUid });
+        closeExistingImageViewers(browserWindow.webContents);
+        showInlineMediaPreview(browserWindow, gallery)
+            .catch(error => warn('inline media preview failed:', error?.message || error));
+        if (request) {
+            replyWithNativeResult(args[0], request, null);
         }
-    };
-    addAlias(value.peerUid || value.peer?.peerUid || value.header?.peerUid, value.peerUin || value.peer?.peerUin || value.header?.peerUin);
-    addAlias(value.senderUid || value.sender?.uid || value.sender?.peerUid, value.senderUin || value.sender?.uin || value.sender?.peerUin);
-    addAlias(value.uid || value.peer?.uid || value.header?.uid, value.uin || value.chatUin || value.peer?.uin || value.header?.uin);
-
-    for (const key of ['payload', 'msgList', 'elements', 'records', 'data', 'result', 'msgElements', 'peer', 'header', 'sender', 'sendMember']) {
-        collectNativePeerAliases(value[key], results, depth + 1, seen);
+        return true;
     }
-    return results;
+    if (tweaks.singleImageViewer === true) {
+        closeExistingImageViewers(browserWindow.webContents);
+    }
+    return false;
 }
 
-function rememberNativePeerAliases(browserWindow, args) {
+function rememberNativePeerAliases(browserWindow, context) {
     const state = getWindowState(browserWindow);
-    for (const arg of args) {
-        for (const alias of collectNativePeerAliases(arg)) {
-            state.peerUidByUin.set(alias.peerUin, alias.peerUid);
-        }
+    for (const alias of context.aliases) {
+        state.peerUidByUin.set(alias.peerUin, alias.peerUid);
     }
 }
 
@@ -992,34 +1013,6 @@ function getMsgAttrId(msgRecord) {
         return attrs.get(0)?.attrId;
     }
     return attrs[0]?.attrId || attrs['0']?.attrId;
-}
-
-function collectMsgRecords(value, records = [], depth = 0, seen = new WeakSet()) {
-    if (!value || depth > 7 || records.length > 200) {
-        return records;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            collectMsgRecords(item, records, depth + 1, seen);
-        }
-        return records;
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
-        return records;
-    }
-    if (seen.has(value)) {
-        return records;
-    }
-    seen.add(value);
-
-    if ((value.msgId !== undefined || value.msgSeq !== undefined) && Array.isArray(value.elements)) {
-        records.push(value);
-        return records;
-    }
-    for (const key of ['payload', 'msgList', 'records', 'data', 'result', 'msgRecords', 'msgRecord']) {
-        collectMsgRecords(value[key], records, depth + 1, seen);
-    }
-    return records;
 }
 
 function resolveUinFromUid(browserWindow, uid) {
@@ -1092,16 +1085,11 @@ function isRecentPokeRecord(record) {
     return Math.abs(Date.now() - timestamp) <= POKE_AUTO_REPLY_MAX_AGE_MS;
 }
 
-function processPokeUpdates(browserWindow, args) {
-    if (!args.some(arg =>
-        arg?.cmdName === POKE_RECEIVE_CMD || arg?.payload?.cmdName === POKE_RECEIVE_CMD)) {
+function processPokeUpdates(browserWindow, context) {
+    if (!context.commandNames.has(POKE_RECEIVE_CMD)) {
         return;
     }
-    const records = [];
-    for (const arg of args) {
-        collectMsgRecords(arg, records);
-        collectMsgRecords(arg?.payload, records);
-    }
+    const records = context.records;
     rememberPokeAccountFromRecords(browserWindow, records);
     if (getEntertainmentConfig().autoPokeBack !== true) {
         return;
@@ -1202,42 +1190,18 @@ function deleteBubbleSkinFromRecord(record) {
     return true;
 }
 
-function processDeleteBubbleSkin(args) {
+function processDeleteBubbleSkin(context) {
     if (!getConfig().interfaceTweaks.deleteBubbleSkin) {
         return;
     }
-    const records = [];
-    for (const arg of args) {
-        collectMsgRecords(arg, records);
-    }
-    for (const record of new Set(records)) {
+    for (const record of context.records) {
         deleteBubbleSkinFromRecord(record);
     }
 }
 
-function containsUnitedConfigGroup(value, depth = 0, seen = new WeakSet()) {
-    if (!value || depth > 7) {
-        return false;
-    }
-    if (Array.isArray(value)) {
-        return value.some(item => containsUnitedConfigGroup(item, depth + 1, seen));
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
-        return false;
-    }
-    if (seen.has(value)) {
-        return false;
-    }
-    seen.add(value);
-    if (['100084', '100243'].includes(String(value?.configData?.group || value?.group || ''))) {
-        return true;
-    }
-    return Object.values(value).some(item => containsUnitedConfigGroup(item, depth + 1, seen));
-}
-
-function shouldBlockUpdateNotice(args) {
+function shouldBlockUpdateNotice(context) {
     return getConfig().interfaceTweaks.hiddenUpdateBtnAndNotice === true &&
-        args.some(arg => containsUnitedConfigGroup(arg));
+        context.hasUnitedConfigGroup;
 }
 
 function getRecallInfo(record) {
@@ -1723,69 +1687,23 @@ function getRecoveredRecallRecord(recallState, record) {
     return recovered;
 }
 
-function processPreventRecallInValue(recallState, value, depth = 0, seen = new WeakSet()) {
-    if (!isPreventRecallEnabled() || !value || depth > 7) {
-        return false;
-    }
-    if (Array.isArray(value)) {
-        let changed = false;
-        for (let index = 0; index < value.length; index++) {
-            const item = value[index];
-            if (isMsgRecord(item)) {
-                const recovered = getRecoveredRecallRecord(recallState, item);
-                if (recovered) {
-                    value[index] = recovered;
-                    changed = true;
-                } else {
-                    cacheRecallCandidate(recallState, item);
-                }
-            } else if (processPreventRecallInValue(recallState, item, depth + 1, seen)) {
-                changed = true;
-            }
-        }
-        return changed;
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
-        return false;
-    }
-    if (seen.has(value)) {
-        return false;
-    }
-    seen.add(value);
-    if (isMsgRecord(value)) {
-        const recovered = getRecoveredRecallRecord(recallState, value);
-        if (recovered) {
-            Object.keys(value).forEach(key => delete value[key]);
-            Object.assign(value, recovered);
-            return true;
-        }
-        cacheRecallCandidate(recallState, value);
-        return false;
-    }
-    let changed = false;
-    for (const key of ['payload', 'msgList', 'records', 'data', 'result', 'msgRecords', 'msgRecord']) {
-        if (processPreventRecallInValue(recallState, value[key], depth + 1, seen)) {
-            changed = true;
-        }
-    }
-    return changed;
-}
-
-function processPreventRecall(browserWindow, args) {
+function processPreventRecall(browserWindow, context) {
     if (!isPreventRecallEnabled()) {
         return;
     }
-    const records = [];
-    for (const arg of args) {
-        collectMsgRecords(arg, records);
-    }
-    rememberPokeAccountFromRecords(browserWindow, records);
+    rememberPokeAccountFromRecords(browserWindow, context.records);
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
     if (!recallState) {
         return;
     }
-    for (const arg of args) {
-        processPreventRecallInValue(recallState, arg);
+    for (const record of context.records) {
+        const recovered = getRecoveredRecallRecord(recallState, record);
+        if (!recovered) {
+            cacheRecallCandidate(recallState, record);
+            continue;
+        }
+        Object.keys(record).forEach(key => delete record[key]);
+        Object.assign(record, recovered);
     }
 }
 
@@ -1898,7 +1816,7 @@ function getQqNumber(...values) {
 
 function getUserAvatarUrl(...values) {
     const uin = getQqNumber(...values);
-    return uin ? `https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=100` : '';
+    return uin ? `https://q.qlogo.cn/headimg_dl?dst_uin=${uin}&spec=100` : '';
 }
 
 function getRecallPeerAvatarUrl(record) {
@@ -2007,6 +1925,23 @@ function getReplyPreview(reply) {
         .join(' ');
 }
 
+function getArkViewerCard(arkElement) {
+    let data = {};
+    try {
+        data = JSON.parse(normalizeText(arkElement?.bytesData));
+    } catch {
+    }
+    const metadata = data?.meta && typeof data.meta === 'object'
+        ? Object.values(data.meta).find(value => value && typeof value === 'object') || {}
+        : {};
+    return {
+        type: 'card',
+        title: normalizeText(metadata.title) || normalizeText(data.prompt) || normalizeText(arkElement?.prompt) || '卡片消息',
+        subtitle: normalizeText(metadata.desc) || normalizeText(data.desc) || normalizeText(arkElement?.appName) || normalizeText(arkElement?.appView),
+        image: getViewerRemoteUrl(metadata.preview, metadata.icon)
+    };
+}
+
 async function getRecallViewerContent(record) {
     const parts = [];
     for (const [elementIndex, element] of getRecordElements(record).entries()) {
@@ -2067,7 +2002,9 @@ async function getRecallViewerContent(record) {
                 type: 'video',
                 name: normalizeText(element.videoElement.fileName) || '视频',
                 size: Number(element.videoElement.fileSize) || 0,
-                duration: Number(element.videoElement.duration) || 0,
+                duration: Number(element.videoElement.duration || element.videoElement.fileTime) || 0,
+                width: Number(element.videoElement.thumbWidth) || 0,
+                height: Number(element.videoElement.thumbHeight) || 0,
                 src: getViewerFileUrl(element.videoElement.filePath, element.videoElement.sourcePath),
                 poster: getViewerFileUrl(element.videoElement.thumbPath, element.videoElement.coverPath)
             });
@@ -2101,11 +2038,7 @@ async function getRecallViewerContent(record) {
             continue;
         }
         if (element?.arkElement) {
-            parts.push({
-                type: 'card',
-                title: normalizeText(element.arkElement.prompt) || '卡片消息',
-                subtitle: normalizeText(element.arkElement.appName) || normalizeText(element.arkElement.appView)
-            });
+            parts.push(getArkViewerCard(element.arkElement));
             continue;
         }
         if (element?.markdownElement) {
@@ -2312,8 +2245,8 @@ async function openPreventRecallMessages(accountUin) {
     return { success: true };
 }
 
-function isMsgInfoListUpdate(args) {
-    return args.some(arg => arg?.cmdName === MSG_UPDATE_CMD || arg?.payload?.cmdName === MSG_UPDATE_CMD);
+function isMsgInfoListUpdate(context) {
+    return context.commandNames.has(MSG_UPDATE_CMD);
 }
 
 function getRecordElements(record) {
@@ -2480,6 +2413,129 @@ function getExistingFilePath(candidates) {
     return '';
 }
 
+function getInlineMediaPeerKey(value) {
+    const chatType = Number(value?.chatType || value?.peer?.chatType) || 0;
+    const peerUid = normalizeText(
+        value?.peerUid || value?.peerUin || value?.peer?.peerUid || value?.peer?.peerUin
+    );
+    return chatType && peerUid ? `${chatType}:${peerUid}` : '';
+}
+
+function getInlineMediaItemKey(item) {
+    const identity = item?.identity || {};
+    const msgId = normalizeText(identity.msgId);
+    const elementId = normalizeText(identity.elementId);
+    return msgId && elementId
+        ? `${msgId}:${elementId}`
+        : `${normalizeText(item?.type)}:${normalizeComparablePath(item?.filePath)}`;
+}
+
+function createInlineMediaItem(record, element, elementIndex) {
+    let type;
+    let media;
+    let filePath;
+    if (Number(element?.elementType) === 2 || element?.picElement) {
+        type = 'image';
+        media = element.picElement || element;
+        filePath = getPicSourcePath(media);
+    } else if (Number(element?.elementType) === 5 || element?.videoElement) {
+        type = 'video';
+        media = element.videoElement || element;
+        filePath = getVideoSourcePath(media);
+    } else if (Number(element?.elementType) === 3 || element?.fileElement) {
+        media = element.fileElement || element;
+        filePath = getFileSourcePath(media);
+        type = classifyMediaFilePath(media.fileName, filePath);
+    }
+    if (!type || !filePath) {
+        return null;
+    }
+    return {
+        type,
+        filePath,
+        src: type === 'image' ? encodeURI(`appimg://${filePath.replace(/\\/g, '/')}`) : '',
+        name: normalizeText(media.fileName || media.summary) || path.basename(filePath),
+        sourceIndex: elementIndex,
+        identity: {
+            chatType: Number(record?.chatType || record?.peer?.chatType) || 0,
+            peerUid: normalizeText(
+                record?.peerUid || record?.peerUin || record?.peer?.peerUid || record?.peer?.peerUin
+            ),
+            msgId: normalizeText(record?.msgId),
+            msgSeq: normalizeText(record?.msgSeq),
+            elementId: normalizeText(element?.elementId)
+        }
+    };
+}
+
+function compareInlineMediaItems(left, right) {
+    const leftSeq = normalizeText(left?.identity?.msgSeq);
+    const rightSeq = normalizeText(right?.identity?.msgSeq);
+    if (/^\d+$/.test(leftSeq) && /^\d+$/.test(rightSeq)) {
+        const difference = BigInt(leftSeq) - BigInt(rightSeq);
+        if (difference !== 0n) {
+            return difference < 0n ? -1 : 1;
+        }
+    } else if (leftSeq !== rightSeq) {
+        return leftSeq.localeCompare(rightSeq);
+    }
+    return Number(left?.sourceIndex) - Number(right?.sourceIndex);
+}
+
+function rememberInlineMediaRecords(browserWindow, context) {
+    if (getInterfaceTweaksConfig().inlineMediaViewer !== true) {
+        return;
+    }
+    const state = getWindowState(browserWindow);
+    for (const record of context.records) {
+        const peerKey = getInlineMediaPeerKey(record);
+        if (!peerKey) {
+            continue;
+        }
+        const items = getRecordElements(record)
+            .map((element, index) => createInlineMediaItem(record, element, index))
+            .filter(Boolean);
+        if (!items.length) {
+            continue;
+        }
+        let peerItems = state.inlineMediaByPeer.get(peerKey);
+        if (!peerItems) {
+            peerItems = new Map();
+        }
+        state.inlineMediaByPeer.delete(peerKey);
+        state.inlineMediaByPeer.set(peerKey, peerItems);
+        while (state.inlineMediaByPeer.size > MAX_INLINE_MEDIA_PEERS) {
+            state.inlineMediaByPeer.delete(state.inlineMediaByPeer.keys().next().value);
+        }
+        for (const item of items) {
+            peerItems.set(getInlineMediaItemKey(item), item);
+        }
+        if (peerItems.size > MAX_INLINE_MEDIA_PER_PEER) {
+            const ordered = Array.from(peerItems.values()).sort(compareInlineMediaItems);
+            for (const item of ordered.slice(0, peerItems.size - MAX_INLINE_MEDIA_PER_PEER)) {
+                peerItems.delete(getInlineMediaItemKey(item));
+            }
+        }
+    }
+}
+
+function completeInlineMediaGallery(browserWindow, gallery) {
+    const selected = gallery?.items?.[gallery.index];
+    const peerKey = getInlineMediaPeerKey(selected?.identity);
+    const peerItems = peerKey ? getWindowState(browserWindow).inlineMediaByPeer.get(peerKey) : null;
+    if (!selected || !peerItems?.size) {
+        return gallery;
+    }
+    const selectedKey = getInlineMediaItemKey(selected);
+    const merged = new Map(peerItems);
+    for (const item of gallery.items) {
+        merged.set(getInlineMediaItemKey(item), item);
+    }
+    const items = Array.from(merged.values()).sort(compareInlineMediaItems);
+    const index = items.findIndex(item => getInlineMediaItemKey(item) === selectedKey);
+    return index >= 0 ? { items, index } : gallery;
+}
+
 function isGeneratedRepairPath(filePath) {
     const repairDir = normalizeComparablePath(getRepairDir());
     const candidate = normalizeComparablePath(filePath);
@@ -2567,8 +2623,8 @@ function queueFileRetry(browserWindow, record, plan) {
     }, RETRY_DELAY_MS);
 }
 
-function processMessageUpdates(browserWindow, args) {
-    if (!isMsgInfoListUpdate(args)) {
+function processMessageUpdates(browserWindow, context) {
+    if (!isMsgInfoListUpdate(context)) {
         return;
     }
     if (getFileRetryConfig().enabled === false) {
@@ -2576,13 +2632,8 @@ function processMessageUpdates(browserWindow, args) {
     }
     const state = getWindowState(browserWindow);
     pruneRetryState(state);
-    const records = [];
-    for (const arg of args) {
-        collectMsgRecords(arg, records);
-        collectMsgRecords(arg?.payload, records);
-    }
     const seen = new Set();
-    for (const record of records) {
+    for (const record of context.records) {
         const key = getRecordRetryKey(record);
         if (seen.has(key)) {
             continue;
@@ -3663,15 +3714,25 @@ async function retryFileRecord(browserWindow, record, plan, key) {
 }
 
 function handleNativeSend(browserWindow, channel, args) {
-    if (shouldBlockUpdateNotice(args)) {
+    if (!isNativeMainChannel(channel)) {
+        return false;
+    }
+    const context = createNativeEventContext(args, {
+        detectUnitedConfigGroup: getConfig().interfaceTweaks.hiddenUpdateBtnAndNotice === true
+    });
+    if (shouldBlockUpdateNotice(context)) {
         return true;
     }
-    rememberNativePeerAliases(browserWindow, args);
-    processDeleteBubbleSkin(args);
-    processPreventRecall(browserWindow, args);
-    processPokeUpdates(browserWindow, args);
+    rememberNativePeerAliases(browserWindow, context);
+    if (isVoiceMessageEnabled()) {
+        voiceFileSender?.rememberNativePeerAliases?.(browserWindow, context.aliases);
+    }
+    rememberInlineMediaRecords(browserWindow, context);
+    processDeleteBubbleSkin(context);
+    processPreventRecall(browserWindow, context);
+    processPokeUpdates(browserWindow, context);
     Promise.resolve()
-        .then(() => processMessageUpdates(browserWindow, args))
+        .then(() => processMessageUpdates(browserWindow, context))
         .catch(error => warn('message update processing failed:', error?.message || error));
     return false;
 }
@@ -3687,21 +3748,34 @@ function installNativeSendHandler(browserWindow) {
     );
 }
 
+function installNativeRequestHandler(browserWindow) {
+    if (!browserWindow || browserWindow.isDestroyed()) {
+        return;
+    }
+    addNativeRequestHandler(
+        browserWindow,
+        handleToolboxNativeRequest,
+        error => warn('native request interceptor failed:', error?.message || error)
+    );
+}
+
 function installForAllWindows() {
     for (const browserWindow of BrowserWindow.getAllWindows()) {
         installNativeSendHandler(browserWindow);
+        installNativeRequestHandler(browserWindow);
     }
 }
 
 function start() {
     loadConfig();
-    installIpcMainInterceptor();
+    app?.once?.('before-quit', () => inlineMediaServer.close());
     installConfigIpc();
     installForAllWindows();
     applyVoiceMessageConfig();
     cleanupOldRepairFiles(true).catch(() => {});
     app?.on?.('browser-window-created', (_event, browserWindow) => {
         installNativeSendHandler(browserWindow);
+        installNativeRequestHandler(browserWindow);
         if (isVoiceMessageEnabled()) {
             voiceFileSender?.onBrowserWindowCreated?.(browserWindow);
         }

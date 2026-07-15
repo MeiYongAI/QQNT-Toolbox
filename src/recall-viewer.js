@@ -8,6 +8,7 @@
     let toastTimer = 0;
     let activeAudio = null;
     let closeImagePreview = null;
+    let closeMessageContextMenu = null;
 
     function createElement(tagName, className, textContent) {
         const element = document.createElement(tagName);
@@ -57,10 +58,23 @@
         return `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日 ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     }
 
+    function getMessageTimestamp(message) {
+        const value = Number(message?.msgTime || message?.recallTime) || 0;
+        return value > 100000000000 ? value : value * 1000;
+    }
+
     function formatDuration(value) {
         const seconds = Math.max(0, Math.floor(Number(value) || 0));
         const minutes = Math.floor(seconds / 60);
         return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+    }
+
+    function formatVoiceDuration(value) {
+        const seconds = Math.max(0, Math.ceil(Number(value) || 0));
+        if (seconds < 60) {
+            return `${seconds}\u2033`;
+        }
+        return `${Math.floor(seconds / 60)}\u2032${String(seconds % 60).padStart(2, '0')}\u2033`;
     }
 
     function formatFileSize(value) {
@@ -85,14 +99,6 @@
         toastTimer = window.setTimeout(() => toast.remove(), duration);
     }
 
-    function hasSelectionWithin(element) {
-        const selection = window.getSelection();
-        if (!selection || selection.isCollapsed || !selection.toString().trim() || selection.rangeCount === 0) {
-            return false;
-        }
-        return element.contains(selection.getRangeAt(0).commonAncestorContainer);
-    }
-
     async function jumpToMessage(message) {
         try {
             await api.jumpToMessage({
@@ -103,6 +109,69 @@
         } catch {
             showToast('无法跳转到这条消息');
         }
+    }
+
+    function openMessageContextMenu(event, message) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMessageContextMenu?.();
+        const menu = createElement('div', 'message-context-menu');
+        const action = createElement('button', 'message-context-action', '定位到原消息');
+        action.type = 'button';
+        action.setAttribute('role', 'menuitem');
+        menu.tabIndex = -1;
+        menu.setAttribute('role', 'menu');
+
+        const close = () => {
+            document.removeEventListener('pointerdown', handleOutsidePointer, true);
+            document.removeEventListener('keydown', handleKeydown, true);
+            messageList.removeEventListener('scroll', close);
+            window.removeEventListener('blur', close);
+            window.removeEventListener('resize', close);
+            menu.remove();
+            if (closeMessageContextMenu === close) {
+                closeMessageContextMenu = null;
+            }
+        };
+        const handleOutsidePointer = pointerEvent => {
+            if (!menu.contains(pointerEvent.target)) {
+                close();
+            }
+        };
+        const handleKeydown = keyEvent => {
+            if (keyEvent.key === 'Escape') {
+                keyEvent.preventDefault();
+                close();
+            }
+        };
+
+        action.addEventListener('click', actionEvent => {
+            actionEvent.preventDefault();
+            actionEvent.stopPropagation();
+            close();
+            jumpToMessage(message);
+        });
+        menu.addEventListener('contextmenu', menuEvent => menuEvent.preventDefault());
+        menu.appendChild(action);
+        document.body.appendChild(menu);
+
+        const margin = 8;
+        const bounds = menu.getBoundingClientRect();
+        const left = Math.max(margin, Math.min(event.clientX, window.innerWidth - bounds.width - margin));
+        const preferredTop = event.clientY + bounds.height <= window.innerHeight - margin
+            ? event.clientY
+            : event.clientY - bounds.height;
+        const top = Math.max(margin, Math.min(preferredTop, window.innerHeight - bounds.height - margin));
+        menu.style.left = `${Math.round(left)}px`;
+        menu.style.top = `${Math.round(top)}px`;
+
+        document.addEventListener('pointerdown', handleOutsidePointer, true);
+        document.addEventListener('keydown', handleKeydown, true);
+        messageList.addEventListener('scroll', close);
+        window.addEventListener('blur', close);
+        window.addEventListener('resize', close);
+        closeMessageContextMenu = close;
+        menu.focus({ preventScroll: true });
     }
 
     function stopControlPropagation(element) {
@@ -124,15 +193,16 @@
     }
 
     function openImagePreview(src, name = '') {
+        closeMessageContextMenu?.();
         closeImagePreview?.();
         const layer = createElement('div', 'image-preview-layer');
         const image = document.createElement('img');
         image.className = 'image-preview';
         image.src = src;
         image.alt = name || '图片';
-        const closeButton = createElement('button', 'image-preview-close', '\u00d7');
-        closeButton.type = 'button';
-        closeButton.setAttribute('aria-label', '关闭图片');
+        layer.tabIndex = 0;
+        layer.setAttribute('role', 'button');
+        layer.setAttribute('aria-label', '关闭图片预览');
         const close = () => {
             document.removeEventListener('keydown', handleKeydown, true);
             layer.remove();
@@ -141,23 +211,17 @@
             }
         };
         const handleKeydown = event => {
-            if (event.key === 'Escape') {
+            if (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
                 close();
             }
         };
-        closeButton.addEventListener('click', close);
-        layer.addEventListener('click', event => {
-            if (event.target === layer) {
-                close();
-            }
-        });
-        image.addEventListener('click', event => event.stopPropagation());
-        layer.append(image, closeButton);
+        layer.addEventListener('click', close);
+        layer.appendChild(image);
         document.body.appendChild(layer);
         document.addEventListener('keydown', handleKeydown, true);
         closeImagePreview = close;
-        closeButton.focus();
+        layer.focus();
     }
 
     function createImagePart(part, compact = false) {
@@ -196,13 +260,15 @@
         return imageItem;
     }
 
-    function createWaveform(values) {
+    function createWaveform(values, duration) {
         const waveform = createElement('span', 'voice-waveform');
         const waves = Array.isArray(values) && values.length ? values : [4, 10, 7, 14, 9, 16, 6, 12, 8, 15, 5, 11];
+        const barCount = Math.min(16, Math.max(5, Math.round(5 + Math.min(Number(duration) || 0, 60) / 5)));
         const max = Math.max(...waves, 1);
-        for (const value of waves.slice(0, 24)) {
+        for (let index = 0; index < barCount; index++) {
+            const value = waves[Math.min(waves.length - 1, Math.floor(index * waves.length / barCount))];
             const bar = createElement('i', 'voice-wave');
-            bar.style.height = `${Math.max(3, Math.round((Number(value) || 0) / max * 15))}px`;
+            bar.style.height = `${Math.max(4, Math.round((Number(value) || 0) / max * 14))}px`;
             waveform.appendChild(bar);
         }
         return waveform;
@@ -214,25 +280,28 @@
         toggle.type = 'button';
         toggle.setAttribute('aria-label', '播放语音');
         const icon = createElement('span', 'voice-toggle-icon');
-        const waveform = createWaveform(part.waves);
-        const duration = createElement('span', 'voice-duration', formatDuration(part.duration));
+        const voiceSeconds = Math.max(1, Number(part.duration) || 1);
+        const waveform = createWaveform(part.waves, voiceSeconds);
+        const duration = createElement('span', 'voice-duration', formatVoiceDuration(voiceSeconds));
         const audio = document.createElement('audio');
         audio.preload = 'metadata';
+        voice.style.width = `${Math.round(88 + Math.min(voiceSeconds, 60) * 1.8)}px`;
         voice.append(toggle, waveform, duration, audio);
         toggle.appendChild(icon);
         stopControlPropagation(voice);
 
         const sync = () => {
-            const total = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number(part.duration) || 0;
+            const playbackTotal = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : voiceSeconds;
+            const displayTotal = Number(part.duration) > 0 ? Number(part.duration) : playbackTotal;
             const current = Math.max(0, Number(audio.currentTime) || 0);
-            const ratio = total ? Math.min(1, current / total) : 0;
+            const ratio = playbackTotal ? Math.min(1, current / playbackTotal) : 0;
             const bars = Array.from(waveform.children);
             bars.forEach((bar, index) => bar.classList.toggle('played', index / Math.max(1, bars.length - 1) <= ratio));
             voice.classList.toggle('playing', !audio.paused);
             toggle.setAttribute('aria-label', audio.paused ? '播放语音' : '暂停语音');
             duration.textContent = audio.paused || !current
-                ? formatDuration(total || part.duration)
-                : `${formatDuration(current)} / ${formatDuration(total)}`;
+                ? formatVoiceDuration(displayTotal)
+                : formatVoiceDuration(Math.max(0, displayTotal * (1 - ratio)));
         };
 
         const play = async () => {
@@ -285,6 +354,53 @@
         return voice;
     }
 
+    function createFileCard(part) {
+        const card = createElement('div', 'file-card');
+        const copy = createElement('div', 'file-copy');
+        copy.appendChild(createElement('div', 'file-title', part.name || '文件'));
+        const size = formatFileSize(part.size);
+        if (size) {
+            copy.appendChild(createElement('div', 'file-size', size));
+        }
+        const action = createElement('span', 'file-download');
+        action.setAttribute('aria-hidden', 'true');
+        card.append(copy, action);
+        return card;
+    }
+
+    function applyVideoRatio(element, part) {
+        const width = Number(part.width) || 0;
+        const height = Number(part.height) || 0;
+        element.style.aspectRatio = width > 0 && height > 0 ? `${width} / ${height}` : '16 / 9';
+    }
+
+    function createVideoPart(part) {
+        if (part.src) {
+            const video = document.createElement('video');
+            video.className = 'video-part';
+            video.src = part.src;
+            video.poster = part.poster || '';
+            video.preload = 'metadata';
+            video.controls = true;
+            applyVideoRatio(video, part);
+            stopControlPropagation(video);
+            return video;
+        }
+        const preview = createElement('div', `video-part video-preview${part.poster ? '' : ' video-placeholder'}`);
+        preview.setAttribute('aria-label', part.name || '视频');
+        applyVideoRatio(preview, part);
+        if (part.poster) {
+            const image = document.createElement('img');
+            image.src = part.poster;
+            image.alt = part.name || '视频';
+            image.loading = 'lazy';
+            preview.appendChild(image);
+        } else {
+            preview.appendChild(createElement('span', 'video-placeholder-copy', '视频'));
+        }
+        return preview;
+    }
+
     function createMediaCard(kind, title, meta, imageUrl = '') {
         const card = createElement('div', 'media-card');
         if (imageUrl) {
@@ -309,12 +425,34 @@
         try {
             const doc = new DOMParser().parseFromString(part.xml || '', 'application/xml');
             const source = doc.querySelector('source')?.getAttribute('name') || '聊天记录';
-            const titles = Array.from(doc.querySelectorAll('title')).map(item => item.textContent?.trim()).filter(Boolean);
-            const summary = doc.querySelector('summary')?.textContent?.trim() || titles.slice(1).join('\n');
-            return { title: titles[0] || source, summary };
+            const titles = Array.from(doc.querySelectorAll('item > title'))
+                .map(item => item.textContent?.trim())
+                .filter(Boolean);
+            return {
+                title: titles[0] || source,
+                previews: titles.slice(1, 5),
+                footer: doc.querySelector('item > summary')?.textContent?.trim() || ''
+            };
         } catch {
-            return { title: '聊天记录', summary: '' };
+            return { title: '聊天记录', previews: [], footer: '' };
         }
+    }
+
+    function createForwardCard(part) {
+        const forward = parseForwardPart(part);
+        const card = createElement('div', 'forward-card');
+        card.appendChild(createElement('div', 'forward-title', forward.title));
+        if (forward.previews.length) {
+            const previews = createElement('div', 'forward-previews');
+            for (const preview of forward.previews) {
+                previews.appendChild(createElement('div', 'forward-preview-line', preview));
+            }
+            card.appendChild(previews);
+        }
+        if (forward.footer) {
+            card.appendChild(createElement('div', 'forward-footer', forward.footer));
+        }
+        return card;
     }
 
     function renderPart(message, part, options = {}) {
@@ -334,20 +472,10 @@
             return createElement('div', 'reply-preview', part.text || '[消息]');
         }
         if (part.type === 'file') {
-            return createMediaCard('文件', part.name || '文件', formatFileSize(part.size));
+            return createFileCard(part);
         }
         if (part.type === 'video') {
-            if (part.src) {
-                const video = document.createElement('video');
-                video.className = 'video-part';
-                video.src = part.src;
-                video.poster = part.poster || '';
-                video.preload = 'metadata';
-                video.controls = true;
-                stopControlPropagation(video);
-                return video;
-            }
-            return createMediaCard('视频', part.name || '视频', [formatDuration(part.duration), formatFileSize(part.size)].filter(Boolean).join(' · '));
+            return createVideoPart(part);
         }
         if (part.type === 'face') {
             if (part.src) {
@@ -360,8 +488,7 @@
             return createMediaCard('卡片', part.title || '卡片消息', subtitle, part.image);
         }
         if (part.type === 'forward') {
-            const forward = parseForwardPart(part);
-            return createMediaCard('记录', forward.title, forward.summary);
+            return createForwardCard(part);
         }
         return createElement('div', part.type === 'notice' ? 'notice-part' : 'unsupported-part', part.text || '暂不支持的消息');
     }
@@ -379,7 +506,13 @@
         return { line, nextIndex: index };
     }
 
+    function isBareMessageContent(messageParts) {
+        const bareTypes = new Set(['image', 'video', 'face', 'file', 'card', 'forward']);
+        return messageParts.length > 0 && messageParts.every(part => bareTypes.has(part.type));
+    }
+
     function renderMessages(chat) {
+        closeMessageContextMenu?.();
         if (!chat?.messages?.length) {
             showEmpty(messageList, '该会话没有撤回数据');
             return;
@@ -389,21 +522,22 @@
             activeAudio = null;
         }
         closeImagePreview?.();
-        const fragment = document.createDocumentFragment();
-        for (const message of chat.messages) {
+        const stream = createElement('div', 'message-stream');
+        const orderedMessages = [...chat.messages].sort((left, right) => getMessageTimestamp(left) - getMessageTimestamp(right));
+        for (const message of orderedMessages) {
             const item = createElement('article', 'message-item');
             const avatar = createAvatar(message.avatarUrl, message.sender, 'message-avatar');
             const box = createElement('div', 'message-box');
             const sender = createElement('p', 'sender', message.sender || '未知发送者');
-            const messageTime = formatMessageTime(message.recallTime || message.msgTime);
+            const messageTime = formatMessageTime(message.msgTime || message.recallTime);
             const content = createElement('div', 'message-content');
             const parts = createElement('div', 'message-parts');
-            content.tabIndex = 0;
-            content.setAttribute('aria-label', '点击定位到原消息');
 
             const messageParts = Array.isArray(message.parts) && message.parts.length
                 ? message.parts
                 : [{ type: 'unsupported', text: '[空消息]' }];
+            content.classList.toggle('message-content--bare', isBareMessageContent(messageParts));
+            content.classList.toggle('message-content--voice', messageParts.some(part => part.type === 'voice'));
             const imageCount = messageParts.filter(part => part.type === 'image').length;
             let imageList = null;
             for (let index = 0; index < messageParts.length;) {
@@ -429,26 +563,16 @@
                 index++;
             }
             content.appendChild(parts);
-            content.addEventListener('click', () => {
-                if (!hasSelectionWithin(content)) {
-                    jumpToMessage(message);
-                }
-            });
-            content.addEventListener('keydown', event => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    jumpToMessage(message);
-                }
-            });
+            content.addEventListener('contextmenu', event => openMessageContextMenu(event, message));
 
             box.append(sender, content);
             if (messageTime) {
                 box.appendChild(createElement('time', 'message-time', messageTime));
             }
             item.append(avatar, box);
-            fragment.appendChild(item);
+            stream.appendChild(item);
         }
-        messageList.replaceChildren(fragment);
+        messageList.replaceChildren(stream);
         messageList.scrollTop = 0;
     }
 
@@ -490,6 +614,8 @@
         chatList.replaceChildren(fragment);
         if (selectedKey && chats.some(chat => chat.key === selectedKey)) {
             selectChat(selectedKey);
+        } else {
+            selectChat(chats[0].key);
         }
     }
 
