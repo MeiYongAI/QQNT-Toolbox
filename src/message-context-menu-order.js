@@ -1,5 +1,6 @@
 const EDITOR_ID = 'qqnt-toolbox-message-menu-order-editor';
 const STYLE_ID = 'qqnt-toolbox-message-menu-order-style';
+const SEPARATOR_ID_PREFIX = 'qq:separator:';
 
 export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:复制', label: '复制' },
@@ -17,6 +18,7 @@ export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:另存为', label: '另存为' },
     { id: 'qq:打开文件夹', label: '打开文件夹' },
     { id: 'qq:多选', label: '多选' },
+    { id: `${SEPARATOR_ID_PREFIX}1`, label: '分隔线' },
     { id: 'toolbox:poke-recall', label: '撤回戳戳', toolbox: true },
     { id: 'qq:撤回', label: '撤回' },
     { id: 'qq:删除', label: '删除' },
@@ -78,11 +80,33 @@ export function normalizeContextMenuOrder(values) {
     return result;
 }
 
+export function mergeObservedSeparators(order, observedOrder) {
+    const result = normalizeContextMenuOrder(order);
+    const observed = normalizeContextMenuOrder(observedOrder);
+    const knownIds = new Set(result);
+    for (let index = observed.length - 1; index >= 0; index -= 1) {
+        const id = observed[index];
+        if (!id.startsWith(SEPARATOR_ID_PREFIX) || knownIds.has(id)) {
+            continue;
+        }
+        const nextId = observed.slice(index + 1).find(candidate => knownIds.has(candidate));
+        const targetIndex = nextId ? result.indexOf(nextId) : result.length;
+        result.splice(targetIndex, 0, id);
+        knownIds.add(id);
+    }
+    return result;
+}
+
 export function sortContextMenuEntries(entries, order) {
-    const ranks = new Map(normalizeContextMenuOrder(order).map((id, index) => [id, index]));
-    if (!ranks.size) {
+    const requestedOrder = normalizeContextMenuOrder(order);
+    if (!requestedOrder.length) {
         return [...entries];
     }
+    const normalizedOrder = mergeObservedSeparators(
+        requestedOrder,
+        entries.map(entry => entry?.descriptor?.id)
+    );
+    const ranks = new Map(normalizedOrder.map((id, index) => [id, index]));
     return entries
         .map((entry, index) => ({ ...entry, originalIndex: index }))
         .sort((left, right) => {
@@ -110,6 +134,25 @@ export function describeContextMenuConfig(item) {
     const label = normalizeText(item?.text).replace(/\s+/g, ' ').trim();
     const keyLabel = label.replace(/\s+/g, '').replace(/[.。…]+$/u, '');
     return keyLabel ? { id: `qq:${keyLabel}`, label, toolbox: false } : null;
+}
+
+export function describeContextMenuConfigs(items) {
+    let separatorIndex = 0;
+    return (Array.isArray(items) ? items : []).map(config => {
+        const descriptor = describeContextMenuConfig(config);
+        if (descriptor || !config || typeof config !== 'object') {
+            return { config, descriptor };
+        }
+        separatorIndex += 1;
+        return {
+            config,
+            descriptor: {
+                id: `${SEPARATOR_ID_PREFIX}${separatorIndex}`,
+                label: separatorIndex === 1 ? '分隔线' : `分隔线 ${separatorIndex}`,
+                toolbox: false
+            }
+        };
+    });
 }
 
 function insertContextMenuConfig(items, item) {
@@ -141,7 +184,7 @@ export function composeContextMenuConfigs(nativeItems, toolboxItems, order = [],
         return items;
     }
     return sortContextMenuEntries(
-        items.map(config => ({ config, descriptor: describeContextMenuConfig(config) })),
+        describeContextMenuConfigs(items),
         order
     ).map(entry => entry.config);
 }
@@ -447,10 +490,7 @@ export function createMessageContextMenuOrderController(options) {
                 getConfig().enabled === true
             );
             if (getConfig().enabled === true) {
-                rememberItems(combined.map(config => ({
-                    config,
-                    descriptor: describeContextMenuConfig(config)
-                })));
+                rememberItems(describeContextMenuConfigs(combined));
             }
             return combined;
         };
@@ -577,7 +617,13 @@ export function createMessageContextMenuOrderController(options) {
                 }
             }
         };
-        append(normalizeContextMenuOrder(getConfig().items));
+        const configuredOrder = normalizeContextMenuOrder(getConfig().items);
+        const separatorReferenceOrder = lastObservedOrder.length
+            ? lastObservedOrder
+            : DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS.map(item => item.id);
+        append(configuredOrder.length
+            ? mergeObservedSeparators(configuredOrder, separatorReferenceOrder)
+            : lastObservedOrder);
         append(lastObservedOrder);
         append(discoveredItems.keys());
         return ids.map(id => discoveredItems.get(id) || {

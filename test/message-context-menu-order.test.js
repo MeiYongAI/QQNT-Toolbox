@@ -36,6 +36,49 @@ test('sorts the available native and Toolbox menu items as one stable subset', a
     assert.deepEqual(sorted.map(entry => entry.value), ['repeat', 'copy', 'delete', 'unknown']);
 });
 
+test('exposes native separators as independently sortable entries', async () => {
+    const { describeContextMenuConfigs, sortContextMenuEntries } = await modulePromise;
+    const entries = describeContextMenuConfigs([
+        { text: '复制', value: 'copy' },
+        { type: 'separator', value: 'separator' },
+        { text: '撤回', value: 'recall' },
+        { text: '删除', value: 'delete' }
+    ]);
+    const sorted = sortContextMenuEntries(entries, [
+        'qq:复制',
+        'qq:撤回',
+        'qq:删除',
+        'qq:separator:1'
+    ]);
+
+    assert.equal(entries[1].descriptor.label, '分隔线');
+    assert.deepEqual(sorted.map(entry => entry.config.value), ['copy', 'recall', 'delete', 'separator']);
+});
+
+test('keeps separators in their QQ position until an existing order saves them', async () => {
+    const {
+        describeContextMenuConfigs,
+        mergeObservedSeparators,
+        sortContextMenuEntries
+    } = await modulePromise;
+    const entries = describeContextMenuConfigs([
+        { text: '多选', value: 'multi' },
+        { type: 'separator', value: 'separator' },
+        { text: '撤回', value: 'recall' },
+        { text: '删除', value: 'delete' }
+    ]);
+    const sorted = sortContextMenuEntries(entries, ['qq:多选', 'qq:撤回', 'qq:删除']);
+
+    assert.deepEqual(sorted.map(entry => entry.config.value), ['multi', 'separator', 'recall', 'delete']);
+    assert.deepEqual(
+        mergeObservedSeparators(
+            ['qq:多选', 'qq:撤回', 'qq:删除'],
+            ['qq:多选', 'qq:separator:1', 'qq:撤回', 'qq:删除']
+        ),
+        ['qq:多选', 'qq:separator:1', 'qq:撤回', 'qq:删除']
+    );
+});
+
 test('keeps QQ order unchanged until the user saves a custom order', async () => {
     const { sortContextMenuEntries } = await modulePromise;
     const entries = [
@@ -56,6 +99,7 @@ test('ships both QQ native and Toolbox entries in the initial editor catalog', a
     assert.ok(ids.has('toolbox:repeat'));
     assert.ok(ids.has('toolbox:voice-save'));
     assert.ok(ids.has('toolbox:poke-recall'));
+    assert.ok(ids.has('qq:separator:1'));
 });
 
 test('collects Toolbox entries for sorting but excludes them as native templates', async () => {
