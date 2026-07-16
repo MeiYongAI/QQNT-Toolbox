@@ -2,6 +2,7 @@ import {
     createMessageContextMenuOrderController,
     getContextMenuItemElements
 } from './message-context-menu-order.js';
+import { createReactionLimitController } from './reaction-limit.js';
 
 let initializeToolboxSettings = async () => {};
 let handleToolboxVueComponentMount = () => {};
@@ -91,6 +92,8 @@ let handleToolboxVueComponentMount = () => {};
         },
         messageTweaks: {
             promptNoSeq: false,
+            removeReactionLimit: false,
+            keepReactionPanelOpen: false,
             removeReplyAt: false
         },
         entertainment: {
@@ -155,6 +158,7 @@ let handleToolboxVueComponentMount = () => {};
     let pokeMenuRequestId = 0;
     let messageContextMenuOrderController = null;
     let messageContextMenuActionsInstalled = false;
+    let reactionLimitController = null;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let unreadCountObserver = null;
@@ -270,6 +274,35 @@ let handleToolboxVueComponentMount = () => {};
             window.__qqntToolboxMessageContextMenu = messageContextMenuOrderController;
         }
         return messageContextMenuOrderController;
+    }
+
+    function getReactionLimitController() {
+        if (!reactionLimitController) {
+            reactionLimitController = createReactionLimitController({
+                getCatalog: () => getBridge()?.getReactionEmojiCatalog?.() || [],
+                getPeer: getPeerFromRecord,
+                resolveRecord: findMessageRecordFromElement,
+                sendReaction: async payload => {
+                    const result = await getBridge()?.setMessageReaction?.(payload);
+                    if (result && result.ok === false) {
+                        throw new Error(result.reason || 'Reaction failed.');
+                    }
+                },
+                onError: error => {
+                    if (isConfigEnabled('debug.enabled')) {
+                        console.warn('[QQNT Toolbox] Reaction failed:', error);
+                    }
+                }
+            });
+        }
+        return reactionLimitController;
+    }
+
+    function syncReactionLimitFeature() {
+        getReactionLimitController().sync({
+            removeLimit: isConfigEnabled('messageTweaks.removeReactionLimit'),
+            keepOpen: isConfigEnabled('messageTweaks.keepReactionPanelOpen')
+        });
     }
 
     function getPanelState() {
@@ -1498,6 +1531,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     childLevel: 2
                 }),
                 createSwitchItem(text('提示 NoSeq 消息'), text('标记可能未成功发送的消息'), 'messageTweaks.promptNoSeq'),
+                createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),
+                createSwitchItem(text('回应后不关闭回应窗口'), text('便于连续添加或取消回应'), 'messageTweaks.keepReactionPanelOpen'),
                 createSwitchItem(text('语音消息'), text('拖拽发送与语音库'), 'voiceMessage.enabled'),
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
                     requires: 'voiceMessage.enabled',
@@ -1721,6 +1756,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         scheduleInterfaceTweaksRefresh();
         const bridge = getBridge();
         if (!bridge?.setConfig) {
+            syncReactionLimitFeature();
             return;
         }
         try {
@@ -1728,6 +1764,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
+            syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
@@ -4761,6 +4798,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } finally {
             configReady = true;
             getMessageContextMenuOrderController().syncConfig();
+            syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
             refreshRepeatEntrypoints();
@@ -4778,6 +4816,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             currentConfig = mergeConfig(config);
             configReady = true;
             getMessageContextMenuOrderController().syncConfig();
+            syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
             scheduleRepeatEntrypointRefresh();
@@ -4842,6 +4881,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         document.querySelectorAll('.qqnt-toolbox-poke-menu-item').forEach(item => item.remove());
         const avatar = getPokeAvatarFromEvent(event);
         const messageTarget = avatar ? null : getMessageContextTargetFromEvent(event);
+        getReactionLimitController().rememberContext(
+            messageTarget ? findMessageRecordFromElement(messageTarget) : null
+        );
         getMessageContextMenuOrderController().handleContextMenu(event, messageTarget);
         const pokeContext = avatar ? getPokeChatContext(avatar) : null;
         if (pokeContext?.isTemporary && isFeatureEnabled('entertainment.rightClickAvatarPoke')) {

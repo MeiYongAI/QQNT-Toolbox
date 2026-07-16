@@ -5,6 +5,8 @@ const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
+const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
+const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
 const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
 const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
@@ -22,6 +24,8 @@ module.exports = Object.freeze({
     CHANNEL_CONFIG_CHANGED,
     CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_REPEAT_MESSAGE,
+    CHANNEL_GET_REACTION_CATALOG,
+    CHANNEL_SET_MESSAGE_REACTION,
     CHANNEL_SEND_POKE,
     CHANNEL_RECALL_POKE,
     CHANNEL_REGISTER_POKE_ACCOUNT,

@@ -14,6 +14,7 @@ const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const { createRepeatMessageHandler } = require('./repeat-message');
+const { loadReactionEmojiCatalog, normalizeReactionRequest } = require('./reaction-catalog');
 const { classifyMediaFilePath, extractInlineMediaGallery } = require('./inline-media-preview');
 const { createLocalMediaServer } = require('./local-media-server');
 const {
@@ -22,6 +23,8 @@ const {
     CHANNEL_CONFIG_CHANGED,
     CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_REPEAT_MESSAGE,
+    CHANNEL_GET_REACTION_CATALOG,
+    CHANNEL_SET_MESSAGE_REACTION,
     CHANNEL_SEND_POKE,
     CHANNEL_RECALL_POKE,
     CHANNEL_REGISTER_POKE_ACCOUNT,
@@ -57,6 +60,7 @@ const RETRY_DELAY_MS = 800;
 const REPAIR_FILE_TTL_MS = 24 * 60 * 60 * 1000;
 const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
 const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
+const SET_MESSAGE_REACTION_COMMAND = 'nodeIKernelMsgService/setMsgEmojiLikes';
 const MEDIA_PREVIEW_FILE_WAIT_MS = 2 * 60 * 1000;
 const MAX_INLINE_MEDIA_PEERS = 40;
 const MAX_INLINE_MEDIA_PER_PEER = 500;
@@ -109,6 +113,8 @@ const DEFAULT_CONFIG = {
     },
     messageTweaks: {
         promptNoSeq: false,
+        removeReactionLimit: false,
+        keepReactionPanelOpen: false,
         removeReplyAt: false
     },
     entertainment: {
@@ -186,6 +192,7 @@ const recallViewerState = {
     accountUin: ''
 };
 const inlineMediaServer = createLocalMediaServer();
+let reactionEmojiCatalog = null;
 
 function isDebugEnabled() {
     return process.env.QQNT_TOOLBOX_DEBUG === '1' || configCache?.debug?.enabled === true;
@@ -759,6 +766,55 @@ function broadcastConfigChanged() {
     }
 }
 
+function getReactionEmojiCatalog() {
+    const messageTweaks = getConfig().messageTweaks;
+    if (messageTweaks.removeReactionLimit !== true) {
+        return [];
+    }
+    if (!reactionEmojiCatalog) {
+        const documentDirectories = [
+            app.getPath('documents'),
+            path.join(os.homedir(), 'Documents'),
+            path.join(process.env.USERPROFILE || os.homedir(), 'Documents')
+        ];
+        const tencentFilesRoots = Array.from(new Set(documentDirectories))
+            .map(directory => path.join(directory, 'Tencent Files'));
+        const catalog = loadReactionEmojiCatalog(tencentFilesRoots);
+        if (catalog.length) {
+            reactionEmojiCatalog = catalog;
+        }
+        return catalog;
+    }
+    return reactionEmojiCatalog;
+}
+
+async function setMessageReaction(browserWindow, payload) {
+    const messageTweaks = getConfig().messageTweaks;
+    if (messageTweaks.removeReactionLimit !== true) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const request = normalizeReactionRequest(payload);
+    if (!request) {
+        return { ok: false, reason: 'invalid-request' };
+    }
+    try {
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            SET_MESSAGE_REACTION_COMMAND,
+            [request, null],
+            true,
+            10000
+        );
+        return isNativeFailure(result)
+            ? { ok: false, reason: 'native-failure' }
+            : { ok: true };
+    } catch (error) {
+        warn('set message reaction failed:', error?.message || error);
+        return { ok: false, reason: 'send-failed' };
+    }
+}
+
 function installConfigIpc() {
     if (globalThis.__qqntToolboxConfigIpcInstalled) {
         return;
@@ -772,6 +828,21 @@ function installConfigIpc() {
             throw new Error('BrowserWindow was not found.');
         }
         return await repeatMessageFromRenderer(browserWindow, payload);
+    });
+    ipcMain.handle(CHANNEL_GET_REACTION_CATALOG, () => {
+        try {
+            return getReactionEmojiCatalog();
+        } catch (error) {
+            warn('reaction emoji catalog failed:', error?.message || error);
+            return [];
+        }
+    });
+    ipcMain.handle(CHANNEL_SET_MESSAGE_REACTION, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found' };
+        }
+        return await setMessageReaction(browserWindow, payload);
     });
     ipcMain.handle(CHANNEL_SEND_POKE, async (event, payload) => {
         const entertainment = getEntertainmentConfig();

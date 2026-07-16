@@ -5,6 +5,8 @@ const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
+const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
+const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
 const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
 const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
@@ -17,6 +19,8 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     getConfig: () => ipcRenderer.invoke(CHANNEL_GET_CONFIG),
     setConfig: config => ipcRenderer.invoke(CHANNEL_SET_CONFIG, config),
     repeatMessage: payload => ipcRenderer.invoke(CHANNEL_REPEAT_MESSAGE, payload),
+    getReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_REACTION_CATALOG),
+    setMessageReaction: payload => ipcRenderer.invoke(CHANNEL_SET_MESSAGE_REACTION, payload),
     sendPoke: payload => ipcRenderer.invoke(CHANNEL_SEND_POKE, payload),
     recallPoke: payload => ipcRenderer.invoke(CHANNEL_RECALL_POKE, payload),
     registerPokeAccount: selfUin => ipcRenderer.invoke(CHANNEL_REGISTER_POKE_ACCOUNT, selfUin),

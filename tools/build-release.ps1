@@ -94,6 +94,8 @@ try {
         'QQNT-Toolbox/src/recall-viewer.html',
         'QQNT-Toolbox/src/recall-viewer.js',
         'QQNT-Toolbox/src/recall-viewer-preload.js',
+        'QQNT-Toolbox/src/reaction-catalog.js',
+        'QQNT-Toolbox/src/reaction-limit.js',
         'QQNT-Toolbox/src/repeat-message.js',
         'QQNT-Toolbox/src/settings.css',
         'QQNT-Toolbox/src/voice/media.js',
