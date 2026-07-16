@@ -200,98 +200,6 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         return Boolean(value && typeof value === 'object' && (value.msgId || value.msgSeq) && Array.isArray(value.elements));
     }
 
-    function findMsgRecordInValue(value, depth = 0, seen = new WeakSet()) {
-        if (!value || depth > 4 || typeof value !== 'object') {
-            return null;
-        }
-        if (value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
-            return null;
-        }
-        if (seen.has(value)) {
-            return null;
-        }
-        seen.add(value);
-        if (isMsgRecord(value)) {
-            return value;
-        }
-        for (const key of ['props', 'setupState', 'ctx', 'proxy', 'msgRecord', 'message', 'record', 'msg']) {
-            const found = findMsgRecordInValue(value[key], depth + 1, seen);
-            if (found) {
-                return found;
-            }
-        }
-        return null;
-    }
-
-    function getMessageElementFromElement(element) {
-        const vueMessage = element?.closest?.('.message.vue-component');
-        if (vueMessage) {
-            return vueMessage;
-        }
-        const item = element?.closest?.('.ml-item');
-        if (item) {
-            return item.querySelector?.('.message.vue-component') || item.querySelector?.('.message') || item;
-        }
-        const message = element?.closest?.('.message');
-        return message?.closest?.('.message.vue-component') || message || null;
-    }
-
-    function findMessageRecordFromElement(element) {
-        const messageElement = getMessageElementFromElement(element);
-        if (!messageElement) {
-            return null;
-        }
-        const candidates = [];
-        const seen = new Set();
-        const addCandidate = node => {
-            if (node instanceof Element && !seen.has(node)) {
-                seen.add(node);
-                candidates.push(node);
-            }
-        };
-        for (let node = element; node && node !== document.body; node = node.parentElement) {
-            addCandidate(node);
-            if (node === messageElement) {
-                break;
-            }
-        }
-        addCandidate(messageElement);
-        for (const child of Array.from(messageElement.querySelectorAll?.('*') || []).slice(0, 80)) {
-            addCandidate(child);
-        }
-        for (const candidate of candidates) {
-            for (const instance of getVueInstances(candidate)) {
-                const direct = instance?.props?.msgRecord ||
-                    instance?.ctx?.msgRecord ||
-                    instance?.proxy?.msgRecord ||
-                    instance?.props?.message ||
-                    instance?.ctx?.message ||
-                    instance?.proxy?.message;
-                if (isMsgRecord(direct)) {
-                    return direct;
-                }
-                const found = findMsgRecordInValue(instance);
-                if (found) {
-                    return found;
-                }
-            }
-        }
-        return null;
-    }
-
-    function findMessageRecordFromContextEvent(event) {
-        for (const item of event?.composedPath?.() || []) {
-            if (!(item instanceof Element)) {
-                continue;
-            }
-            const record = findMessageRecordFromElement(item);
-            if (record) {
-                return record;
-            }
-        }
-        return findMessageRecordFromElement(event?.target);
-    }
-
     function getCurrentPeerFromAioComponents() {
         const roots = Array.from(document.querySelectorAll('.aio.vue-component, .aio')).slice(0, 4);
         for (const root of roots) {
@@ -789,128 +697,6 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         return results;
     }
 
-    function collectVuePttsFromElement(element, ptts) {
-        if (!(element instanceof Element)) {
-            return;
-        }
-        for (const instance of getVueInstances(element)) {
-            for (const source of [instance.props, instance.setupState, instance.ctx, instance.proxy]) {
-                collectPttElementsFromValue(source, ptts);
-            }
-        }
-    }
-
-    function collectPttsFromContextEvent(event) {
-        const record = findMessageRecordFromContextEvent(event);
-        if (record) {
-            const recordPtts = [];
-            collectPttElementsFromValue(record.elements, recordPtts);
-            if (recordPtts.length) {
-                return dedupePtts(recordPtts);
-            }
-        }
-        const ptts = [];
-        const candidates = [];
-        const seen = new Set();
-        const addCandidate = element => {
-            if (!(element instanceof Element) || seen.has(element)) {
-                return;
-            }
-            seen.add(element);
-            candidates.push(element);
-        };
-        for (const element of (event.composedPath?.() || []).filter(item => item instanceof Element).slice(0, 28)) {
-            addCandidate(element);
-            addCandidate(element.closest?.('.message.vue-component'));
-            addCandidate(element.closest?.('.message'));
-            addCandidate(element.closest?.('.ml-item'));
-        }
-        for (const messageElement of candidates.filter(element => element.matches?.('.message,.ml-item')).slice(0, 1)) {
-            for (const element of Array.from(messageElement.querySelectorAll?.('*') || []).slice(0, 100)) {
-                addCandidate(element);
-            }
-        }
-        for (const element of candidates) {
-            collectVuePttsFromElement(element, ptts);
-        }
-        return dedupePtts(ptts);
-    }
-
-    function distanceToRect(point, rect) {
-        const dx = point.x < rect.left ? rect.left - point.x : point.x > rect.right ? point.x - rect.right : 0;
-        const dy = point.y < rect.top ? rect.top - point.y : point.y > rect.bottom ? point.y - rect.bottom : 0;
-        return Math.hypot(dx, dy);
-    }
-
-    function getNativeMenuItemElements(menu) {
-        const selectors = ['.q-context-menu-item', '[class*="context-menu-item"]', '[role="menuitem"]', 'li', 'button'];
-        const candidates = [];
-        for (const selector of selectors) {
-            candidates.push(...Array.from(menu.querySelectorAll(selector)));
-        }
-        const seen = new Set();
-        return candidates
-            .filter(item => {
-                if (!item || seen.has(item) ||
-                    item.classList?.contains('qqnt-toolbox-voice-save-item')) {
-                    return false;
-                }
-                seen.add(item);
-                return !candidates.some(parent => parent !== item && parent.contains?.(item));
-            })
-            .slice(0, 24);
-    }
-
-    function findNativeContextMenuNear(point) {
-        const menus = Array.from(document.querySelectorAll('.q-context-menu, [class*="context-menu"]'))
-            .filter(menu => {
-                if (!isVisible(menu)) {
-                    return false;
-                }
-                const rect = menu.getBoundingClientRect?.();
-                return rect && rect.width >= 40 && rect.height >= 24 && getNativeMenuItemElements(menu).length > 0;
-            });
-        return menus
-            .map(menu => {
-                const rect = menu.getBoundingClientRect();
-                return { menu, rect, distance: distanceToRect(point, rect) };
-            })
-            .filter(item => item.distance <= 220 || (
-                point.x >= item.rect.left - 48 &&
-                point.x <= item.rect.right + 48 &&
-                point.y >= item.rect.top - 48 &&
-                point.y <= item.rect.bottom + 48
-            ))
-            .sort((a, b) => a.distance - b.distance || (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height))[0]?.menu || null;
-    }
-
-    function findMessageContextMenuFromElement(element) {
-        if (!(element instanceof Element)) {
-            return null;
-        }
-        const messageElement = getMessageElementFromElement(element);
-        const candidates = [element, messageElement];
-        if (messageElement) {
-            candidates.push(...Array.from(messageElement.querySelectorAll('*')).slice(0, 100));
-        }
-        const seen = new WeakSet();
-        for (const candidate of candidates.filter(item => item instanceof Element)) {
-            for (const start of getVueInstances(candidate)) {
-                for (let instance = start, depth = 0; instance && depth < 16; instance = instance.parent, depth += 1) {
-                    if (seen.has(instance)) {
-                        continue;
-                    }
-                    seen.add(instance);
-                    const menu = instance.proxy?.msgCtxMenu || instance.ctx?.msgCtxMenu;
-                    if (menu?._?.ctx) {
-                        return menu;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
     function makePttForwardPlaceholder(record, ptt) {
         const duration = Math.max(1, Math.ceil(Number(ptt?.duration) || 1));
         return {
@@ -930,81 +716,95 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         };
     }
 
-    function patchNativePttForwardMenu(pttBubble) {
-        const menu = findMessageContextMenuFromElement(pttBubble);
-        const menuContext = menu?._?.ctx;
-        if (!menuContext) {
-            return false;
-        }
+    function getPttFromRecord(record) {
+        const ptts = [];
+        collectPttElementsFromValue(record?.elements, ptts);
+        return dedupePtts(ptts)[0] || null;
+    }
+
+    function prepareNativePttForwardContext(request) {
         const bridge = getBridge();
-        const showDescriptor = Object.getOwnPropertyDescriptor(menuContext, 'showMenuConfig');
-        const currentOpenMenu = menuContext.openMenu;
-        if (typeof showDescriptor?.get !== 'function' || showDescriptor.configurable === false ||
-            typeof currentOpenMenu !== 'function') {
+        restoreNativePttForwardContext(bridge.nativePttForwardState);
+        const record = request.originalContext?.msgRecord;
+        const ptt = getPttFromRecord(record);
+        if (!isVoiceForwardInContextMenuEnabled() || !ptt || !isMsgRecord(record)) {
+            return request;
+        }
+        const placeholderRecord = makePttForwardPlaceholder(record, ptt);
+        const placeholderContext = { ...request.originalContext, msgRecord: placeholderRecord };
+        bridge.nativePttForwardState = {
+            active: true,
+            menu: request.menu,
+            originalContext: request.originalContext,
+            originalRecord: record,
+            placeholderContext,
+            placeholderRecord,
+            ptt,
+            sourceMsgId: String(record.msgId || '')
+        };
+        return { ...request, context: placeholderContext };
+    }
+
+    function transformNativePttForwardItems(request) {
+        const state = getBridge().nativePttForwardState;
+        if (!state?.active || state.menu !== request.menu ||
+            request.menu?.menuContext !== state.placeholderContext || !Array.isArray(request.items)) {
+            return request;
+        }
+        const speechToText = request.items.find(item => Number(item?.type) === 15) || {
+            type: 15,
+            text: '\u8f6c\u6587\u5b57',
+            icon: 'speech_to_text'
+        };
+        const forward = request.items.find(item => Number(item?.type) === 6) || {
+            type: 6,
+            text: '\u8f6c\u53d1',
+            icon: 'one_by_one_forward'
+        };
+        return {
+            ...request,
+            items: [
+                speechToText,
+                forward,
+                ...request.items.filter(item => ![1, 6, 15].includes(Number(item?.type)))
+            ]
+        };
+    }
+
+    function getPttContextMenuItems({ originalContext }) {
+        const ptt = getPttFromRecord(originalContext?.msgRecord);
+        if (!isVoiceSaveInContextMenuEnabled() || !ptt) {
+            return [];
+        }
+        return [{
+            type: 990102,
+            text: '\u4fdd\u5b58',
+            icon: 'download',
+            when: () => true,
+            handler: () => enqueueAction({ type: 'savePtt', ptt }),
+            __qqntToolboxDescriptor: {
+                id: 'toolbox:voice-save',
+                label: '\u4fdd\u5b58\u8bed\u97f3',
+                toolbox: true
+            },
+            __qqntToolboxInsertAfter: ['qq:\u6536\u85cf', 'qq:\u8f6c\u53d1']
+        }];
+    }
+
+    function registerPttContextMenuExtension() {
+        const bridge = getBridge();
+        const service = window.__qqntToolboxMessageContextMenu;
+        if (bridge.messageContextMenuExtensionRegistered || typeof service?.registerExtension !== 'function') {
             return false;
         }
-        try {
-            if (!showDescriptor.get.__qqntToolboxPttForward) {
-                const originalGet = showDescriptor.get;
-                const patchedGet = function patchedShowMenuConfig() {
-                    const config = originalGet.call(this);
-                    const state = bridge.nativePttForwardState;
-                    if (!state?.active || state.menu !== menu ||
-                        menu.menuContext !== state.placeholderContext || !Array.isArray(config)) {
-                        return config;
-                    }
-                    const speechToText = config.find(item => Number(item?.type) === 15) || {
-                        type: 15,
-                        text: '\u8f6c\u6587\u5b57',
-                        icon: 'speech_to_text'
-                    };
-                    const forward = config.find(item => Number(item?.type) === 6) || {
-                        type: 6,
-                        text: '\u8f6c\u53d1',
-                        icon: 'one_by_one_forward'
-                    };
-                    return [
-                        speechToText,
-                        forward,
-                        ...config.filter(item => ![1, 6, 15].includes(Number(item?.type)))
-                    ];
-                };
-                Object.defineProperty(patchedGet, '__qqntToolboxPttForward', { value: true });
-                Object.defineProperty(menuContext, 'showMenuConfig', {
-                    ...showDescriptor,
-                    get: patchedGet
-                });
-            }
-            if (!currentOpenMenu.__qqntToolboxPttForward) {
-                const patchedOpenMenu = function patchedPttOpenMenu(event, items, context, options) {
-                    const record = context?.msgRecord;
-                    const ptts = [];
-                    collectPttElementsFromValue(record?.elements, ptts);
-                    const ptt = dedupePtts(ptts)[0] || null;
-                    if (!isVoiceForwardInContextMenuEnabled() || !ptt || !isMsgRecord(record)) {
-                        return Reflect.apply(currentOpenMenu, this, arguments);
-                    }
-                    const placeholderRecord = makePttForwardPlaceholder(record, ptt);
-                    const placeholderContext = { ...context, msgRecord: placeholderRecord };
-                    bridge.nativePttForwardState = {
-                        active: true,
-                        menu,
-                        originalContext: context,
-                        originalRecord: record,
-                        placeholderContext,
-                        placeholderRecord,
-                        ptt,
-                        sourceMsgId: String(record.msgId || '')
-                    };
-                    return Reflect.apply(currentOpenMenu, this, [event, items, placeholderContext, options]);
-                };
-                Object.defineProperty(patchedOpenMenu, '__qqntToolboxPttForward', { value: true });
-                menuContext.openMenu = patchedOpenMenu;
-            }
-            return true;
-        } catch {
-            return false;
-        }
+        service.registerExtension({
+            id: 'toolbox-voice-message-actions',
+            beforeOpen: prepareNativePttForwardContext,
+            transformItems: transformNativePttForwardItems,
+            getItems: getPttContextMenuItems
+        });
+        bridge.messageContextMenuExtensionRegistered = true;
+        return true;
     }
 
     function restoreNativePttForwardContext(state) {
@@ -1043,142 +843,6 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
             return;
         }
         restoreNativePttForwardContext(state);
-    }
-
-    function menuLooksLikeVoiceContextMenu(menu) {
-        const text = compactText(menu);
-        return /\u8f6c\u6587\u5b57|\u8bed\u97f3|voice|audio|ptt/i.test(text);
-    }
-
-    function menuLooksLikeFileContextMenu(menu) {
-        const text = compactText(menu);
-        return /\u53e6\u5b58\u4e3a|\u6253\u5f00\u6587\u4ef6\u5939|openfolder|saveas/i.test(text) && !menuLooksLikeVoiceContextMenu(menu);
-    }
-
-    function setNativeMenuItemLabel(item, label) {
-        const text = item.querySelector?.('.q-context-menu-item__text,[class*="context-menu-item__text"]');
-        if (text) {
-            text.textContent = label;
-            return;
-        }
-        const textNode = Array.from(item.childNodes || [])
-            .find(node => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim());
-        if (textNode) {
-            textNode.nodeValue = label;
-            return;
-        }
-        item.append(document.createTextNode(label));
-    }
-
-    function setNativeMenuItemSaveIcon(item) {
-        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
-        if (!icon) {
-            return;
-        }
-        icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M5 19h14"/></svg>';
-        icon.style.display = icon.style.display || 'flex';
-        icon.style.alignItems = 'center';
-        icon.style.justifyContent = 'center';
-        icon.style.background = 'transparent';
-        icon.style.backgroundImage = 'none';
-        icon.style.maskImage = 'none';
-        icon.style.webkitMaskImage = 'none';
-        icon.querySelector('svg')?.setAttribute('aria-hidden', 'true');
-    }
-
-    function findPttBubbleFromContextEvent(event) {
-        for (const item of event?.composedPath?.() || []) {
-            if (!(item instanceof Element)) {
-                continue;
-            }
-            const bubble = item.matches?.('.ptt-message__container')
-                ? item
-                : item.closest?.('.ptt-message__container');
-            if (bubble && isVisible(bubble)) {
-                return bubble;
-            }
-            if (item.matches?.('.message, .ml-item')) {
-                break;
-            }
-        }
-        return null;
-    }
-
-    function createPttSaveMenuItem(menu, ptt) {
-        const template = getNativeMenuItemElements(menu)[0];
-        const item = template?.cloneNode(true) || document.createElement('div');
-        item.classList?.add('qqnt-toolbox-voice-save-item');
-        item.removeAttribute('id');
-        item.setAttribute('role', item.getAttribute('role') || 'menuitem');
-        item.setAttribute('tabindex', '-1');
-        setNativeMenuItemLabel(item, '\u4fdd\u5b58');
-        setNativeMenuItemSaveIcon(item);
-        const stop = event => {
-            event.preventDefault();
-            event.stopPropagation();
-            event.stopImmediatePropagation?.();
-        };
-        item.addEventListener('pointerdown', stop, true);
-        item.addEventListener('mousedown', stop, true);
-        item.addEventListener('click', event => {
-            stop(event);
-            enqueueAction({ type: 'savePtt', ptt });
-            menu.remove();
-        }, true);
-        return item;
-    }
-
-    function removePttContextMenuItems() {
-        document.querySelectorAll('.qqnt-toolbox-voice-save-item').forEach(item => item.remove());
-    }
-
-    function insertPttContextMenu(point, ptt, menu = null, options = {}) {
-        menu = menu || findNativeContextMenuNear(point);
-        if (!menu || menu.querySelector('.qqnt-toolbox-voice-save-item')) {
-            return Boolean(menu);
-        }
-        if (!options.allowUnhintedMenu && !menuLooksLikeVoiceContextMenu(menu)) {
-            return true;
-        }
-        const items = getNativeMenuItemElements(menu);
-        const favoriteItem = items.find(item => compactText(item) === '\u6536\u85cf');
-        const forwardItem = items.find(item => compactText(item) === '\u8f6c\u53d1') || null;
-        if (isVoiceSaveInContextMenuEnabled()) {
-            const saveItem = createPttSaveMenuItem(menu, ptt);
-            const afterItem = favoriteItem || forwardItem || items[items.length - 1];
-            if (afterItem?.parentElement) {
-                afterItem.parentElement.insertBefore(saveItem, afterItem.nextSibling);
-            } else {
-                menu.append(saveItem);
-            }
-        }
-        return true;
-    }
-
-    function schedulePttContextMenu(event, pttBubble) {
-        if (!pttBubble) {
-            return;
-        }
-        const point = { x: event.clientX, y: event.clientY };
-        let directPtt = null;
-        let scannedDirect = false;
-        const run = () => {
-            const menu = findNativeContextMenuNear(point);
-            if (!menu) {
-                return Boolean(menu);
-            }
-            if (menuLooksLikeFileContextMenu(menu)) {
-                return true;
-            }
-            if (!scannedDirect) {
-                scannedDirect = true;
-                directPtt = collectPttsFromContextEvent(event)[0] || null;
-            }
-            return directPtt ? insertPttContextMenu(point, directPtt, menu, { allowUnhintedMenu: true }) : true;
-        };
-        setTimeout(run, 0);
-        setTimeout(run, 48);
-        setTimeout(run, 140);
     }
 
     function install() {
@@ -1225,15 +889,6 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
                 event.stopPropagation();
                 event.stopImmediatePropagation?.();
                 openLibraryPanelDebounced();
-                return;
-            }
-            removePttContextMenuItems();
-            const pttBubble = findPttBubbleFromContextEvent(event);
-            if (isVoiceForwardInContextMenuEnabled()) {
-                patchNativePttForwardMenu(pttBubble);
-            }
-            if (isVoiceSaveInContextMenuEnabled()) {
-                schedulePttContextMenu(event, pttBubble);
             }
         }, true);
         document.addEventListener('click', handleNativePttForwardMenuClick, true);
@@ -1254,15 +909,11 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         bridge.enabled = enabled === true;
         if (!bridge.enabled) {
             closeLibraryPanel();
-            removePttContextMenuItems();
             restoreNativePttForwardContext(bridge.nativePttForwardState);
         }
     };
     bridge.setSaveInContextMenuEnabled = enabled => {
         bridge.saveInContextMenu = enabled === true;
-        if (!bridge.saveInContextMenu) {
-            document.querySelectorAll('.qqnt-toolbox-voice-save-item').forEach(item => item.remove());
-        }
     };
     bridge.setForwardInContextMenuEnabled = enabled => {
         bridge.forwardInContextMenu = enabled === true;
@@ -1273,6 +924,7 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
     bridge.setStatus = (text, options = {}) => libraryPanel.setStatus(text, options);
     bridge.setLibrary = payload => libraryPanel.setLibrary(payload);
     bridge.playPreview = payload => libraryPanel.playPreview(payload);
+    registerPttContextMenuExtension();
     install();
 
     return new Promise(resolve => {

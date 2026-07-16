@@ -136,6 +136,11 @@ const DEFAULT_CONFIG = {
         inlineMediaViewer: false,
         singleClickMediaViewer: false,
         showFullUnreadCount: false,
+        messageContextMenuOrder: {
+            enabled: false,
+            items: [],
+            catalog: []
+        },
         imageViewerOptimization: false,
         disableImageQrScan: false,
         singleImageViewer: false,

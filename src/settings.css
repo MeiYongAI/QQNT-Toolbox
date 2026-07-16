@@ -185,6 +185,7 @@
 }
 
 #qqnt-toolbox-settings .qqnt-toolbox-switch:disabled,
+#qqnt-toolbox-settings .qqnt-toolbox-action:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-password-input:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-number-input:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-shortcut-button:disabled {
@@ -214,7 +215,7 @@
     max-width: 190px;
 }
 
-#qqnt-toolbox-settings .qqnt-toolbox-action:hover,
+#qqnt-toolbox-settings .qqnt-toolbox-action:hover:not(:disabled),
 #qqnt-toolbox-settings .qqnt-toolbox-shortcut-button:hover,
 #qqnt-toolbox-settings .qqnt-toolbox-shortcut-button[data-capturing="true"] {
     border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
