@@ -24,6 +24,7 @@ const {
     isNativeMediaViewerUrl,
     isSameInlineMediaItem,
     mergeInlineMediaItems,
+    normalizeInlineMediaOpenItem,
     resolveInlineReplyPreview
 } = require('./inline-media-preview');
 const { createLocalMediaServer } = require('./local-media-server');
@@ -32,6 +33,7 @@ const {
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
     CHANNEL_INLINE_MEDIA_PREVIEW,
+    CHANNEL_OPEN_INLINE_MEDIA,
     CHANNEL_PREPARE_INLINE_MEDIA,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_GET_REACTION_CATALOG,
@@ -833,6 +835,10 @@ function installConfigIpc() {
     globalThis.__qqntToolboxConfigIpcInstalled = true;
     ipcMain.handle(CHANNEL_GET_CONFIG, () => getConfig());
     ipcMain.handle(CHANNEL_SET_CONFIG, (_event, nextConfig) => saveConfig(nextConfig));
+    ipcMain.handle(CHANNEL_OPEN_INLINE_MEDIA, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        return browserWindow ? await openInlineMediaFromRenderer(browserWindow, payload) : false;
+    });
     ipcMain.handle(CHANNEL_PREPARE_INLINE_MEDIA, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         return browserWindow ? await prepareInlineMedia(browserWindow, payload) : null;
@@ -1112,6 +1118,24 @@ async function prepareInlineMedia(browserWindow, payload) {
         src: await inlineMediaServer.getUrl(filePath),
         name: item.name
     };
+}
+
+async function openInlineMediaFromRenderer(browserWindow, payload) {
+    if (getInterfaceTweaksConfig().inlineMediaViewer !== true) {
+        return false;
+    }
+    const item = normalizeInlineMediaOpenItem(payload);
+    if (!item || (!getExistingFilePath([item.filePath]) && !createInlineMediaDownloadRequest(item))) {
+        return false;
+    }
+    const filePath = getExistingFilePath([item.filePath]) || await downloadInlineMediaFile(browserWindow, item);
+    if (!filePath) {
+        return false;
+    }
+    item.filePath = filePath;
+    closeExistingMediaViewers(browserWindow.webContents);
+    await showInlineMediaPreview(browserWindow, { items: [item], index: 0 });
+    return true;
 }
 
 function handleToolboxNativeRequest(browserWindow, _channel, args) {

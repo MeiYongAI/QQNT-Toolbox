@@ -182,3 +182,38 @@ test('patches the QQ menu provider once and keeps custom handlers native', async
     configs[2].handler();
     assert.equal(handledRecord, record);
 });
+
+test('pre-patches declared message menus without touching generic QQ menus', async () => {
+    const { createMessageContextMenuOrderController } = await modulePromise;
+    const controller = createMessageContextMenuOrderController({
+        getConfig: () => ({ enabled: false, items: [], catalog: [] })
+    });
+    controller.registerExtension({
+        id: 'test-extension',
+        getItems: () => [{
+            type: 990101,
+            text: 'repeat',
+            __qqntToolboxDescriptor: { id: 'toolbox:repeat', label: 'repeat', toolbox: true }
+        }]
+    });
+
+    const createMenu = () => {
+        const context = {};
+        Object.defineProperty(context, 'showMenuConfig', {
+            configurable: true,
+            get: () => [{ type: 1, text: 'native' }]
+        });
+        context.openMenu = function openMenu() {
+            return this.showMenuConfig;
+        };
+        return { menu: { _: { ctx: context } }, context };
+    };
+
+    const generic = createMenu();
+    controller.handleVueComponentMount({ proxy: generic.menu });
+    assert.deepEqual(generic.context.openMenu().map(item => item.text), ['native']);
+
+    const message = createMenu();
+    controller.handleVueComponentMount({ proxy: { msgCtxMenu: message.menu } });
+    assert.deepEqual(message.context.openMenu().map(item => item.text), ['native', 'repeat']);
+});

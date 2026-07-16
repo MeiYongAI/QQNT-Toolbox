@@ -13,6 +13,7 @@ const {
     extractInlineMediaPreview,
     isNativeMediaViewerUrl,
     mergeInlineMediaItems,
+    normalizeInlineMediaOpenItem,
     resolveInlineReplyPreview
 } = require('../src/inline-media-preview');
 
@@ -116,6 +117,37 @@ test('recognizes native image, video, and media viewer windows', () => {
     assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/video-viewer'), true);
     assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/media-viewer'), true);
     assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/main/message'), false);
+});
+
+test('normalizes file-message media for direct inline viewing', () => {
+    assert.deepEqual(normalizeInlineMediaOpenItem({
+        filePath: 'D:\\cache\\pending.MP4',
+        name: 'clip.MP4',
+        fingerprint: 'AABB',
+        sourceIndex: 2,
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    }), {
+        type: 'video',
+        filePath: 'D:\\cache\\pending.MP4',
+        fingerprint: 'aabb',
+        name: 'clip.MP4',
+        sourceIndex: 2,
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    });
+    assert.equal(normalizeInlineMediaOpenItem({ filePath: 'relative.mp4' }), null);
+    assert.equal(normalizeInlineMediaOpenItem({ filePath: 'D:\\cache\\document.pdf' }), null);
 });
 
 test('builds a version-compatible native rich-media download request', () => {

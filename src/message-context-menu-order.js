@@ -525,13 +525,15 @@ export function createMessageContextMenuOrderController(options) {
         return true;
     }
 
-    function findMenuFromComponent(component) {
-        for (const candidate of [
+    function findMenuFromComponent(component, allowDirect = false) {
+        const candidates = [
             component?.proxy?.msgCtxMenu,
-            component?.ctx?.msgCtxMenu,
-            component?.proxy,
-            component?.ctx
-        ]) {
+            component?.ctx?.msgCtxMenu
+        ];
+        if (allowDirect) {
+            candidates.push(component?.proxy, component?.ctx);
+        }
+        for (const candidate of candidates) {
             if (candidate?._?.ctx && typeof candidate._.ctx.openMenu === 'function' &&
                 Object.getOwnPropertyDescriptor(candidate._.ctx, 'showMenuConfig')) {
                 return candidate;
@@ -558,7 +560,7 @@ export function createMessageContextMenuOrderController(options) {
                         continue;
                     }
                     seen.add(component);
-                    const menu = findMenuFromComponent(component);
+                    const menu = findMenuFromComponent(component, true);
                     if (menu && patchMenu(menu)) {
                         return true;
                     }
@@ -578,7 +580,7 @@ export function createMessageContextMenuOrderController(options) {
             patchMenu(menu);
         }
         const element = component?.vnode?.el;
-        const item = element instanceof Element
+        const item = typeof Element !== 'undefined' && element instanceof Element
             ? element.closest?.('.q-context-menu-item')
             : null;
         if (!item) {

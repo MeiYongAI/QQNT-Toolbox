@@ -3056,6 +3056,34 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return Boolean(match && extensions.has(match[1].toLowerCase()));
     }
 
+    function createFileInlineMediaItem(record, recordElement, sourceIndex) {
+        const file = recordElement?.fileElement || recordElement;
+        const peer = getPeerFromRecord(record);
+        const filePath = normalizeText(
+            file?.filePath || file?.sourcePath || file?.originPath || file?.localPath || file?.path
+        );
+        const type = hasFileMediaExtension(recordElement, VIDEO_FILE_EXTENSIONS)
+            ? 'video'
+            : hasFileMediaExtension(recordElement, IMAGE_FILE_EXTENSIONS) ? 'image' : '';
+        if (!peer || !filePath || !type) {
+            return null;
+        }
+        return {
+            type,
+            filePath,
+            fingerprint: normalizeText(file?.md5HexStr || file?.fileMd5).toLowerCase(),
+            name: normalizeText(file?.fileName) || filePath.split(/[\\/]/).pop(),
+            sourceIndex,
+            identity: {
+                chatType: peer.chatType,
+                peerUid: peer.peerUid,
+                msgId: normalizeText(record?.msgId),
+                msgSeq: normalizeText(record?.msgSeq),
+                elementId: normalizeText(recordElement?.elementId)
+            }
+        };
+    }
+
     function getSingleClickMediaTarget(event) {
         const path = event.composedPath?.() || [event.target];
         for (const item of path) {
@@ -3073,14 +3101,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const hasImage = elements.some(element =>
                 Number(element?.elementType) === 2 || Boolean(element?.picElement)
             );
-            const hasVideoFile = elements.some(element =>
+            const videoFileElement = elements.find(element =>
                 (Number(element?.elementType) === 3 || Boolean(element?.fileElement)) &&
                 hasFileMediaExtension(element, VIDEO_FILE_EXTENSIONS)
             );
-            const hasImageFile = elements.some(element =>
+            const imageFileElement = elements.find(element =>
                 (Number(element?.elementType) === 3 || Boolean(element?.fileElement)) &&
                 hasFileMediaExtension(element, IMAGE_FILE_EXTENSIONS)
             );
+            const hasVideoFile = Boolean(videoFileElement);
+            const hasImageFile = Boolean(imageFileElement);
             const isFileMessage = item.matches('.file-element, [class*="file-message"]');
             const isFileVideo = hasVideoFile && isFileMessage;
             const isFileImage = hasImageFile && isFileMessage;
@@ -3100,7 +3130,14 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     element,
                     isVideo,
                     openWithControl: isFileVideo,
-                    openControl: isVideo ? getVideoOpenControl(element) : element
+                    openControl: isVideo ? getVideoOpenControl(element) : element,
+                    inlineMedia: isFileVideo || isFileImage
+                        ? createFileInlineMediaItem(
+                            record,
+                            isFileVideo ? videoFileElement : imageFileElement,
+                            elements.indexOf(isFileVideo ? videoFileElement : imageFileElement)
+                        )
+                        : null
                 };
             }
         }
@@ -3146,9 +3183,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         activationTarget.dispatchEvent(new MouseEvent('dblclick', { ...eventOptions, detail: 2 }));
     }
 
+    function stopMediaOpenEvent(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+    }
+
+    function openInlineFileMedia(target) {
+        Promise.resolve(getBridge()?.openInlineMedia?.(target.inlineMedia)).catch(() => {});
+    }
+
     function handleSingleClickMedia(event) {
-        if (!isConfigEnabled('interfaceTweaks.singleClickMediaViewer') ||
-            event.button !== 0 || document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isImageViewerWindow()) {
+        const singleClickEnabled = isConfigEnabled('interfaceTweaks.singleClickMediaViewer');
+        const inlineViewerEnabled = isConfigEnabled('interfaceTweaks.inlineMediaViewer');
+        if ((!singleClickEnabled && !inlineViewerEnabled) || event.button !== 0 ||
+            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isImageViewerWindow()) {
             return;
         }
         const target = getSingleClickMediaTarget(event);
@@ -3156,15 +3205,35 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         const eventPath = event.composedPath?.() || [event.target];
-        if (target.isVideo && target.openControl && eventPath.some(item =>
+        const clickedOpenControl = target.isVideo && target.openControl && eventPath.some(item =>
             item === target.openControl || (item instanceof Node && target.openControl?.contains?.(item))
-        )) {
+        );
+        const openInlineFile = inlineViewerEnabled && target.inlineMedia &&
+            (singleClickEnabled || clickedOpenControl);
+        if (!singleClickEnabled && !openInlineFile) {
             return;
         }
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
-        queueMicrotask(() => dispatchNativeMediaOpen(target, event));
+        if (clickedOpenControl && !openInlineFile) {
+            return;
+        }
+        stopMediaOpenEvent(event);
+        queueMicrotask(() => openInlineFile
+            ? openInlineFileMedia(target)
+            : dispatchNativeMediaOpen(target, event));
+    }
+
+    function handleInlineFileMediaDoubleClick(event) {
+        if (!isConfigEnabled('interfaceTweaks.inlineMediaViewer') ||
+            isConfigEnabled('interfaceTweaks.singleClickMediaViewer') || event.button !== 0 ||
+            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isImageViewerWindow()) {
+            return;
+        }
+        const target = getSingleClickMediaTarget(event);
+        if (!target?.inlineMedia) {
+            return;
+        }
+        stopMediaOpenEvent(event);
+        queueMicrotask(() => openInlineFileMedia(target));
     }
 
     function handleInlineMediaPreviewKey(event) {
@@ -5025,6 +5094,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('keydown', handleInlineMediaPreviewKey, true);
     document.addEventListener('keyup', handleInlineMediaPreviewKey, true);
     document.addEventListener('click', handleSingleClickMedia, true);
+    document.addEventListener('dblclick', handleInlineFileMediaDoubleClick, true);
 
     document.addEventListener('keydown', event => {
         if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {

@@ -83,6 +83,29 @@ function extractInlineMediaPreview(command) {
     return gallery?.items[gallery.index] || null;
 }
 
+function normalizeInlineMediaOpenItem(value) {
+    const filePath = resolveLocalFilePath(value?.filePath);
+    const type = classifyMediaFilePath(value?.name, filePath);
+    if (!type || !filePath || !path.isAbsolute(filePath)) {
+        return null;
+    }
+    const identity = value?.identity || {};
+    return {
+        type,
+        filePath,
+        fingerprint: String(value?.fingerprint || '').trim().toLowerCase(),
+        name: String(value?.name || '').trim() || path.basename(filePath),
+        sourceIndex: Number.isInteger(Number(value?.sourceIndex)) ? Number(value.sourceIndex) : 0,
+        identity: {
+            chatType: Number(identity.chatType) || 0,
+            peerUid: String(identity.peerUid || '').trim(),
+            msgId: String(identity.msgId || '').trim(),
+            msgSeq: String(identity.msgSeq || '').trim(),
+            elementId: String(identity.elementId || '').trim()
+        }
+    };
+}
+
 function createInlineMediaDownloadRequest(item) {
     const identity = item?.identity || {};
     const request = {
@@ -231,5 +254,6 @@ module.exports = {
     isNativeMediaViewerUrl,
     isSameInlineMediaItem,
     mergeInlineMediaItems,
+    normalizeInlineMediaOpenItem,
     resolveInlineReplyPreview
 };

@@ -70,6 +70,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.sendPoke({ id: 'poke' });
     await api.recallPoke({ id: 'recall-poke' });
     await api.viewRecallMessages();
+    await api.openInlineMedia({ filePath: 'D:\\cache\\media.mp4' });
     await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
     const unsubscribePreview = api.onInlineMediaPreview(() => {});
     const unsubscribe = api.onConfigChanged(() => {});
@@ -85,6 +86,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:send-poke',
         'qqnt-toolbox:recall-poke',
         'qqnt-toolbox:view-recall-messages',
+        'qqnt-toolbox:open-inline-media',
         'qqnt-toolbox:prepare-inline-media'
     ]);
 });
