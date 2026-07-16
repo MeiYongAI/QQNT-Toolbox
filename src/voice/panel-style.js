@@ -25,19 +25,17 @@ const VOICE_LIBRARY_PANEL_CSS = String.raw`
 }
 #qqnt-toolbox-voice-library .qvlib-shell {
     position: absolute;
-    left: var(--voice-left, 50%);
-    top: var(--voice-top, 50%);
+    left: 8px;
+    top: 8px;
     width: min(360px, calc(100vw - 24px));
     height: min(400px, calc(100vh - 24px));
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    transform: translate(-50%, -50%);
     border: 1px solid var(--voice-border);
     border-radius: 8px;
     background: var(--voice-bg);
     box-shadow: var(--shadow-bg-middle-primary, 0 18px 48px rgba(0, 0, 0, .18));
-    will-change: left, top;
 }
 #qqnt-toolbox-voice-library .qvlib-header {
     flex: 0 0 44px;
@@ -47,12 +45,9 @@ const VOICE_LIBRARY_PANEL_CSS = String.raw`
     padding: 0 7px 0 12px;
     border-bottom: 1px solid var(--voice-border);
     background: var(--voice-bg);
-    cursor: grab;
+    cursor: move;
     touch-action: none;
     user-select: none;
-}
-#qqnt-toolbox-voice-library .qvlib-shell.is-dragging .qvlib-header {
-    cursor: grabbing;
 }
 #qqnt-toolbox-voice-library .qvlib-heading {
     min-width: 0;

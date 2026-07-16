@@ -9,6 +9,7 @@ const CONTENT_TYPES = Object.freeze({
     '.apng': 'image/apng',
     '.bmp': 'image/bmp',
     '.gif': 'image/gif',
+    '.jfif': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.jpg': 'image/jpeg',
     '.png': 'image/png',

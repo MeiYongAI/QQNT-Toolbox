@@ -27,6 +27,10 @@ const {
     makePcm16Wav,
     runTool
 } = require('./voice/media');
+const {
+    createPttSourceResolver,
+    sanitizePttInfo
+} = require('./voice/ptt-source');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
@@ -114,24 +118,21 @@ function getTencentFilesRoots() {
     ]);
 }
 
-function getDirectoryNewestMtimeMs(dirPath, depth = 0) {
-    if (!fsSync.existsSync(dirPath) || depth > 3) {
+function getDirectoryMtimeMs(dirPath) {
+    try {
+        return fsSync.statSync(dirPath).mtimeMs;
+    } catch {
         return 0;
     }
-    let newest = 0;
-    try {
-        newest = fsSync.statSync(dirPath).mtimeMs;
-        for (const entry of fsSync.readdirSync(dirPath, { withFileTypes: true })) {
-            const entryPath = path.join(dirPath, entry.name);
-            const entryStat = fsSync.statSync(entryPath);
-            newest = Math.max(newest, entryStat.mtimeMs);
-            if (entry.isDirectory()) {
-                newest = Math.max(newest, getDirectoryNewestMtimeMs(entryPath, depth + 1));
-            }
-        }
-    } catch {
-    }
-    return newest;
+}
+
+function getPttBaseActivityMs(pttBaseDir) {
+    const currentMonthDir = path.join(pttBaseDir, formatPttMonth());
+    return Math.max(
+        getDirectoryMtimeMs(pttBaseDir),
+        getDirectoryMtimeMs(currentMonthDir),
+        getDirectoryMtimeMs(path.join(currentMonthDir, 'Ori'))
+    );
 }
 
 function getNativePttBaseDirs() {
@@ -154,7 +155,7 @@ function getNativePttBaseDirs() {
             if (fsSync.existsSync(pttBaseDir)) {
                 candidates.push({
                     pttBaseDir,
-                    newest: getDirectoryNewestMtimeMs(pttBaseDir)
+                    newest: getPttBaseActivityMs(pttBaseDir)
                 });
             }
         }
@@ -162,6 +163,8 @@ function getNativePttBaseDirs() {
     candidates.sort((a, b) => b.newest - a.newest);
     return candidates.map(candidate => candidate.pttBaseDir);
 }
+
+const pttSourceResolver = createPttSourceResolver(getNativePttBaseDirs);
 
 function findNativePttBaseDir() {
     return getNativePttBaseDirs()[0] || '';
@@ -229,144 +232,6 @@ function normalizeStoredPath(filePath) {
 function normalizeFieldText(value) {
     const text = String(value ?? '').trim();
     return text && text !== 'undefined' && text !== 'null' && text !== '0' ? text : '';
-}
-
-function normalizeFieldKey(key) {
-    return String(key || '').replace(/[_\-\s]/g, '').toLowerCase();
-}
-
-const PTT_PATH_KEYS = new Set([
-    'filepath',
-    'sourcepath',
-    'path',
-    'localpath',
-    'originpath',
-    'originfilepath',
-    'srcpath',
-    'downloadpath',
-    'realpath',
-    'absolutepath',
-    'audiopath',
-    'voicepath',
-    'pttpath',
-    'url',
-    'audiourl',
-    'voiceurl',
-    'ptturl'
-]);
-const PTT_NAME_KEYS = new Set(['filename', 'name', 'originfilename', 'originalname', 'audioname', 'voicename', 'pttfilename']);
-const PTT_MD5_KEYS = new Set(['md5hexstr', 'md5', 'filemd5', 'md5str', 'filemd5hex', 'originmd5', 'originalmd5']);
-const PTT_DURATION_KEYS = new Set(['duration', 'voiceduration', 'durationseconds', 'seconds', 'second', 'time', 'playtime']);
-const PTT_DURATION_MS_KEYS = new Set(['durationms', 'durationmilliseconds', 'timems', 'playtimems']);
-const PTT_ID_KEYS = new Set(['fileuuid', 'filesubid', 'uuid', 'fileid', 'storeid', 'resid', 'resourceid']);
-
-function addUniqueText(list, value) {
-    const text = normalizeFieldText(value);
-    if (text && !list.includes(text)) {
-        list.push(text);
-    }
-}
-
-function collectFieldValues(value, keySet, results = [], depth = 0, seen = new WeakSet()) {
-    if (value === undefined || value === null || depth > 7 || results.length > 24) {
-        return results;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value.slice(0, 64)) {
-            collectFieldValues(item, keySet, results, depth + 1, seen);
-        }
-        return results;
-    }
-    if (typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
-        return results;
-    }
-    if (seen.has(value)) {
-        return results;
-    }
-    seen.add(value);
-
-    for (const [key, item] of Object.entries(value)) {
-        if (!keySet.has(normalizeFieldKey(key))) {
-            continue;
-        }
-        if (item === undefined || item === null || typeof item === 'object') {
-            continue;
-        }
-        addUniqueText(results, item);
-    }
-    for (const item of Object.values(value)) {
-        collectFieldValues(item, keySet, results, depth + 1, seen);
-    }
-    return results;
-}
-
-function firstFieldValue(roots, keySet) {
-    for (const root of roots) {
-        const values = collectFieldValues(root, keySet);
-        if (values.length) {
-            return values[0];
-        }
-    }
-    return '';
-}
-
-function normalizeDurationSeconds(value, isMilliseconds = false) {
-    const number = Number(value);
-    if (!Number.isFinite(number) || number <= 0) {
-        return 0;
-    }
-    if (isMilliseconds || number > 1000) {
-        return Math.max(1, Math.ceil(number / 1000));
-    }
-    return Math.max(1, Math.ceil(number));
-}
-
-function firstDurationSeconds(roots) {
-    for (const root of roots) {
-        const msValue = firstFieldValue([root], PTT_DURATION_MS_KEYS);
-        const msDuration = normalizeDurationSeconds(msValue, true);
-        if (msDuration) {
-            return msDuration;
-        }
-        const value = firstFieldValue([root], PTT_DURATION_KEYS);
-        const duration = normalizeDurationSeconds(value);
-        if (duration) {
-            return duration;
-        }
-    }
-    return 0;
-}
-
-function sanitizePttInfo(value) {
-    const nested = value?.pttElement || value;
-    if (!nested || typeof nested !== 'object') {
-        return null;
-    }
-    const roots = [nested, value].filter(Boolean);
-    const paths = [];
-    const names = [];
-    const ids = [];
-    for (const root of roots) {
-        collectFieldValues(root, PTT_PATH_KEYS, paths);
-        collectFieldValues(root, PTT_NAME_KEYS, names);
-        collectFieldValues(root, PTT_ID_KEYS, ids);
-    }
-    const md5HexStr = firstFieldValue(roots, PTT_MD5_KEYS);
-    const duration = firstDurationSeconds(roots);
-    const ptt = {
-        filePath: paths[0] || '',
-        sourcePath: paths[1] || '',
-        fileName: names[0] || '',
-        md5HexStr,
-        duration,
-        fileUuid: ids[0] || '',
-        fileSubId: ids[1] || '',
-        fileId: ids[2] || '',
-        paths,
-        names,
-        ids
-    };
-    return ptt.filePath || ptt.fileName || ptt.md5HexStr || ptt.fileUuid || ptt.fileSubId || ptt.fileId ? ptt : null;
 }
 
 function normalizeLibraryRelativePath(relativePath = '') {
@@ -952,109 +817,8 @@ async function getLibraryItem(itemId) {
     };
 }
 
-function findFileInDirectory(rootDir, fileName, depth = 0) {
-    if (!rootDir || !fileName || depth > 7 || !fsSync.existsSync(rootDir)) {
-        return '';
-    }
-    let entries = [];
-    try {
-        entries = fsSync.readdirSync(rootDir, { withFileTypes: true });
-    } catch {
-        return '';
-    }
-    for (const entry of entries) {
-        const entryPath = path.join(rootDir, entry.name);
-        if (entry.isFile() && entry.name.toLowerCase() === fileName.toLowerCase()) {
-            return entryPath;
-        }
-    }
-    for (const entry of entries) {
-        if (!entry.isDirectory()) {
-            continue;
-        }
-        const found = findFileInDirectory(path.join(rootDir, entry.name), fileName, depth + 1);
-        if (found) {
-            return found;
-        }
-    }
-    return '';
-}
-
-function getBasenameFromPathText(value) {
-    const text = normalizeFieldText(value);
-    if (!text) {
-        return '';
-    }
-    try {
-        if (/^https?:\/\//i.test(text)) {
-            return path.basename(new URL(text).pathname);
-        }
-    } catch {
-    }
-    return path.basename(text.split(/[?#]/)[0]);
-}
-
-function addPttCandidateFileName(candidates, value) {
-    const fileName = getBasenameFromPathText(value);
-    if (!fileName || fileName === '.' || fileName === path.sep) {
-        return;
-    }
-    addUniqueText(candidates, fileName);
-    const stem = fileName.replace(/\.(amr|silk|slk|audio)$/i, '');
-    if (/^[a-f0-9]{32}$/i.test(stem)) {
-        addUniqueText(candidates, `${stem}.amr`);
-    }
-    if (!path.extname(fileName) && /^[a-z0-9_\-]{8,}$/i.test(fileName)) {
-        addUniqueText(candidates, `${fileName}.amr`);
-    }
-}
-
-function getPttCandidateFileNames(ptt) {
-    const candidates = [];
-    for (const value of [
-        ptt?.fileName,
-        ptt?.md5HexStr,
-        ptt?.fileUuid,
-        ptt?.fileSubId,
-        ptt?.fileId,
-        ...(Array.isArray(ptt?.names) ? ptt.names : []),
-        ...(Array.isArray(ptt?.ids) ? ptt.ids : []),
-        ptt?.filePath,
-        ptt?.sourcePath,
-        ...(Array.isArray(ptt?.paths) ? ptt.paths : [])
-    ]) {
-        addPttCandidateFileName(candidates, value);
-    }
-    return candidates;
-}
-
 function resolvePttSourcePath(ptt) {
-    ptt = sanitizePttInfo(ptt) || ptt || {};
-    const directPaths = [
-        ptt?.filePath,
-        ptt?.sourcePath,
-        ...(Array.isArray(ptt?.paths) ? ptt.paths : [])
-    ];
-    for (const item of directPaths) {
-        const directPath = normalizeStoredPath(item);
-        if (directPath && fsSync.existsSync(directPath)) {
-            return directPath;
-        }
-    }
-    const fileNames = getPttCandidateFileNames(ptt);
-    for (const pttBaseDir of getNativePttBaseDirs()) {
-        for (const fileName of fileNames) {
-            const currentMonthPath = path.join(pttBaseDir, formatPttMonth(), 'Ori', fileName);
-            if (fsSync.existsSync(currentMonthPath)) {
-                return currentMonthPath;
-            }
-            const found = findFileInDirectory(pttBaseDir, fileName);
-            if (found) {
-                return found;
-            }
-        }
-    }
-    return '';
+    return pttSourceResolver.resolve(ptt);
 }
 
 async function addPttToLibrary(ptt) {
@@ -1321,6 +1085,7 @@ async function createNativePttCacheFile(silkPath) {
     const fileName = `${md5}.amr`;
     const filePath = path.join(oriDir, fileName);
     await fs.copyFile(silkPath, filePath);
+    pttSourceResolver.remember(filePath);
     const result = {
         fileName,
         filePath,

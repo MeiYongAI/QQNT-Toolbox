@@ -500,201 +500,38 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
     });
     panelBridge.panelController = libraryPanel;
 
-    const PTT_PATH_KEYS = new Set([
-        'filepath', 'sourcepath', 'path', 'localpath', 'originpath', 'originfilepath', 'srcpath',
-        'downloadpath', 'realpath', 'absolutepath', 'audiopath', 'voicepath', 'pttpath',
-        'url', 'audiourl', 'voiceurl', 'ptturl'
-    ]);
-    const PTT_NAME_KEYS = new Set(['filename', 'name', 'originfilename', 'originalname', 'audioname', 'voicename', 'pttfilename']);
-    const PTT_MD5_KEYS = new Set(['md5hexstr', 'md5', 'filemd5', 'md5str', 'filemd5hex', 'originmd5', 'originalmd5']);
-    const PTT_DURATION_KEYS = new Set(['duration', 'voiceduration', 'durationseconds', 'seconds', 'second', 'time', 'playtime']);
-    const PTT_DURATION_MS_KEYS = new Set(['durationms', 'durationmilliseconds', 'timems', 'playtimems']);
-    const PTT_ID_KEYS = new Set(['fileuuid', 'filesubid', 'uuid', 'fileid', 'storeid', 'resid', 'resourceid']);
-
-    function normalizeFieldText(value) {
+    function normalizePttText(value) {
         const text = String(value ?? '').trim();
         return text && text !== 'undefined' && text !== 'null' && text !== '0' ? text : '';
     }
 
-    function normalizeFieldKey(key) {
-        return String(key || '').replace(/[_\-\s]/g, '').toLowerCase();
-    }
-
-    function addUniqueText(list, value) {
-        const text = normalizeFieldText(value);
-        if (text && !list.includes(text)) {
-            list.push(text);
-        }
-    }
-
-    function collectFieldValues(value, keySet, results = [], depth = 0, seen = new WeakSet()) {
-        if (value === undefined || value === null || depth > 7 || results.length > 24) {
-            return results;
-        }
-        if (Array.isArray(value)) {
-            for (const item of value.slice(0, 64)) {
-                collectFieldValues(item, keySet, results, depth + 1, seen);
-            }
-            return results;
-        }
-        if (typeof value !== 'object' || value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
-            return results;
-        }
-        if (seen.has(value)) {
-            return results;
-        }
-        seen.add(value);
-        for (const [key, item] of Object.entries(value)) {
-            if (!keySet.has(normalizeFieldKey(key)) || item === undefined || item === null || typeof item === 'object') {
-                continue;
-            }
-            addUniqueText(results, item);
-        }
-        for (const item of Object.values(value)) {
-            collectFieldValues(item, keySet, results, depth + 1, seen);
-        }
-        return results;
-    }
-
-    function firstFieldValue(roots, keySet) {
-        for (const root of roots) {
-            const values = collectFieldValues(root, keySet);
-            if (values.length) {
-                return values[0];
-            }
-        }
-        return '';
-    }
-
-    function normalizeDurationSeconds(value, isMilliseconds = false) {
-        const number = Number(value);
-        if (!Number.isFinite(number) || number <= 0) {
+    function normalizePttDuration(value) {
+        const duration = Number(value);
+        if (!Number.isFinite(duration) || duration <= 0) {
             return 0;
         }
-        if (isMilliseconds || number > 1000) {
-            return Math.max(1, Math.ceil(number / 1000));
-        }
-        return Math.max(1, Math.ceil(number));
+        return Math.max(1, Math.ceil(duration > 1000 ? duration / 1000 : duration));
     }
 
-    function firstDurationSeconds(roots) {
-        for (const root of roots) {
-            const msDuration = normalizeDurationSeconds(firstFieldValue([root], PTT_DURATION_MS_KEYS), true);
-            if (msDuration) {
-                return msDuration;
-            }
-            const duration = normalizeDurationSeconds(firstFieldValue([root], PTT_DURATION_KEYS));
-            if (duration) {
-                return duration;
-            }
-        }
-        return 0;
-    }
-
-    function sanitizePttElement(pttElement) {
+    function sanitizePttElement(value) {
+        const pttElement = value?.pttElement || value;
         if (!pttElement || typeof pttElement !== 'object') {
             return null;
         }
-        const nested = pttElement.pttElement || pttElement;
-        const roots = [nested, pttElement].filter(Boolean);
-        const paths = [];
-        const names = [];
-        const ids = [];
-        for (const root of roots) {
-            collectFieldValues(root, PTT_PATH_KEYS, paths);
-            collectFieldValues(root, PTT_NAME_KEYS, names);
-            collectFieldValues(root, PTT_ID_KEYS, ids);
-        }
         const ptt = {
-            filePath: paths[0] || '',
-            sourcePath: paths[1] || '',
-            fileName: names[0] || '',
-            md5HexStr: firstFieldValue(roots, PTT_MD5_KEYS),
-            duration: firstDurationSeconds(roots),
-            fileUuid: ids[0] || '',
-            fileSubId: ids[1] || '',
-            fileId: ids[2] || '',
-            paths,
-            names,
-            ids
+            filePath: normalizePttText(pttElement.filePath),
+            sourcePath: normalizePttText(pttElement.sourcePath),
+            fileName: normalizePttText(pttElement.fileName),
+            md5HexStr: normalizePttText(pttElement.md5HexStr).toLowerCase(),
+            duration: normalizePttDuration(pttElement.duration),
+            fileUuid: normalizePttText(pttElement.fileUuid),
+            fileSubId: normalizePttText(pttElement.fileSubId),
+            fileId: normalizePttText(pttElement.fileId)
         };
-        return ptt.filePath || ptt.fileName || ptt.md5HexStr || ptt.fileUuid || ptt.fileSubId || ptt.fileId ? ptt : null;
-    }
-
-    function getPttIdentity(ptt) {
-        return ptt?.filePath ||
-            ptt?.md5HexStr ||
-            ptt?.fileName ||
-            ptt?.fileUuid ||
-            ptt?.fileSubId ||
-            ptt?.fileId ||
-            '';
-    }
-
-    function dedupePtts(items) {
-        const result = [];
-        const seen = new Set();
-        for (const item of items || []) {
-            const ptt = sanitizePttElement(item);
-            const key = getPttIdentity(ptt);
-            if (!key || seen.has(key)) {
-                continue;
-            }
-            seen.add(key);
-            result.push(ptt);
-        }
-        return result;
-    }
-
-    function collectPttElementsFromValue(value, results = [], depth = 0, seen = new WeakSet()) {
-        if (!value || depth > 5 || results.length > 16) {
-            return results;
-        }
-        if (Array.isArray(value)) {
-            for (const item of value.slice(0, 32)) {
-                collectPttElementsFromValue(item, results, depth + 1, seen);
-            }
-            return results;
-        }
-        if (typeof value !== 'object' || value instanceof Element || value instanceof Uint8Array || value instanceof Map) {
-            return results;
-        }
-        if (seen.has(value)) {
-            return results;
-        }
-        seen.add(value);
-        if (Number(value.elementType) === 4 || value.pttElement) {
-            const ptt = sanitizePttElement(value);
-            if (ptt) {
-                results.push(ptt);
-            }
-        }
-        const priorityKeys = [
-            'pttElement',
-            'msgElements',
-            'elements',
-            'element',
-            'msgElement',
-            'records',
-            'msgList',
-            'payload',
-            'message',
-            'msg',
-            'msgRecord',
-            'item',
-            'data',
-            'result'
-        ];
-        for (const key of priorityKeys) {
-            collectPttElementsFromValue(value[key], results, depth + 1, seen);
-        }
-        for (const [key, item] of Object.entries(value)) {
-            if (priorityKeys.includes(key)) {
-                continue;
-            }
-            collectPttElementsFromValue(item, results, depth + 1, seen);
-        }
-        return results;
+        return ptt.filePath || ptt.sourcePath || ptt.fileName || ptt.md5HexStr ||
+            ptt.fileUuid || ptt.fileSubId || ptt.fileId
+            ? ptt
+            : null;
     }
 
     function makePttForwardPlaceholder(record, ptt) {
@@ -717,9 +554,9 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
     }
 
     function getPttFromRecord(record) {
-        const ptts = [];
-        collectPttElementsFromValue(record?.elements, ptts);
-        return dedupePtts(ptts)[0] || null;
+        const element = (Array.isArray(record?.elements) ? record.elements : [])
+            .find(item => Number(item?.elementType) === 4 || item?.pttElement);
+        return sanitizePttElement(element);
     }
 
     function prepareNativePttForwardContext(request) {

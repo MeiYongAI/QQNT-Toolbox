@@ -513,30 +513,36 @@ function createVoiceLibraryPanel(options = {}) {
         }
     }
 
-    function setPosition(left, top, remember = false) {
+    function getShellSize(shell, viewportWidth, viewportHeight) {
+        return {
+            width: shell.offsetWidth || Math.min(360, Math.max(0, viewportWidth - 16)),
+            height: shell.offsetHeight || Math.min(400, Math.max(0, viewportHeight - 16))
+        };
+    }
+
+    function setPosition(left, top) {
         const shell = state.root?.querySelector('.qvlib-shell');
         if (!state.root || !shell) {
             return null;
         }
         const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
         const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        const width = shell.offsetWidth || Math.min(360, Math.max(0, viewportWidth - 24));
-        const height = shell.offsetHeight || Math.min(400, Math.max(0, viewportHeight - 24));
-        const margin = 12;
-        const minLeft = margin + width / 2;
-        const maxLeft = Math.max(minLeft, viewportWidth - margin - width / 2);
-        const minTop = margin + height / 2;
-        const maxTop = Math.max(minTop, viewportHeight - margin - height / 2);
+        const { width, height } = getShellSize(shell, viewportWidth, viewportHeight);
+        const margin = 8;
+        const nextLeft = Number(left);
+        const nextTop = Number(top);
         const position = {
-            left: Math.round(Math.min(maxLeft, Math.max(minLeft, Number(left) || viewportWidth / 2))),
-            top: Math.round(Math.min(maxTop, Math.max(minTop, Number(top) || viewportHeight / 2)))
+            left: Math.min(
+                Math.max(margin, viewportWidth - width - margin),
+                Math.max(margin, Number.isFinite(nextLeft) ? nextLeft : margin)
+            ),
+            top: Math.min(
+                Math.max(margin, viewportHeight - height - margin),
+                Math.max(margin, Number.isFinite(nextTop) ? nextTop : margin)
+            )
         };
-        state.root.style.setProperty('--voice-left', `${position.left}px`);
-        state.root.style.setProperty('--voice-top', `${position.top}px`);
-        if (remember) {
-            state.position = position;
-            state.moved = true;
-        }
+        shell.style.left = `${position.left}px`;
+        shell.style.top = `${position.top}px`;
         return position;
     }
 
@@ -550,12 +556,14 @@ function createVoiceLibraryPanel(options = {}) {
         const hostRect = state.host?.getBoundingClientRect?.();
         const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
         const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        const shell = state.root.querySelector('.qvlib-shell');
+        const { width, height } = getShellSize(shell, viewportWidth, viewportHeight);
         const left = state.moved && state.position
             ? state.position.left
-            : (hostRect?.width > 0 ? hostRect.left + hostRect.width / 2 : viewportWidth / 2);
+            : (hostRect?.width > 0 ? hostRect.left + (hostRect.width - width) / 2 : (viewportWidth - width) / 2);
         const top = state.moved && state.position
             ? state.position.top
-            : (hostRect?.height > 0 ? hostRect.top + hostRect.height / 2 : viewportHeight / 2);
+            : (hostRect?.height > 0 ? hostRect.top + (hostRect.height - height) / 2 : (viewportHeight - height) / 2);
         const position = setPosition(left, top);
         if (state.moved && position) {
             state.position = position;
@@ -571,21 +579,22 @@ function createVoiceLibraryPanel(options = {}) {
             if (header.hasPointerCapture?.(event.pointerId)) {
                 header.releasePointerCapture(event.pointerId);
             }
+            const rect = shell.getBoundingClientRect();
+            state.position = setPosition(rect.left, rect.top);
+            state.moved = Boolean(state.position);
             dragState = null;
-            shell.classList.remove('is-dragging');
         };
         header.addEventListener('pointerdown', event => {
-            if (event.button !== 0 || event.target?.closest?.('button,input,a')) {
+            if (event.button !== 0 || event.target?.closest?.('button, [role="button"], input, select, textarea, a')) {
                 return;
             }
             const rect = shell.getBoundingClientRect();
             dragState = {
                 pointerId: event.pointerId,
-                offsetX: event.clientX - (rect.left + rect.width / 2),
-                offsetY: event.clientY - (rect.top + rect.height / 2)
+                offsetX: event.clientX - rect.left,
+                offsetY: event.clientY - rect.top
             };
             header.setPointerCapture?.(event.pointerId);
-            shell.classList.add('is-dragging');
             event.preventDefault();
         });
         header.addEventListener('pointermove', event => {
@@ -594,8 +603,7 @@ function createVoiceLibraryPanel(options = {}) {
             }
             setPosition(
                 event.clientX - dragState.offsetX,
-                event.clientY - dragState.offsetY,
-                true
+                event.clientY - dragState.offsetY
             );
         });
         header.addEventListener('pointerup', finish);

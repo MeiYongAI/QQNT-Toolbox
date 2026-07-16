@@ -4,6 +4,7 @@ const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
+const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -23,6 +24,7 @@ module.exports = Object.freeze({
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
     CHANNEL_INLINE_MEDIA_PREVIEW,
+    CHANNEL_PREPARE_INLINE_MEDIA,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,

@@ -5,11 +5,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { pathToFileURL } = require('node:url');
 const {
     classifyMediaFilePath,
+    createInlineMediaDownloadPayload,
+    createInlineMediaDownloadRequest,
     extractInlineMediaGallery,
-    extractInlineMediaPreview
+    extractInlineMediaPreview,
+    isNativeMediaViewerUrl,
+    mergeInlineMediaItems,
+    resolveInlineReplyPreview
 } = require('../src/inline-media-preview');
 
 function makeCommand(mediaList, index = 0) {
@@ -32,15 +36,13 @@ test('extracts the selected local image from openMediaViewer', t => {
     const preview = extractInlineMediaPreview(makeCommand([
         { context: { sourcePath: path.join(path.dirname(filePath), 'other.png') } },
         {
-            context: { sourcePath: filePath },
-            originPath: 'appimg://D:/cache/preview%20image.png'
+            context: { sourcePath: filePath }
         }
     ], 1));
 
     assert.deepEqual(preview, {
         type: 'image',
         filePath,
-        src: 'appimg://D:/cache/preview%20image.png',
         name: 'preview image.png',
         sourceIndex: 1,
         identity: {
@@ -64,7 +66,6 @@ test('extracts a local video from openMediaViewer', t => {
     }])), {
         type: 'video',
         filePath,
-        src: `local:///${filePath.replace(/\\/g, '/')}`,
         name: 'preview.mp4',
         sourceIndex: 0,
         identity: {
@@ -108,4 +109,130 @@ test('classifies image and video file messages without accepting normal files', 
     assert.equal(classifyMediaFilePath('', 'D:\\media\\clip.MP4'), 'video');
     assert.equal(classifyMediaFilePath('archive.zip'), '');
     assert.equal(classifyMediaFilePath('document.pdf'), '');
+});
+
+test('recognizes native image, video, and media viewer windows', () => {
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/image-viewer'), true);
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/video-viewer'), true);
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/media-viewer'), true);
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/main/message'), false);
+});
+
+test('builds a version-compatible native rich-media download request', () => {
+    const item = {
+        filePath: 'D:\\cache\\pending.webp',
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            elementId: 'element-id'
+        }
+    };
+    const request = {
+        fileModelId: '0',
+        downSourceType: 0,
+        triggerType: 1,
+        msgId: 'message-id',
+        chatType: 2,
+        peerUid: 'group-uid',
+        elementId: 'element-id',
+        thumbSize: 0,
+        downloadType: 1,
+        filePath: 'D:\\cache\\pending.webp'
+    };
+
+    assert.deepEqual(createInlineMediaDownloadRequest(item), request);
+    assert.deepEqual(createInlineMediaDownloadPayload(item), [{ getReq: request }, null]);
+    assert.equal(createInlineMediaDownloadRequest({ identity: { msgId: 'incomplete' } }), null);
+    assert.equal(createInlineMediaDownloadPayload({ identity: { msgId: 'incomplete' } }), null);
+});
+
+test('deduplicates one media item described by native viewer and message records', () => {
+    const filePath = 'D:\\cache\\AABBCCDDEEFF00112233445566778899.webp';
+    const merged = mergeInlineMediaItems([{
+        type: 'image',
+        filePath,
+        name: 'remembered',
+        identity: { msgId: 'message-1', elementId: 'element-1' },
+        fingerprint: 'aabbccddeeff00112233445566778899'
+    }], [{
+        type: 'image',
+        filePath,
+        name: 'viewer',
+        identity: { msgId: 'message-1', elementId: '' }
+    }]);
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].name, 'viewer');
+    assert.equal(merged[0].fingerprint, 'aabbccddeeff00112233445566778899');
+});
+
+test('keeps identical media sent in different messages as separate gallery items', () => {
+    const filePath = 'D:\\cache\\AABBCCDDEEFF00112233445566778899.webp';
+    const merged = mergeInlineMediaItems([{
+        type: 'image',
+        filePath,
+        identity: { msgId: 'message-1', elementId: 'element-1' }
+    }], [{
+        type: 'image',
+        filePath,
+        identity: { msgId: 'message-2', elementId: 'element-2' }
+    }]);
+
+    assert.equal(merged.length, 2);
+});
+
+test('keeps identical media from different sequences under one parent record', () => {
+    const merged = mergeInlineMediaItems([{
+        type: 'image',
+        filePath: 'D:\\cache\\AABBCCDDEEFF00112233445566778899.webp',
+        identity: { msgId: 'parent-message', msgSeq: '100', elementId: 'element-1' }
+    }], [{
+        type: 'image',
+        filePath: 'D:\\cache\\AABBCCDDEEFF00112233445566778899_720.webp',
+        identity: { msgId: 'parent-message', msgSeq: '101', elementId: 'element-2' }
+    }]);
+
+    assert.equal(merged.length, 2);
+});
+
+test('resolves a reply thumbnail to the original media without adding a duplicate', () => {
+    const original = {
+        type: 'image',
+        filePath: 'D:\\cache\\AABBCCDDEEFF00112233445566778899.webp',
+        identity: { msgId: 'source-message', msgSeq: '100', elementId: 'source-element' }
+    };
+    const replyThumbnail = {
+        type: 'image',
+        filePath: 'D:\\cache\\AABBCCDDEEFF00112233445566778899_720.webp',
+        identity: { msgId: 'reply-message', msgSeq: '101', elementId: 'reply-element' }
+    };
+    const replySources = new Map([
+        ['id:reply-message', { msgId: 'source-message', msgSeq: '100' }]
+    ]);
+
+    const resolved = resolveInlineReplyPreview(replyThumbnail, [original], replySources);
+    const merged = mergeInlineMediaItems([original], [resolved]);
+
+    assert.equal(resolved, original);
+    assert.equal(merged.length, 1);
+});
+
+test('does not collapse a genuinely repeated image that is not a reply preview', () => {
+    const original = {
+        type: 'image',
+        filePath: 'D:\\cache\\AABBCCDDEEFF00112233445566778899.webp',
+        identity: { msgId: 'message-1', msgSeq: '100', elementId: 'element-1' }
+    };
+    const repeated = {
+        type: 'image',
+        filePath: 'D:\\cache\\AABBCCDDEEFF00112233445566778899_720.webp',
+        identity: { msgId: 'message-2', msgSeq: '101', elementId: 'element-2' }
+    };
+
+    const resolved = resolveInlineReplyPreview(repeated, [original], new Map());
+    const merged = mergeInlineMediaItems([original], [resolved]);
+
+    assert.equal(resolved, repeated);
+    assert.equal(merged.length, 2);
 });

@@ -128,7 +128,7 @@ let handleToolboxVueComponentMount = () => {};
             },
             imageViewerOptimization: false,
             disableImageQrScan: false,
-            singleImageViewer: false,
+            singleMediaViewer: false,
             goBackMainList: false,
             preventMessageDrag: false,
             preventRecentContactDrag: false,
@@ -431,6 +431,35 @@ let handleToolboxVueComponentMount = () => {};
     height: 100%;
     min-width: 0;
     min-height: 0;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 24px;
+    height: 24px;
+    box-sizing: border-box;
+    border: 2px solid rgba(255, 255, 255, .28);
+    border-top-color: #fff;
+    border-radius: 50%;
+    content: '';
+    opacity: 0;
+    pointer-events: none;
+    z-index: 2;
+    box-shadow: 0 0 0 8px rgba(0, 0, 0, .46);
+    transform: translate(-50%, -50%);
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage.is-loading::after {
+    opacity: 1;
+    animation: qqnt-toolbox-media-loading .7s linear infinite;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-error {
+    color: rgba(255, 255, 255, .82);
+    font-size: 13px;
+    line-height: 20px;
+}
+@keyframes qqnt-toolbox-media-loading {
+    to { transform: translate(-50%, -50%) rotate(360deg); }
 }
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > img,
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
@@ -1491,7 +1520,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('图片自动二维码识别'), text('关闭可避免加载本地识码模型'), 'interfaceTweaks.disableImageQrScan', {
                     inverted: true
                 }),
-                createSwitchItem(text('图片预览仅保留一个窗口'), text('打开新图片时关闭旧预览'), 'interfaceTweaks.singleImageViewer'),
+                createSwitchItem(text('单窗口媒体预览'), text('打开新媒体时关闭旧预览窗口'), 'interfaceTweaks.singleMediaViewer'),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
                 createSwitchItem(text('阻止消息列表拖拽'), text('防止拖出独立聊天窗口'), 'interfaceTweaks.preventRecentContactDrag'),
@@ -1531,8 +1560,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     childLevel: 2
                 }),
                 createSwitchItem(text('提示 NoSeq 消息'), text('标记可能未成功发送的消息'), 'messageTweaks.promptNoSeq'),
-                createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),
-                createSwitchItem(text('回应后不关闭回应窗口'), text('便于连续添加或取消回应'), 'messageTweaks.keepReactionPanelOpen'),
                 createSwitchItem(text('语音消息'), text('拖拽发送与语音库'), 'voiceMessage.enabled'),
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
                     requires: 'voiceMessage.enabled',
@@ -1596,6 +1623,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 })
             ]),
             createSection('entertainment', text('娱乐互动'), [
+                createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),
+                createSwitchItem(text('回应后不关闭回应窗口'), text('便于连续添加或取消回应'), 'messageTweaks.keepReactionPanelOpen'),
                 createSwitchItem(text('自动回戳'), text('收到戳戳后自动回戳'), 'entertainment.autoPokeBack'),
                 createNumberItem(text('回戳阈值'), text('0 为无限制'), 'entertainment.autoPokeBackLimit', {
                     min: 0,
@@ -2644,6 +2673,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     function closeInlineMediaPreview() {
         const layer = document.getElementById(INLINE_MEDIA_PREVIEW_ID);
+        layer?.qqntToolboxDispose?.();
         layer?.querySelector('video')?.pause?.();
         layer?.remove();
         if (inlineMediaPreviewPreviousFocus instanceof HTMLElement && inlineMediaPreviewPreviousFocus.isConnected) {
@@ -2654,13 +2684,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function openInlineMediaPreview(payload) {
+        const galleryId = normalizeText(payload?.galleryId);
         const items = (Array.isArray(payload?.items) ? payload.items : [payload])
             .map(item => ({
                 type: item?.type === 'video' ? 'video' : 'image',
                 src: normalizeText(item?.src),
-                name: normalizeText(item?.name)
+                name: normalizeText(item?.name),
+                needsResolve: item?.needsResolve === true
             }))
-            .filter(item => item.src);
+            .filter(item => item.src || item.needsResolve);
         let index = Math.min(Math.max(Number(payload?.index) || 0, 0), items.length - 1);
         if (!items.length || !document.body || isImageViewerWindow()) {
             return;
@@ -2696,6 +2728,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         let mediaOffsetY = 0;
         let wheelNavigationDelta = 0;
         let wheelNavigationLockedUntil = 0;
+        let activeMediaIndex = -1;
+        let renderSequence = 0;
+        let disposed = false;
+        const preparedMedia = new Map();
         const applyMediaTransform = () => {
             if (!activeMedia) {
                 return;
@@ -2703,31 +2739,107 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             activeMedia.style.transform =
                 `translate3d(${mediaOffsetX}px, ${mediaOffsetY}px, 0) scale(${mediaScale})`;
         };
-        const render = () => {
-            stage.querySelector('video')?.pause?.();
-            stage.replaceChildren();
-            activeMedia = null;
-            mediaScale = 1;
-            mediaOffsetX = 0;
-            mediaOffsetY = 0;
-            wheelNavigationDelta = 0;
-            const item = items[index];
+        const releaseMedia = media => {
+            media?.pause?.();
+            media?.removeAttribute?.('src');
+            media?.load?.();
+        };
+        const loadMedia = async item => {
             const isVideo = item.type === 'video';
-            layer.setAttribute('aria-label', text(isVideo ? '视频预览' : '图片预览'));
             const media = document.createElement(isVideo ? 'video' : 'img');
-            media.src = item.src;
             media.draggable = false;
-            activeMedia = media;
             if (isVideo) {
-                media.controls = true;
-                media.autoplay = true;
                 media.preload = 'metadata';
                 media.playsInline = true;
-                media.addEventListener('canplay', () => media.play().catch(() => {}), { once: true });
             } else {
-                media.alt = item.name || text('图片');
+                media.decoding = 'async';
             }
-            stage.append(media);
+            await new Promise((resolve, reject) => {
+                const readyEvent = isVideo ? 'loadedmetadata' : 'load';
+                const timer = window.setTimeout(handleError, isVideo ? 12000 : 6000);
+                const cleanup = () => {
+                    clearTimeout(timer);
+                    media.removeEventListener(readyEvent, handleReady);
+                    media.removeEventListener('error', handleError);
+                };
+                const handleReady = () => {
+                    cleanup();
+                    resolve();
+                };
+                function handleError() {
+                    cleanup();
+                    reject(new Error('media load failed'));
+                }
+                media.addEventListener(readyEvent, handleReady, { once: true });
+                media.addEventListener('error', handleError, { once: true });
+                media.src = item.src;
+                media.load?.();
+            }).catch(error => {
+                releaseMedia(media);
+                throw error;
+            });
+            if (!isVideo) {
+                await media.decode?.().catch(() => {});
+            }
+            return media;
+        };
+        const createPreparedMedia = async (item, mediaIndex) => {
+            if (item.src) {
+                try {
+                    return await loadMedia(item);
+                } catch {
+                }
+            }
+            if (!item.needsResolve || !galleryId || disposed) {
+                throw new Error('media load failed');
+            }
+            try {
+                const resolved = await getBridge()?.prepareInlineMedia?.({ galleryId, index: mediaIndex });
+                if (resolved?.src) {
+                    item.src = normalizeText(resolved.src);
+                    item.name = normalizeText(resolved.name) || item.name;
+                    item.needsResolve = false;
+                    return await loadMedia(item);
+                }
+            } catch {
+            }
+            throw new Error('media load failed');
+        };
+        const prepareMedia = mediaIndex => {
+            if (mediaIndex < 0 || mediaIndex >= items.length) {
+                return null;
+            }
+            const cached = preparedMedia.get(mediaIndex);
+            if (cached) {
+                return cached.promise;
+            }
+            const entry = {};
+            entry.promise = createPreparedMedia(items[mediaIndex], mediaIndex)
+                .catch(error => {
+                    if (preparedMedia.get(mediaIndex) === entry) {
+                        preparedMedia.delete(mediaIndex);
+                    }
+                    throw error;
+                });
+            preparedMedia.set(mediaIndex, entry);
+            return entry.promise;
+        };
+        const trimPreparedMedia = () => {
+            const retained = new Set([index - 1, index, index + 1, activeMediaIndex]);
+            for (const [mediaIndex, entry] of preparedMedia) {
+                if (retained.has(mediaIndex)) {
+                    continue;
+                }
+                entry.promise.catch(() => {}).then(releaseMedia);
+                preparedMedia.delete(mediaIndex);
+            }
+        };
+        const preloadAdjacentMedia = () => {
+            prepareMedia(index - 1)?.catch(() => {});
+            prepareMedia(index + 1)?.catch(() => {});
+            trimPreparedMedia();
+        };
+        const updateNavigation = () => {
             previous.disabled = index === 0;
             next.disabled = index === items.length - 1;
             previous.hidden = items.length < 2;
@@ -2735,19 +2847,89 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             counter.hidden = items.length < 2;
             counter.textContent = `${index + 1} / ${items.length}`;
         };
+        const render = async () => {
+            const sequence = ++renderSequence;
+            const renderIndex = index;
+            const item = items[renderIndex];
+            const isVideo = item.type === 'video';
+            activeMedia?.pause?.();
+            activeMedia = null;
+            stage.replaceChildren();
+            mediaScale = 1;
+            mediaOffsetX = 0;
+            mediaOffsetY = 0;
+            wheelNavigationDelta = 0;
+            stage.classList.add('is-loading');
+            stage.setAttribute('aria-busy', 'true');
+            layer.setAttribute('aria-label', text(isVideo ? '视频预览' : '图片预览'));
+            updateNavigation();
+            const mediaPromise = prepareMedia(renderIndex);
+            preloadAdjacentMedia();
+            let media;
+            try {
+                media = await mediaPromise;
+            } catch {
+                if (disposed || sequence !== renderSequence) {
+                    return;
+                }
+                activeMedia = null;
+                activeMediaIndex = -1;
+                const error = document.createElement('div');
+                error.className = 'qqnt-toolbox-media-error';
+                error.textContent = text('媒体加载失败');
+                stage.replaceChildren(error);
+                stage.classList.remove('is-loading');
+                stage.removeAttribute('aria-busy');
+                return;
+            }
+            if (disposed || sequence !== renderSequence) {
+                return;
+            }
+            activeMedia = media;
+            activeMediaIndex = renderIndex;
+            if (isVideo) {
+                media.controls = true;
+                media.autoplay = true;
+                media.preload = 'auto';
+                media.playsInline = true;
+                if (media.readyState >= 3) {
+                    media.play().catch(() => {});
+                } else {
+                    media.addEventListener('canplay', () => {
+                        if (activeMedia === media) {
+                            media.play().catch(() => {});
+                        }
+                    }, { once: true });
+                }
+            } else {
+                media.alt = item.name || text('图片');
+            }
+            stage.replaceChildren(media);
+            stage.classList.remove('is-loading');
+            stage.removeAttribute('aria-busy');
+            trimPreparedMedia();
+        };
         const navigate = delta => {
             const nextIndex = Math.min(Math.max(index + delta, 0), items.length - 1);
             if (nextIndex === index) {
                 return;
             }
             index = nextIndex;
-            render();
+            render().catch(() => {});
         };
         layer.qqntToolboxNavigate = navigate;
         previous.addEventListener('click', () => navigate(-1));
         next.addEventListener('click', () => navigate(1));
         layer.append(stage, previous, next, counter);
-        render();
+        render().catch(() => {});
+        layer.qqntToolboxDispose = () => {
+            disposed = true;
+            renderSequence += 1;
+            for (const entry of preparedMedia.values()) {
+                entry.promise.catch(() => {}).then(releaseMedia);
+            }
+            preparedMedia.clear();
+        };
         const stopEvent = event => {
             event.stopPropagation();
             event.stopImmediatePropagation?.();
@@ -3075,7 +3257,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function getRecallMark(record) {
-        return record?.qqnt_toolbox_recall || record?.lt_recall || null;
+        return record?.qqnt_toolbox_recall || null;
     }
 
     function getRecallOperatorName(mark) {

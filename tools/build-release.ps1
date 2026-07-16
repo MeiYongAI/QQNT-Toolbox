@@ -99,6 +99,7 @@ try {
         'QQNT-Toolbox/src/repeat-message.js',
         'QQNT-Toolbox/src/settings.css',
         'QQNT-Toolbox/src/voice/media.js',
+        'QQNT-Toolbox/src/voice/ptt-source.js',
         'QQNT-Toolbox/src/voice/renderer-ui.js',
         'QQNT-Toolbox/native/poke-bridge.win32-x64.node',
         'QQNT-Toolbox/node_modules/silk-wasm/lib/silk_wasm.wasm'
