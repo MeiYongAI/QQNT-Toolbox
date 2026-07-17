@@ -64,6 +64,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     const api = runtime.exposed.get('qqnt_toolbox');
 
     assert.ok(api);
+    await api.recordDiagnosticEvent({ event: 'renderer.ready' });
+    await api.runDiagnosticAction('copy-report');
     await api.repeatMessage({ id: 'repeat' });
     await api.getReactionEmojiCatalog();
     await api.setMessageReaction({ emojiId: '14' });
@@ -80,6 +82,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     unsubscribe();
     assert.equal(runtime.listeners.length, 0);
     assert.deepEqual(runtime.invocations.map(item => item[0]), [
+        'qqnt-toolbox:diagnostic-event',
+        'qqnt-toolbox:diagnostic-action',
         'qqnt-toolbox:repeat-message',
         'qqnt-toolbox:get-reaction-catalog',
         'qqnt-toolbox:set-message-reaction',

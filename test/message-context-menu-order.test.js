@@ -216,4 +216,8 @@ test('pre-patches declared message menus without touching generic QQ menus', asy
     const message = createMenu();
     controller.handleVueComponentMount({ proxy: { msgCtxMenu: message.menu } });
     assert.deepEqual(message.context.openMenu().map(item => item.text), ['native', 'repeat']);
+
+    const deferred = createMenu();
+    controller.handleVueComponentMount({ proxy: { msgCtxMenu: deferred.menu } }, false);
+    assert.deepEqual(deferred.context.openMenu().map(item => item.text), ['native']);
 });

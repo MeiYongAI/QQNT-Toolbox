@@ -228,6 +228,14 @@
     background: rgba(255, 90, 95, 0.1);
 }
 
+#qqnt-toolbox-settings .qqnt-toolbox-action[data-result="success"] {
+    color: var(--brand_standard, var(--brand-primary, #2f6bff));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-action[data-result="error"] {
+    color: #ff5a5f;
+}
+
 #qqnt-toolbox-settings .qqnt-toolbox-password-input,
 #qqnt-toolbox-settings .qqnt-toolbox-number-input {
     flex: none;

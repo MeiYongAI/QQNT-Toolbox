@@ -3,6 +3,8 @@
 const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
+const CHANNEL_DIAGNOSTIC_EVENT = 'qqnt-toolbox:diagnostic-event';
+const CHANNEL_DIAGNOSTIC_ACTION = 'qqnt-toolbox:diagnostic-action';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_OPEN_INLINE_MEDIA = 'qqnt-toolbox:open-inline-media';
 const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
@@ -24,6 +26,8 @@ module.exports = Object.freeze({
     CHANNEL_GET_CONFIG,
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
+    CHANNEL_DIAGNOSTIC_EVENT,
+    CHANNEL_DIAGNOSTIC_ACTION,
     CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_OPEN_INLINE_MEDIA,
     CHANNEL_PREPARE_INLINE_MEDIA,

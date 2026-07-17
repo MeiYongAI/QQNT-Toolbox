@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
+const CHANNEL_DIAGNOSTIC_EVENT = 'qqnt-toolbox:diagnostic-event';
+const CHANNEL_DIAGNOSTIC_ACTION = 'qqnt-toolbox:diagnostic-action';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_OPEN_INLINE_MEDIA = 'qqnt-toolbox:open-inline-media';
 const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
@@ -20,6 +22,8 @@ const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
 contextBridge.exposeInMainWorld('qqnt_toolbox', {
     getConfig: () => ipcRenderer.invoke(CHANNEL_GET_CONFIG),
     setConfig: config => ipcRenderer.invoke(CHANNEL_SET_CONFIG, config),
+    recordDiagnosticEvent: payload => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_EVENT, payload),
+    runDiagnosticAction: action => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_ACTION, action),
     repeatMessage: payload => ipcRenderer.invoke(CHANNEL_REPEAT_MESSAGE, payload),
     getReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_REACTION_CATALOG),
     setMessageReaction: payload => ipcRenderer.invoke(CHANNEL_SET_MESSAGE_REACTION, payload),

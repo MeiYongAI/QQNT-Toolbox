@@ -43,6 +43,26 @@ let voiceFeatureEnabled = false;
 let voiceSaveInContextMenuEnabled = false;
 let voiceForwardInContextMenuEnabled = false;
 let fakeVoiceDurationSeconds = 0;
+let diagnosticRecorder = null;
+
+function recordDiagnostic(level, event, details = {}) {
+    try {
+        diagnosticRecorder?.(level, event, details);
+    } catch {
+    }
+}
+
+function shouldRecordVoiceAction(action) {
+    return Boolean(action?.type && action.type !== 'list');
+}
+
+function getVoiceActionSummary(action) {
+    return {
+        actionType: String(action?.type || 'unknown'),
+        itemCount: Array.isArray(action?.paths) ? action.paths.length : 0,
+        hasPeer: Boolean(action?.peer)
+    };
+}
 
 function getPluginTempDir() {
     return path.join(os.tmpdir(), 'QQNT-Toolbox', VOICE_DATA_DIR_NAME);
@@ -1005,6 +1025,7 @@ function handleVoiceNativeRequest(browserWindow, channel, args) {
     state.pendingNativePttForward = null;
     replyToBlockedNativeRequest(args[0], args.find(value => value?.callbackId), { result: 0 });
     if (!peers.length) {
+        recordDiagnostic('warn', 'voice.forward-failed', { reason: 'target-unavailable' });
         setInjectedStatus(browserWindow, '\u8f6c\u53d1\u76ee\u6807\u8bfb\u53d6\u5931\u8d25', {
             disabled: false,
             error: true,
@@ -1012,15 +1033,23 @@ function handleVoiceNativeRequest(browserWindow, channel, args) {
         }).catch(() => {});
         return true;
     }
+    recordDiagnostic('info', 'voice.forward-requested', { targetCount: peers.length });
     Promise.resolve().then(async () => {
         for (const peer of peers) {
             await sendPttInfoAsPtt(browserWindow, peer, pending.ptt);
         }
-    }).catch(error => setInjectedStatus(browserWindow, error?.message || String(error), {
-        disabled: false,
-        error: true,
-        resetAfterMs: 2600
-    }));
+        recordDiagnostic('info', 'voice.forward-completed', { targetCount: peers.length });
+    }).catch(error => {
+        recordDiagnostic('error', 'voice.forward-failed', {
+            targetCount: peers.length,
+            error
+        });
+        return setInjectedStatus(browserWindow, error?.message || String(error), {
+            disabled: false,
+            error: true,
+            resetAfterMs: 2600
+        });
+    });
     return true;
 }
 
@@ -1399,10 +1428,21 @@ async function runInjectedUiLoop(browserWindow) {
     }
     state.uiLoopRunning = true;
     while (!browserWindow.isDestroyed()) {
+        let action = null;
         try {
-            const action = await waitForInjectedAction(browserWindow);
+            action = await waitForInjectedAction(browserWindow);
+            if (shouldRecordVoiceAction(action)) {
+                recordDiagnostic('info', 'voice.action-requested', getVoiceActionSummary(action));
+            }
             await handleInjectedAction(browserWindow, action);
+            if (shouldRecordVoiceAction(action)) {
+                recordDiagnostic('info', 'voice.action-completed', getVoiceActionSummary(action));
+            }
         } catch (error) {
+            recordDiagnostic('error', 'voice.action-failed', {
+                ...getVoiceActionSummary(action),
+                error
+            });
             if (!browserWindow.isDestroyed()) {
                 await setInjectedStatus(browserWindow, error?.message || String(error), {
                     disabled: false,
@@ -1492,6 +1532,10 @@ function setFakeDurationSeconds(value) {
         : 0;
 }
 
+function setDiagnosticRecorder(recorder) {
+    diagnosticRecorder = typeof recorder === 'function' ? recorder : null;
+}
+
 module.exports = {
     onBrowserWindowCreated,
     rememberNativePeerAliases,
@@ -1499,6 +1543,7 @@ module.exports = {
     setSaveInContextMenuEnabled,
     setForwardInContextMenuEnabled,
     setFakeDurationSeconds,
+    setDiagnosticRecorder,
     createPttPreviewItem,
     sendPttInfoAsPtt,
     sanitizePttInfo,

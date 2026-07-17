@@ -12,7 +12,7 @@
     "build:native": "cmd /d /c native\\build.cmd",
     "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\build-release.ps1",
     "check": "node tools/check-syntax.js",
-    "test": "node --test test/inline-media-preview.test.js test/local-media-server.test.js test/message-context-menu-order.test.js test/native-event-context.test.js test/native-ipc.test.js test/preload-contract.test.js test/ptt-source.test.js test/reaction-limit.test.js test/recall-image-url.test.js test/repeat-message.test.js test/voice-media.test.js"
+    "test": "node --test test/diagnostics.test.js test/inline-media-preview.test.js test/local-media-server.test.js test/message-context-menu-order.test.js test/native-event-context.test.js test/native-ipc.test.js test/preload-contract.test.js test/ptt-source.test.js test/reaction-limit.test.js test/recall-image-url.test.js test/repeat-message.test.js test/voice-media.test.js"
   },
   "dependencies": {
     "@zip.js/zip.js": "2.8.26",

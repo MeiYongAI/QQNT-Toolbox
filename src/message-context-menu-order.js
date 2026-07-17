@@ -574,10 +574,12 @@ export function createMessageContextMenuOrderController(options) {
         return prepareFromElement(messageElement);
     }
 
-    function handleVueComponentMount(component) {
-        const menu = findMenuFromComponent(component);
-        if (menu) {
-            patchMenu(menu);
+    function handleVueComponentMount(component, patchProvider = true) {
+        if (patchProvider) {
+            const menu = findMenuFromComponent(component);
+            if (menu) {
+                patchMenu(menu);
+            }
         }
         const element = component?.vnode?.el;
         const item = typeof Element !== 'undefined' && element instanceof Element

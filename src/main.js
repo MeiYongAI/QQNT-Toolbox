@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, nativeImage, shell } = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const os = require('os');
@@ -28,10 +28,13 @@ const {
     resolveInlineReplyPreview
 } = require('./inline-media-preview');
 const { createLocalMediaServer } = require('./local-media-server');
+const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
 const {
     CHANNEL_GET_CONFIG,
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
+    CHANNEL_DIAGNOSTIC_EVENT,
+    CHANNEL_DIAGNOSTIC_ACTION,
     CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_OPEN_INLINE_MEDIA,
     CHANNEL_PREPARE_INLINE_MEDIA,
@@ -206,20 +209,55 @@ const recallViewerState = {
 };
 const inlineMediaServer = createLocalMediaServer();
 let reactionEmojiCatalog = null;
+let diagnosticLogger = null;
+let diagnosticActionRunner = null;
 
 function isDebugEnabled() {
     return process.env.QQNT_TOOLBOX_DEBUG === '1' || configCache?.debug?.enabled === true;
 }
 
+function getDiagnosticLogger() {
+    if (!diagnosticLogger) {
+        diagnosticLogger = createDiagnosticLogger({
+            isEnabled: isDebugEnabled,
+            getDirectory: getDebugDirectory,
+            getEnvironment: getDiagnosticEnvironment
+        });
+    }
+    return diagnosticLogger;
+}
+
+function recordDiagnostic(level, event, details = {}) {
+    return getDiagnosticLogger().record(level, event, details);
+}
+
+function getDiagnosticActionRunner() {
+    if (!diagnosticActionRunner) {
+        diagnosticActionRunner = createDiagnosticActionRunner({
+            logger: getDiagnosticLogger(),
+            copyText: value => clipboard.writeText(value),
+            showItemInFolder: filePath => shell.showItemInFolder(filePath),
+            openPath: directory => shell.openPath(directory)
+        });
+    }
+    return diagnosticActionRunner;
+}
+
 function debug(...args) {
     if (isDebugEnabled()) {
         console.log(`[${PLUGIN_NAME}]`, ...args);
+        recordDiagnostic('info', `debug.${String(args[0] || 'event').replace(/:$/, '')}`, {
+            values: args.slice(1)
+        });
     }
 }
 
 function warn(...args) {
     if (isDebugEnabled()) {
         console.warn(`[${PLUGIN_NAME}]`, ...args);
+        recordDiagnostic('warn', `warning.${String(args[0] || 'event').replace(/:$/, '')}`, {
+            values: args.slice(1)
+        });
     }
 }
 
@@ -262,6 +300,132 @@ function getLiteLoaderPluginDataDir() {
 
 function getPluginDataDir() {
     return getLiteLoaderPluginDataDir() || path.join(os.homedir(), 'Documents', 'LiteLoaderQQNT', 'data', PLUGIN_SLUG);
+}
+
+function getDebugDirectory() {
+    return path.join(getPluginDataDir(), 'debug');
+}
+
+function getPluginManifest() {
+    const plugins = globalThis.LiteLoader?.plugins || global.LiteLoader?.plugins || {};
+    return Object.values(plugins)
+        .find(plugin => plugin?.manifest?.slug === PLUGIN_SLUG || plugin?.manifest?.name === PLUGIN_NAME)
+        ?.manifest || {};
+}
+
+function getLiteLoaderVersion() {
+    const packageInfo = globalThis.LiteLoader?.package || global.LiteLoader?.package || {};
+    return String(
+        packageInfo.liteloader?.version ||
+        packageInfo.liteloaderqqnt?.version ||
+        packageInfo.version ||
+        ''
+    );
+}
+
+function getWindowRoute(value) {
+    const url = String(value || '');
+    const hash = url.includes('#') ? url.slice(url.indexOf('#')) : '';
+    if (hash.startsWith('#/forward/')) {
+        return 'forward';
+    }
+    if (hash.startsWith('#/record')) {
+        return 'record';
+    }
+    if (hash.startsWith('#/image-viewer')) {
+        return 'image-viewer';
+    }
+    if (hash.startsWith('#/chat')) {
+        return 'chat';
+    }
+    if (hash.startsWith('#/setting')) {
+        return 'settings';
+    }
+    return hash ? 'other' : 'unknown';
+}
+
+function getDiagnosticFeatureSummary(config = getConfig()) {
+    return {
+        fileRetry: {
+            enabled: config.fileRetryFixer?.enabled === true,
+            image: config.fileRetryFixer?.image === true,
+            video: config.fileRetryFixer?.video === true,
+            audio: config.fileRetryFixer?.audio === true,
+            otherFiles: config.fileRetryFixer?.otherFiles === true,
+            deleteFailedMessage: config.fileRetryFixer?.deleteFailedMessage === true
+        },
+        repeat: {
+            enabled: config.repeatMessage?.enabled === true,
+            doubleClick: config.repeatMessage?.doubleClick === true,
+            contextMenu: config.repeatMessage?.showInContextMenu === true
+        },
+        voice: {
+            enabled: config.voiceMessage?.enabled === true,
+            saveContextMenu: config.voiceMessage?.saveInContextMenu === true,
+            forwardContextMenu: config.voiceMessage?.forwardInContextMenu === true,
+            fakeDuration: config.voiceMessage?.fakeDurationEnabled === true
+        },
+        message: {
+            promptNoSeq: config.messageTweaks?.promptNoSeq === true,
+            removeReplyAt: config.messageTweaks?.removeReplyAt === true
+        },
+        reactions: {
+            removeLimit: config.messageTweaks?.removeReactionLimit === true,
+            keepOpen: config.messageTweaks?.keepReactionPanelOpen === true
+        },
+        preventRecall: {
+            enabled: config.preventRecall?.enabled === true,
+            preventSelf: config.preventRecall?.preventSelfMsg === true,
+            persistedFiles: config.preventRecall?.persistedFiles === true,
+            redirectImages: config.preventRecall?.redirectPicPath === true
+        },
+        poke: {
+            autoReply: config.entertainment?.autoPokeBack === true,
+            autoReplyLimit: Math.max(0, Number(config.entertainment?.autoPokeBackLimit) || 0),
+            doubleClickAvatar: config.entertainment?.doubleClickAvatarPoke === true,
+            contextMenu: config.entertainment?.rightClickAvatarPoke === true
+        },
+        interface: {
+            inlineMedia: config.interfaceTweaks?.inlineMediaViewer === true,
+            singleClickMedia: config.interfaceTweaks?.singleClickMediaViewer === true,
+            singleMediaWindow: config.interfaceTweaks?.singleMediaViewer === true,
+            menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
+            preventProfileCard: config.interfaceTweaks?.preventProfileCardHover === true,
+            preventRecentDrag: config.interfaceTweaks?.preventRecentContactDrag === true
+        },
+        floatingPanel: {
+            enabled: config.floatingPanel?.enabled === true,
+            shortcut: String(config.floatingPanel?.shortcut || '')
+        },
+        simplify: {
+            sideTopHidden: (config.sideBar?.top || []).filter(item => item?.enabled === false).length,
+            sideBottomHidden: (config.sideBar?.bottom || []).filter(item => item?.enabled === false).length,
+            topHidden: (config.topFuncBar || []).filter(item => item?.enabled === false).length,
+            chatHidden: (config.chatFuncBar || []).filter(item => item?.enabled === false).length
+        }
+    };
+}
+
+function getDiagnosticEnvironment() {
+    const routeCounts = {};
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        if (browserWindow.isDestroyed()) {
+            continue;
+        }
+        const route = getWindowRoute(browserWindow.webContents.getURL());
+        routeCounts[route] = (routeCounts[route] || 0) + 1;
+    }
+    return {
+        pluginVersion: String(getPluginManifest().version || ''),
+        qqVersion: getQqVersion(),
+        liteLoaderVersion: getLiteLoaderVersion(),
+        electronVersion: String(process.versions.electron || ''),
+        nodeVersion: String(process.versions.node || ''),
+        platform: process.platform,
+        arch: process.arch,
+        features: getDiagnosticFeatureSummary(),
+        windows: routeCounts
+    };
 }
 
 function getRepairDir() {
@@ -369,9 +533,22 @@ function loadConfig() {
 
 async function saveConfig(nextConfig) {
     const configPath = getConfigPath();
-    configCache = normalizeSimplifyConfig(mergeConfig(nextConfig));
+    const wasDebugEnabled = isDebugEnabled();
+    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(nextConfig));
+    const willDebugBeEnabled = process.env.QQNT_TOOLBOX_DEBUG === '1' || normalizedConfig.debug?.enabled === true;
+    if (wasDebugEnabled && !willDebugBeEnabled) {
+        recordDiagnostic('info', 'diagnostics.disabled');
+    }
+    configCache = normalizedConfig;
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify(configCache, null, 2), 'utf8');
+    if (!wasDebugEnabled && willDebugBeEnabled) {
+        recordDiagnostic('info', 'diagnostics.enabled', {
+            qqVersion: getQqVersion(),
+            pluginVersion: getPluginManifest().version || '',
+            features: getDiagnosticFeatureSummary(configCache)
+        });
+    }
     applyVoiceMessageConfig();
     broadcastConfigChanged();
     return clonePlain(configCache);
@@ -428,6 +605,7 @@ function isPreventRecallEnabled() {
 }
 
 function applyVoiceMessageConfig() {
+    voiceFileSender?.setDiagnosticRecorder?.(recordDiagnostic);
     voiceFileSender?.setEnabled?.(isVoiceMessageEnabled());
     voiceFileSender?.setSaveInContextMenuEnabled?.(isVoiceSaveInContextMenuEnabled());
     voiceFileSender?.setForwardInContextMenuEnabled?.(isVoiceForwardInContextMenuEnabled());
@@ -828,6 +1006,10 @@ async function setMessageReaction(browserWindow, payload) {
     }
 }
 
+async function runDiagnosticAction(action) {
+    return await getDiagnosticActionRunner().run(action);
+}
+
 function installConfigIpc() {
     if (globalThis.__qqntToolboxConfigIpcInstalled) {
         return;
@@ -835,20 +1017,78 @@ function installConfigIpc() {
     globalThis.__qqntToolboxConfigIpcInstalled = true;
     ipcMain.handle(CHANNEL_GET_CONFIG, () => getConfig());
     ipcMain.handle(CHANNEL_SET_CONFIG, (_event, nextConfig) => saveConfig(nextConfig));
+    ipcMain.handle(CHANNEL_DIAGNOSTIC_EVENT, (event, payload) => {
+        if (!isDebugEnabled()) {
+            return { ok: false, reason: 'disabled' };
+        }
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        const entry = recordDiagnostic(
+            ['warn', 'error'].includes(payload?.level) ? payload.level : 'info',
+            `renderer.${String(payload?.event || 'event')}`,
+            {
+                route: getWindowRoute(browserWindow?.webContents?.getURL()),
+                details: payload?.details || {}
+            }
+        );
+        return { ok: Boolean(entry) };
+    });
+    ipcMain.handle(CHANNEL_DIAGNOSTIC_ACTION, (_event, action) => runDiagnosticAction(action));
     ipcMain.handle(CHANNEL_OPEN_INLINE_MEDIA, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
-        return browserWindow ? await openInlineMediaFromRenderer(browserWindow, payload) : false;
+        const summary = {
+            type: payload?.type || '',
+            source: payload?.identity ? 'file-message' : 'message'
+        };
+        try {
+            const opened = browserWindow ? await openInlineMediaFromRenderer(browserWindow, payload) : false;
+            recordDiagnostic(opened ? 'info' : 'warn', 'media.inline-open', {
+                ...summary,
+                ok: opened
+            });
+            return opened;
+        } catch (error) {
+            recordDiagnostic('error', 'media.inline-open-failed', { ...summary, error });
+            throw error;
+        }
     });
     ipcMain.handle(CHANNEL_PREPARE_INLINE_MEDIA, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
-        return browserWindow ? await prepareInlineMedia(browserWindow, payload) : null;
+        const index = Number(payload?.index);
+        try {
+            const prepared = browserWindow ? await prepareInlineMedia(browserWindow, payload) : null;
+            recordDiagnostic(prepared ? 'info' : 'warn', 'media.prepare-completed', {
+                ok: Boolean(prepared),
+                index: Number.isInteger(index) ? index : -1,
+                type: prepared?.type || ''
+            });
+            return prepared;
+        } catch (error) {
+            recordDiagnostic('error', 'media.prepare-failed', {
+                index: Number.isInteger(index) ? index : -1,
+                error
+            });
+            throw error;
+        }
     });
     ipcMain.handle(CHANNEL_REPEAT_MESSAGE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         if (!browserWindow) {
             throw new Error('BrowserWindow was not found.');
         }
-        return await repeatMessageFromRenderer(browserWindow, payload);
+        const summary = {
+            source: payload?.recordSource || 'chat',
+            elementTypes: (payload?.record?.elements || []).map(element => Number(element?.elementType) || 0),
+            hasDestination: Boolean(payload?.destinationPeer)
+        };
+        recordDiagnostic('info', 'repeat.requested', summary);
+        try {
+            const result = await repeatMessageFromRenderer(browserWindow, payload);
+            recordDiagnostic('info', 'repeat.completed', summary);
+            return result;
+        } catch (error) {
+            recordDiagnostic('error', 'repeat.failed', { ...summary, error });
+            throw error;
+        }
     });
     ipcMain.handle(CHANNEL_GET_REACTION_CATALOG, () => {
         try {
@@ -863,7 +1103,13 @@ function installConfigIpc() {
         if (!browserWindow) {
             return { ok: false, reason: 'window-not-found' };
         }
-        return await setMessageReaction(browserWindow, payload);
+        const result = await setMessageReaction(browserWindow, payload);
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'reaction.completed', {
+            ok: result?.ok === true,
+            reason: result?.reason || '',
+            setEmoji: payload?.setEmoji === true
+        });
+        return result;
     });
     ipcMain.handle(CHANNEL_SEND_POKE, async (event, payload) => {
         const entertainment = getEntertainmentConfig();
@@ -878,14 +1124,28 @@ function installConfigIpc() {
         if (!browserWindow) {
             return { ok: false, reason: 'window-not-found' };
         }
-        return await sendPoke(browserWindow, payload);
+        const result = await sendPoke(browserWindow, payload);
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'poke.completed', {
+            ok: result?.ok === true,
+            reason: result?.reason || '',
+            method: result?.method || '',
+            source,
+            chatType: Number(payload?.chatType) || 0
+        });
+        return result;
     });
     ipcMain.handle(CHANNEL_RECALL_POKE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         if (!browserWindow) {
             return { ok: false, reason: 'window-not-found' };
         }
-        return await recallPoke(browserWindow, payload);
+        const result = await recallPoke(browserWindow, payload);
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'poke-recall.completed', {
+            ok: result?.ok === true,
+            reason: result?.reason || '',
+            method: result?.method || ''
+        });
+        return result;
     });
     ipcMain.handle(CHANNEL_REGISTER_POKE_ACCOUNT, async (event, selfUin) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
@@ -1146,6 +1406,7 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
     const tweaks = getInterfaceTweaksConfig();
     const request = args.find(value => typeof value?.callbackId === 'string');
     if (tweaks.disableImageQrScan === true && command.cmdName === QR_SCAN_COMMAND) {
+        recordDiagnostic('info', 'qr-scan.blocked');
         return Boolean(request && replyWithEmptyQrResult(args[0], request));
     }
     if (command.cmdName !== OPEN_MEDIA_VIEWER_COMMAND) {
@@ -1159,6 +1420,10 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
         closeExistingMediaViewers(browserWindow.webContents);
         showInlineMediaPreview(browserWindow, gallery)
             .catch(error => warn('inline media preview failed:', error?.message || error));
+        recordDiagnostic('info', 'media.native-viewer-intercepted', {
+            itemCount: gallery.items.length,
+            selectedIndex: gallery.index
+        });
         if (request) {
             replyWithNativeResult(args[0], request, null);
         }
@@ -1310,6 +1575,7 @@ function processPokeUpdates(browserWindow, context) {
         if (limit > 0 && sequence.count >= limit) {
             sequence.lastAt = now;
             pokeState.autoReplySequences.set(replyTargetKey, sequence);
+            recordDiagnostic('info', 'poke-auto-reply.skipped', { reason: 'limit', chatType, limit });
             continue;
         }
         const nextSequence = { count: sequence.count + 1, lastAt: now };
@@ -1321,6 +1587,12 @@ function processPokeUpdates(browserWindow, context) {
             selfUin,
             source: 'auto-reply'
         })).then(result => {
+            recordDiagnostic(result?.ok ? 'info' : 'warn', 'poke-auto-reply.completed', {
+                ok: result?.ok === true,
+                reason: result?.reason || '',
+                method: result?.method || '',
+                chatType
+            });
             if (!result?.ok && pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
                 pokeState.autoReplySequences.delete(replyTargetKey);
             }
@@ -1873,6 +2145,11 @@ function processPreventRecall(browserWindow, context) {
         }
         Object.keys(record).forEach(key => delete record[key]);
         Object.assign(record, recovered);
+        recordDiagnostic('info', 'recall.recovered', {
+            chatType: Number(recovered?.chatType) || 0,
+            elementTypes: (recovered?.elements || []).map(element => Number(element?.elementType) || 0),
+            persisted: getConfig().preventRecall.persistedFiles === true
+        });
     }
 }
 
@@ -2871,9 +3148,15 @@ function queueFileRetry(browserWindow, record, plan) {
         count: (existing?.count || 0) + 1
     });
     state.inFlightRecords.add(key);
+    const kinds = plan.map(descriptor => descriptor.kind);
+    recordDiagnostic('info', 'file-retry.queued', {
+        sendStatus: Number(record?.sendStatus),
+        kinds,
+        deleteFailedMessage: getFileRetryConfig().deleteFailedMessage === true
+    });
     setTimeout(() => {
         retryFileRecord(browserWindow, record, plan, key)
-            .catch(error => warn('file retry failed:', error?.message || error))
+            .catch(error => warn('file-retry.failed', { kinds, error }))
             .finally(() => state.inFlightRecords.delete(key));
     }, RETRY_DELAY_MS);
 }
@@ -3966,6 +4249,11 @@ async function retryFileRecord(browserWindow, record, plan, key) {
     if (getFileRetryConfig().deleteFailedMessage === true) {
         await deleteFailedRecord(browserWindow, peer, record);
     }
+    recordDiagnostic('info', 'file-retry.completed', {
+        chatType: Number(peer.chatType) || 0,
+        kinds: plan.map(descriptor => descriptor.kind),
+        deletedFailedMessage: getFileRetryConfig().deleteFailedMessage === true
+    });
 }
 
 function handleNativeSend(browserWindow, channel, args) {
@@ -4036,7 +4324,11 @@ function start() {
         }
     });
     setInterval(installForAllWindows, 3000).unref?.();
-    debug('loaded');
+    debug('loaded', {
+        qqVersion: getQqVersion(),
+        pluginVersion: getPluginManifest().version || '',
+        features: getDiagnosticFeatureSummary()
+    });
 }
 
 start();
