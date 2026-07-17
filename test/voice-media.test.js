@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const silkWasmEntry = require.resolve('silk-wasm');
@@ -12,6 +14,14 @@ const {
 
 test('loads voice media helpers without eagerly loading silk-wasm', () => {
     assert.equal(require.cache[silkWasmEntry], undefined);
+});
+
+test('does not retain unused voice send waiters or delayed Silk cleanup timers', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice-file-sender.js'), 'utf8');
+
+    assert.doesNotMatch(source, /createNativeEventWaiter/);
+    assert.doesNotMatch(source, /setTimeout\(\(\) => \{\s*fs\.unlink\(silkPath\)/);
+    assert.match(source, /await fs\.unlink\(silkPath\)\.catch/);
 });
 
 test('estimates Silk duration from complete frames', () => {

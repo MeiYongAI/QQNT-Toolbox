@@ -45,11 +45,27 @@ function parseByteRange(value, size) {
     return { start, end: Math.min(end, size - 1) };
 }
 
-function createLocalMediaServer() {
+function createLocalMediaServer(options = {}) {
+    const maxEntries = Math.max(1, Number(options.maxEntries) || 1024);
     const entries = new Map();
     const pathTokens = new Map();
     let server = null;
     let startPromise = null;
+
+    function touchEntry(token, filePath) {
+        entries.delete(token);
+        entries.set(token, filePath);
+    }
+
+    function pruneEntries() {
+        while (entries.size > maxEntries) {
+            const [token, filePath] = entries.entries().next().value;
+            entries.delete(token);
+            if (pathTokens.get(filePath) === token) {
+                pathTokens.delete(filePath);
+            }
+        }
+    }
 
     async function handleRequest(request, response) {
         const token = new URL(request.url || '/', 'http://127.0.0.1').pathname.split('/')[1];
@@ -58,6 +74,7 @@ function createLocalMediaServer() {
             response.writeHead(404).end();
             return;
         }
+        touchEntry(token, filePath);
         let stat;
         try {
             stat = await fs.promises.stat(filePath);
@@ -95,6 +112,7 @@ function createLocalMediaServer() {
         }
         const stream = fs.createReadStream(filePath, { start, end });
         stream.on('error', () => response.destroy());
+        request.once('aborted', () => stream.destroy());
         stream.pipe(response);
     }
 
@@ -133,6 +151,9 @@ function createLocalMediaServer() {
             token = crypto.randomBytes(18).toString('hex');
             pathTokens.set(normalizedPath, token);
             entries.set(token, normalizedPath);
+            pruneEntries();
+        } else {
+            touchEntry(token, normalizedPath);
         }
         const port = await start();
         return `http://127.0.0.1:${port}/${token}/${encodeURIComponent(path.basename(normalizedPath))}`;

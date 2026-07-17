@@ -8,6 +8,31 @@ const RepeatRoute = Object.freeze({
     NATIVE_FORWARD: 'native-forward'
 });
 
+async function mapWithConcurrency(values, limit, mapper) {
+    const items = Array.from(values || []);
+    if (!items.length) {
+        return [];
+    }
+    const results = new Array(items.length);
+    const workerCount = Math.min(items.length, Math.max(1, Math.trunc(Number(limit)) || 1));
+    let nextIndex = 0;
+    let stopped = false;
+    const runWorker = async () => {
+        while (!stopped && nextIndex < items.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            try {
+                results[index] = await mapper(items[index], index);
+            } catch (error) {
+                stopped = true;
+                throw error;
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: workerCount }, runWorker));
+    return results;
+}
+
 function getElements(record) {
     return Array.isArray(record?.elements) ? record.elements : [];
 }
@@ -120,7 +145,10 @@ function createRepeatMessageHandler({
                 );
             case RepeatRoute.FORWARD_DETAIL_REBUILD: {
                 const preparedRecord = await prepareForwardDetail(browserWindow, record);
-                return await repeatBySend(browserWindow, destinationPeer, preparedRecord, true);
+                return await repeatBySend(browserWindow, destinationPeer, preparedRecord, {
+                    confirm: true,
+                    detached: true
+                });
             }
             case RepeatRoute.NATIVE_FORWARD:
                 return await repeatByNativeForward(browserWindow, sourcePeer, destinationPeer, record);
@@ -136,6 +164,7 @@ module.exports = {
     createRepeatMessageHandler,
     hasVoiceElement,
     isNestedForwardCard,
+    mapWithConcurrency,
     requiresForwardDetailRebuild,
     shouldUseNativeForward
 };

@@ -8,6 +8,7 @@ const test = require('node:test');
 
 const {
     createPttSourceResolver,
+    normalizeWaveAmplitudes,
     sanitizePttInfo
 } = require('../src/voice/ptt-source');
 
@@ -25,6 +26,11 @@ function createCachedPtt(baseDir, month, fileName) {
     return filePath;
 }
 
+test('normalizes bounded PTT waveform values', () => {
+    assert.deepEqual(normalizeWaveAmplitudes([-10, 12.6, 120, 'bad']), [0, 13, 99]);
+    assert.deepEqual(normalizeWaveAmplitudes(null), []);
+});
+
 test('reads only canonical PTT fields', () => {
     const md5 = 'AABBCCDDEEFF00112233445566778899';
     assert.deepEqual(sanitizePttInfo({
@@ -34,6 +40,7 @@ test('reads only canonical PTT fields', () => {
             fileName: 'real.amr',
             md5HexStr: md5,
             duration: 149,
+            waveAmplitudes: new Uint8Array([0, 25, 100]),
             fileUuid: 'uuid',
             fileSubId: 'sub-id',
             fileId: 'file-id'
@@ -48,6 +55,7 @@ test('reads only canonical PTT fields', () => {
         fileName: 'real.amr',
         md5HexStr: md5.toLowerCase(),
         duration: 149,
+        waveAmplitudes: [0, 25, 99],
         fileUuid: 'uuid',
         fileSubId: 'sub-id',
         fileId: 'file-id'

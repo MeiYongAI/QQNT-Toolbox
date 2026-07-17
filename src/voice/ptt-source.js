@@ -19,11 +19,22 @@ function normalizeDurationSeconds(value) {
     return Math.max(1, Math.ceil(duration > 1000 ? duration / 1000 : duration));
 }
 
+function normalizeWaveAmplitudes(value) {
+    if (!Array.isArray(value) && !ArrayBuffer.isView(value)) {
+        return [];
+    }
+    return Array.from(value)
+        .slice(0, 64)
+        .map(item => Math.max(0, Math.min(99, Math.round(Number(item)))))
+        .filter(Number.isFinite);
+}
+
 function sanitizePttInfo(value) {
     const pttElement = value?.pttElement || value;
     if (!pttElement || typeof pttElement !== 'object') {
         return null;
     }
+    const waveAmplitudes = normalizeWaveAmplitudes(pttElement.waveAmplitudes);
     const ptt = {
         filePath: normalizeText(pttElement.filePath),
         sourcePath: normalizeText(pttElement.sourcePath),
@@ -32,7 +43,8 @@ function sanitizePttInfo(value) {
         duration: normalizeDurationSeconds(pttElement.duration),
         fileUuid: normalizeText(pttElement.fileUuid),
         fileSubId: normalizeText(pttElement.fileSubId),
-        fileId: normalizeText(pttElement.fileId)
+        fileId: normalizeText(pttElement.fileId),
+        ...(waveAmplitudes.length ? { waveAmplitudes } : {})
     };
     return ptt.filePath || ptt.sourcePath || ptt.fileName || ptt.md5HexStr ||
         ptt.fileUuid || ptt.fileSubId || ptt.fileId
@@ -191,5 +203,6 @@ module.exports = {
     buildPttFileIndex,
     createPttSourceResolver,
     getPttFileCandidates,
+    normalizeWaveAmplitudes,
     sanitizePttInfo
 };

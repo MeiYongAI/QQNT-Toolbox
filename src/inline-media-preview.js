@@ -49,9 +49,11 @@ function extractInlineMediaItem(media, sourceIndex) {
     if (!filePath || !path.isAbsolute(filePath)) {
         return null;
     }
+    const previewFilePath = type === 'video' ? resolveLocalFilePath(context.sourcePath) : '';
     return {
         type,
         filePath,
+        ...(previewFilePath && path.isAbsolute(previewFilePath) ? { previewFilePath } : {}),
         name: path.basename(filePath),
         sourceIndex,
         identity: {
@@ -89,10 +91,12 @@ function normalizeInlineMediaOpenItem(value) {
     if (!type || !filePath || !path.isAbsolute(filePath)) {
         return null;
     }
+    const previewFilePath = type === 'video' ? resolveLocalFilePath(value?.previewFilePath) : '';
     const identity = value?.identity || {};
     return {
         type,
         filePath,
+        ...(previewFilePath && path.isAbsolute(previewFilePath) ? { previewFilePath } : {}),
         fingerprint: String(value?.fingerprint || '').trim().toLowerCase(),
         name: String(value?.name || '').trim() || path.basename(filePath),
         sourceIndex: Number.isInteger(Number(value?.sourceIndex)) ? Number(value.sourceIndex) : 0,

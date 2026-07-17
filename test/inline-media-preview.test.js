@@ -67,6 +67,7 @@ test('extracts a local video from openMediaViewer', t => {
     }])), {
         type: 'video',
         filePath,
+        previewFilePath: 'C:\\video-cover.png',
         name: 'preview.mp4',
         sourceIndex: 0,
         identity: {
@@ -122,6 +123,7 @@ test('recognizes native image, video, and media viewer windows', () => {
 test('normalizes file-message media for direct inline viewing', () => {
     assert.deepEqual(normalizeInlineMediaOpenItem({
         filePath: 'D:\\cache\\pending.MP4',
+        previewFilePath: 'D:\\cache\\pending-cover.jpg',
         name: 'clip.MP4',
         fingerprint: 'AABB',
         sourceIndex: 2,
@@ -135,6 +137,7 @@ test('normalizes file-message media for direct inline viewing', () => {
     }), {
         type: 'video',
         filePath: 'D:\\cache\\pending.MP4',
+        previewFilePath: 'D:\\cache\\pending-cover.jpg',
         fingerprint: 'aabb',
         name: 'clip.MP4',
         sourceIndex: 2,

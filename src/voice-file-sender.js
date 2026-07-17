@@ -8,7 +8,6 @@ const crypto = require('crypto');
 
 const {
     addNativeRequestHandler,
-    createNativeEventWaiter,
     isNativeFailure,
     qqNativeInvoke,
     unwrapNativeValue
@@ -45,6 +44,7 @@ let voiceSaveInContextMenuEnabled = false;
 let voiceForwardInContextMenuEnabled = false;
 let fakeVoiceDurationSeconds = 0;
 let diagnosticRecorder = null;
+let voiceTempCleanupStarted = false;
 
 function recordDiagnostic(level, event, details = {}) {
     try {
@@ -119,6 +119,32 @@ async function makeTempSilkPath() {
     const tempDir = getPluginTempDir();
     await fs.mkdir(tempDir, { recursive: true });
     return path.join(tempDir, `${crypto.randomUUID()}.silk`);
+}
+
+async function cleanupOldVoiceTempFiles() {
+    if (voiceTempCleanupStarted) {
+        return;
+    }
+    voiceTempCleanupStarted = true;
+    const tempDir = getPluginTempDir();
+    let entries;
+    try {
+        entries = await fs.readdir(tempDir, { withFileTypes: true });
+    } catch {
+        return;
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    await Promise.all(entries
+        .filter(entry => entry.isFile() && entry.name.endsWith('.silk'))
+        .map(async entry => {
+            const filePath = path.join(tempDir, entry.name);
+            try {
+                if ((await fs.stat(filePath)).mtimeMs < cutoff) {
+                    await fs.unlink(filePath);
+                }
+            } catch {
+            }
+        }));
 }
 
 async function getPreviewCacheDir() {
@@ -1106,7 +1132,14 @@ async function createNativePttCacheFile(silkPath) {
     ]);
     const fileName = `${md5}.amr`;
     const filePath = path.join(oriDir, fileName);
-    await fs.copyFile(silkPath, filePath);
+    let destinationSize = -1;
+    try {
+        destinationSize = (await fs.stat(filePath)).size;
+    } catch {
+    }
+    if (normalizeComparablePath(silkPath) !== normalizeComparablePath(filePath) && destinationSize !== stat.size) {
+        await fs.copyFile(silkPath, filePath);
+    }
     pttSourceResolver.remember(filePath);
     const result = {
         fileName,
@@ -1146,7 +1179,7 @@ async function createPttElement(silkPath, durationSeconds, waveAmplitudes) {
     };
 }
 
-async function sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos, attrId) {
+async function sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos) {
     const sendAttempts = [
         {
             name: 'array',
@@ -1169,41 +1202,21 @@ async function sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos
     ];
     let lastResult;
     for (const attempt of sendAttempts) {
-        const sentMsgWaiter = createNativeEventWaiter(browserWindow, {
-            cmdName: 'nodeIKernelMsgListener/onMsgInfoListUpdate',
-            attrId,
-            sendStatus: 2
-        }, 30000);
-        const uploadWaiter = createNativeEventWaiter(browserWindow, {
-            cmdName: 'nodeIKernelMsgListener/onRichMediaUploadComplete',
-            filePath: pttElement?.pttElement?.filePath
-        }, 30000);
-        let result;
-        try {
-            result = await qqNativeInvoke(
-                browserWindow,
-                'ntApi',
-                'nodeIKernelMsgService/sendMsg',
-                attempt.payload,
-                true,
-                15000
-            );
-        } catch (error) {
-            sentMsgWaiter.cancel();
-            uploadWaiter.cancel();
-            throw error;
-        }
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendMsg',
+            attempt.payload,
+            true,
+            15000
+        );
         lastResult = result;
         if (!isNativeFailure(result)) {
-            sentMsgWaiter.promise.catch(() => {});
-            uploadWaiter.promise.catch(() => {});
             return {
                 shape: attempt.name,
                 result
             };
         }
-        sentMsgWaiter.cancel();
-        uploadWaiter.cancel();
     }
     throw new Error(`QQNT rejected sendMsg: ${safeJson(lastResult)}`);
 }
@@ -1251,17 +1264,26 @@ async function sendMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) 
         );
         const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
         const msgAttributeInfos = makeSendAttributeInfos(attrId);
-        return await sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos, attrId);
+        return await sendPttElement(browserWindow, peer, pttElement, msgAttributeInfos);
     } finally {
-        setTimeout(() => {
-            fs.unlink(silkPath).catch(() => {});
-        }, 24 * 60 * 60 * 1000);
+        await fs.unlink(silkPath).catch(() => {});
     }
 }
 
-async function sendSilkPathAsPtt(browserWindow, peer, silkPath, durationSeconds = 0) {
+async function sendSilkPathAsPtt(browserWindow, peer, silkPath, durationSeconds = 0, waveAmplitudes = []) {
     if (!silkPath || !fsSync.existsSync(silkPath)) {
         throw new Error(`Voice file was not found: ${silkPath}`);
+    }
+    if (isSilkFile(silkPath) && Array.isArray(waveAmplitudes) && waveAmplitudes.length) {
+        peer = normalizeSendPeer(browserWindow, peer);
+        const pttElement = await createPttElement(silkPath, durationSeconds, waveAmplitudes);
+        const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
+        return await sendPttElement(
+            browserWindow,
+            peer,
+            pttElement,
+            makeSendAttributeInfos(attrId)
+        );
     }
     return await sendMediaPathAsPtt(browserWindow, peer, silkPath, {
         durationMs: Number(durationSeconds) > 0 ? Number(durationSeconds) * 1000 : undefined
@@ -1294,9 +1316,13 @@ async function sendPttInfoAsPtt(browserWindow, peer, ptt) {
     if (!sourcePath) {
         throw new Error('The voice file was not found in QQNT cache. Play it once, then try again.');
     }
-    return await sendMediaPathAsPtt(browserWindow, peer, sourcePath, {
-        durationMs: Number(ptt?.duration) > 0 ? Number(ptt.duration) * 1000 : undefined
-    });
+    return await sendSilkPathAsPtt(
+        browserWindow,
+        peer,
+        sourcePath,
+        Number(ptt?.duration) || 0,
+        ptt?.waveAmplitudes
+    );
 }
 
 async function refreshInjectedLibrary(browserWindow, message = '', folder = '') {
@@ -1500,6 +1526,7 @@ function setEnabled(enabled) {
         setInjectedEnabled(browserWindow, voiceFeatureEnabled);
     }
     if (voiceFeatureEnabled) {
+        cleanupOldVoiceTempFiles().catch(() => {});
         setTimeout(setupAllWindows, 300);
     }
 }

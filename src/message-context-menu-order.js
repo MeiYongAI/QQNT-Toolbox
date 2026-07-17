@@ -205,9 +205,18 @@ function insertContextMenuConfig(items, item) {
 
 export function composeContextMenuConfigs(nativeItems, toolboxItems, order = [], sortingEnabled = false) {
     const items = Array.isArray(nativeItems) ? [...nativeItems] : [];
+    const itemIds = new Set(items.map(item => describeContextMenuConfig(item)?.id).filter(Boolean));
     for (const item of Array.isArray(toolboxItems) ? toolboxItems : []) {
-        if (item && typeof item === 'object') {
-            insertContextMenuConfig(items, item);
+        if (!item || typeof item !== 'object') {
+            continue;
+        }
+        const itemId = describeContextMenuConfig(item)?.id;
+        if (itemId && itemIds.has(itemId)) {
+            continue;
+        }
+        insertContextMenuConfig(items, item);
+        if (itemId) {
+            itemIds.add(itemId);
         }
     }
     if (!sortingEnabled) {

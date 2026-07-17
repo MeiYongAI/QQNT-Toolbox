@@ -31,6 +31,7 @@ let handleToolboxVueComponentMount = () => {};
         'apng', 'bmp', 'gif', 'jfif', 'jpeg', 'jpg', 'png', 'webp'
     ]);
     const POKE_FALLBACK_MENU_ID = 'qqnt-toolbox-poke-fallback-menu';
+    const REPEAT_FALLBACK_MENU_ID = 'qqnt-toolbox-repeat-fallback-menu';
     const POKE_RECALL_NOTICE = '若对方QQ版本过低，可能无法撤回。';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
     const ACTIVE_REPEAT_PEER_KEY_PREFIX = 'qqnt-toolbox-active-repeat-peer';
@@ -158,7 +159,7 @@ let handleToolboxVueComponentMount = () => {};
     };
     let currentConfig = clonePlain(DEFAULT_CONFIG);
     let configReady = false;
-    let repeatObserver = null;
+    let repeatResizeObserver = null;
     let repeatRefreshTimer = 0;
     let pokeMenuRequestId = 0;
     let messageContextMenuOrderController = null;
@@ -478,6 +479,13 @@ let handleToolboxVueComponentMount = () => {};
     min-width: 0;
     min-height: 0;
 }
+#${INLINE_MEDIA_PREVIEW_ID}.is-pannable .qqnt-toolbox-media-stage {
+    cursor: grab;
+    touch-action: none;
+}
+#${INLINE_MEDIA_PREVIEW_ID}.is-panning .qqnt-toolbox-media-stage {
+    cursor: grabbing;
+}
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage::after {
     position: absolute;
     top: 50%;
@@ -500,9 +508,30 @@ let handleToolboxVueComponentMount = () => {};
     animation: qqnt-toolbox-media-loading .7s linear infinite;
 }
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     color: rgba(255, 255, 255, .82);
     font-size: 13px;
     line-height: 20px;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-retry {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    color: #fff;
+    background: rgba(255, 255, 255, .14);
+    font: 20px/1 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    cursor: pointer;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-retry:hover {
+    background: rgba(255, 255, 255, .24);
 }
 @keyframes qqnt-toolbox-media-loading {
     to { transform: translate(-50%, -50%) rotate(360deg); }
@@ -514,9 +543,13 @@ let handleToolboxVueComponentMount = () => {};
     max-height: 100%;
     object-fit: contain;
     transform-origin: center;
+    will-change: transform;
 }
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > img {
     pointer-events: none;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > .qqnt-toolbox-media-placeholder {
+    opacity: .72;
 }
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
     background: #000;
@@ -951,7 +984,7 @@ let handleToolboxVueComponentMount = () => {};
 .qqnt-toolbox-poke-recall-native-hidden {
     display: none !important;
 }
-#${POKE_FALLBACK_MENU_ID} {
+.qqnt-toolbox-fallback-context-menu {
     position: fixed;
     z-index: 2147483646;
     width: max-content !important;
@@ -967,11 +1000,11 @@ let handleToolboxVueComponentMount = () => {};
     background: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
     box-shadow: var(--shadow-bg-middle-primary, 0 8px 24px rgba(0, 0, 0, .18));
 }
-#${POKE_FALLBACK_MENU_ID} .q-context-menu-item {
+.qqnt-toolbox-fallback-context-menu .q-context-menu-item {
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    gap: 10px;
+    gap: 8px;
     width: auto !important;
     min-width: 0 !important;
     max-width: none !important;
@@ -979,7 +1012,7 @@ let handleToolboxVueComponentMount = () => {};
     min-height: 32px !important;
     max-height: 32px !important;
     margin: 0 !important;
-    padding: 0 10px !important;
+    padding: 0 8px !important;
     box-sizing: border-box;
     border-radius: 4px;
     cursor: default;
@@ -988,10 +1021,10 @@ let handleToolboxVueComponentMount = () => {};
     letter-spacing: 0;
     user-select: none;
 }
-#${POKE_FALLBACK_MENU_ID} .q-context-menu-item:hover {
+.qqnt-toolbox-fallback-context-menu .q-context-menu-item:hover {
     background: var(--overlay_hover, var(--background-hover, rgba(127, 127, 127, .12)));
 }
-#${POKE_FALLBACK_MENU_ID} .q-context-menu-item__icon {
+.qqnt-toolbox-fallback-context-menu .q-context-menu-item__icon {
     display: flex;
     flex: 0 0 16px;
     align-items: center;
@@ -999,7 +1032,7 @@ let handleToolboxVueComponentMount = () => {};
     width: 16px;
     height: 16px;
 }
-#${POKE_FALLBACK_MENU_ID} .q-context-menu-item__text {
+.qqnt-toolbox-fallback-context-menu .q-context-menu-item__text {
     display: block;
     flex: 0 1 auto;
     min-width: 0;
@@ -1065,9 +1098,13 @@ body.qqnt-toolbox-context-repeat .qqnt-toolbox-repeat-slot {
     display: none !important;
 }
 .qqnt-toolbox-repeat-menu-plus-one {
+    display: block !important;
+    width: 16px !important;
+    height: 16px !important;
+    flex: none !important;
+    overflow: visible;
     pointer-events: none !important;
-    transform: scale(.72);
-    transform-origin: center;
+    transform: none !important;
     color: inherit !important;
     --brand_standard: currentColor;
     --brand-primary: currentColor;
@@ -2935,8 +2972,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             .map(item => ({
                 type: item?.type === 'video' ? 'video' : 'image',
                 src: normalizeText(item?.src),
+                previewSrc: normalizeText(item?.previewSrc),
                 name: normalizeText(item?.name),
-                needsResolve: item?.needsResolve === true
+                needsResolve: item?.needsResolve === true,
+                loadRevision: 0
             }))
             .filter(item => item.src || item.needsResolve);
         let index = Math.min(Math.max(Number(payload?.index) || 0, 0), items.length - 1);
@@ -2977,84 +3016,182 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         let mediaScale = 1;
         let mediaOffsetX = 0;
         let mediaOffsetY = 0;
+        let mediaPanState = null;
+        let suppressPreviewCloseUntil = 0;
         let wheelNavigationDelta = 0;
         let wheelNavigationLockedUntil = 0;
         let activeMediaIndex = -1;
         let renderSequence = 0;
+        let preloadTimer = 0;
+        let loadingPlaceholder = null;
         let disposed = false;
         const preparedMedia = new Map();
+        const getMediaPanBounds = () => {
+            if (activeMedia?.tagName !== 'IMG') {
+                return { maxX: 0, maxY: 0, pannable: false };
+            }
+            const scaledWidth = activeMedia.offsetWidth * mediaScale;
+            const scaledHeight = activeMedia.offsetHeight * mediaScale;
+            const maxX = Math.max(0, (scaledWidth - stage.clientWidth) / 2);
+            const maxY = Math.max(0, (scaledHeight - stage.clientHeight) / 2);
+            return { maxX, maxY, pannable: maxX > .5 || maxY > .5 };
+        };
+        const resetMediaPan = () => {
+            if (mediaPanState) {
+                try {
+                    stage.releasePointerCapture(mediaPanState.pointerId);
+                } catch {
+                }
+            }
+            mediaPanState = null;
+            layer.classList.remove('is-panning');
+        };
         const applyMediaTransform = () => {
             if (!activeMedia) {
+                layer.classList.remove('is-pannable');
                 return;
             }
+            const bounds = getMediaPanBounds();
+            mediaOffsetX = Math.max(-bounds.maxX, Math.min(bounds.maxX, mediaOffsetX));
+            mediaOffsetY = Math.max(-bounds.maxY, Math.min(bounds.maxY, mediaOffsetY));
             activeMedia.style.transform =
                 `translate3d(${mediaOffsetX}px, ${mediaOffsetY}px, 0) scale(${mediaScale})`;
+            layer.classList.toggle('is-pannable', bounds.pannable);
+            if (!bounds.pannable) {
+                resetMediaPan();
+            }
         };
+        const handleMediaViewportResize = () => applyMediaTransform();
+        window.addEventListener('resize', handleMediaViewportResize, { passive: true });
         const releaseMedia = media => {
             media?.pause?.();
+            media?.removeAttribute?.('poster');
             media?.removeAttribute?.('src');
             media?.load?.();
         };
-        const loadMedia = async item => {
+        const clearLoadingPlaceholder = () => {
+            const placeholder = loadingPlaceholder;
+            loadingPlaceholder = null;
+            releaseMedia(placeholder);
+            placeholder?.remove?.();
+        };
+        const createAbortError = () => Object.assign(new Error('media load aborted'), { name: 'AbortError' });
+        const isAbortError = error => error?.name === 'AbortError';
+        const getMediaSource = item => {
+            if (!item.loadRevision) {
+                return item.src;
+            }
+            const separator = item.src.includes('?') ? '&' : '?';
+            return `${item.src}${separator}qqnt_toolbox_retry=${item.loadRevision}`;
+        };
+        const loadMedia = async (item, signal) => {
             const isVideo = item.type === 'video';
             const media = document.createElement(isVideo ? 'video' : 'img');
             media.draggable = false;
             if (isVideo) {
                 media.preload = 'metadata';
                 media.playsInline = true;
+                if (item.previewSrc) {
+                    media.poster = item.previewSrc;
+                }
             } else {
                 media.decoding = 'async';
             }
             await new Promise((resolve, reject) => {
                 const readyEvent = isVideo ? 'loadedmetadata' : 'load';
-                const timer = window.setTimeout(handleError, isVideo ? 12000 : 6000);
+                let settled = false;
+                const timer = window.setTimeout(() => finish(new Error('media load timed out')), isVideo ? 12000 : 6000);
                 const cleanup = () => {
                     clearTimeout(timer);
                     media.removeEventListener(readyEvent, handleReady);
                     media.removeEventListener('error', handleError);
+                    signal.removeEventListener('abort', handleAbort);
                 };
-                const handleReady = () => {
+                const finish = error => {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
                     cleanup();
-                    resolve();
+                    if (error) {
+                        releaseMedia(media);
+                        reject(error);
+                    } else {
+                        resolve();
+                    }
+                };
+                const handleReady = async () => {
+                    if (!isVideo) {
+                        await media.decode?.().catch(() => {});
+                    }
+                    finish(signal.aborted ? createAbortError() : null);
                 };
                 function handleError() {
-                    cleanup();
-                    reject(new Error('media load failed'));
+                    finish(new Error('media load failed'));
                 }
+                const handleAbort = () => finish(createAbortError());
                 media.addEventListener(readyEvent, handleReady, { once: true });
                 media.addEventListener('error', handleError, { once: true });
-                media.src = item.src;
+                signal.addEventListener('abort', handleAbort, { once: true });
+                if (signal.aborted) {
+                    handleAbort();
+                    return;
+                }
+                media.src = getMediaSource(item);
                 media.load?.();
-            }).catch(error => {
-                releaseMedia(media);
-                throw error;
             });
-            if (!isVideo) {
-                await media.decode?.().catch(() => {});
-            }
             return media;
         };
-        const createPreparedMedia = async (item, mediaIndex) => {
+        const createPreparedMedia = async (item, mediaIndex, signal) => {
             if (item.src) {
                 try {
-                    return await loadMedia(item);
-                } catch {
+                    return await loadMedia(item, signal);
+                } catch (error) {
+                    if (isAbortError(error)) {
+                        throw error;
+                    }
                 }
             }
-            if (!item.needsResolve || !galleryId || disposed) {
+            if (!item.needsResolve || !galleryId || disposed || signal.aborted) {
+                if (signal.aborted) {
+                    throw createAbortError();
+                }
                 throw new Error('media load failed');
             }
             try {
                 const resolved = await getBridge()?.prepareInlineMedia?.({ galleryId, index: mediaIndex });
+                if (signal.aborted) {
+                    throw createAbortError();
+                }
                 if (resolved?.src) {
                     item.src = normalizeText(resolved.src);
+                    item.previewSrc = normalizeText(resolved.previewSrc) || item.previewSrc;
                     item.name = normalizeText(resolved.name) || item.name;
                     item.needsResolve = false;
-                    return await loadMedia(item);
+                    return await loadMedia(item, signal);
                 }
-            } catch {
+            } catch (error) {
+                if (isAbortError(error)) {
+                    throw error;
+                }
             }
             throw new Error('media load failed');
+        };
+        const disposePreparedEntry = entry => {
+            if (!entry || entry.disposed) {
+                return;
+            }
+            entry.disposed = true;
+            entry.controller.abort();
+            releaseMedia(entry.media);
+        };
+        const dropPreparedMedia = mediaIndex => {
+            const entry = preparedMedia.get(mediaIndex);
+            if (!entry) {
+                return;
+            }
+            preparedMedia.delete(mediaIndex);
+            disposePreparedEntry(entry);
         };
         const prepareMedia = mediaIndex => {
             if (mediaIndex < 0 || mediaIndex >= items.length) {
@@ -3064,8 +3201,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (cached) {
                 return cached.promise;
             }
-            const entry = {};
-            entry.promise = createPreparedMedia(items[mediaIndex], mediaIndex)
+            const entry = {
+                controller: new AbortController(),
+                disposed: false,
+                media: null,
+                promise: null
+            };
+            entry.promise = createPreparedMedia(items[mediaIndex], mediaIndex, entry.controller.signal)
+                .then(media => {
+                    if (entry.disposed) {
+                        releaseMedia(media);
+                        throw createAbortError();
+                    }
+                    entry.media = media;
+                    return media;
+                })
                 .catch(error => {
                     if (preparedMedia.get(mediaIndex) === entry) {
                         preparedMedia.delete(mediaIndex);
@@ -3081,14 +3231,27 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 if (retained.has(mediaIndex)) {
                     continue;
                 }
-                entry.promise.catch(() => {}).then(releaseMedia);
-                preparedMedia.delete(mediaIndex);
+                dropPreparedMedia(mediaIndex);
             }
         };
-        const preloadAdjacentMedia = () => {
-            prepareMedia(index - 1)?.catch(() => {});
-            prepareMedia(index + 1)?.catch(() => {});
-            trimPreparedMedia();
+        const cancelScheduledPreload = () => {
+            if (preloadTimer) {
+                clearTimeout(preloadTimer);
+                preloadTimer = 0;
+            }
+        };
+        const scheduleAdjacentPreload = () => {
+            cancelScheduledPreload();
+            const scheduledIndex = index;
+            preloadTimer = window.setTimeout(() => {
+                preloadTimer = 0;
+                if (disposed || index !== scheduledIndex) {
+                    return;
+                }
+                prepareMedia(index - 1)?.catch(() => {});
+                prepareMedia(index + 1)?.catch(() => {});
+                trimPreparedMedia();
+            }, 140);
         };
         const updateNavigation = () => {
             previous.disabled = index === 0;
@@ -3103,19 +3266,40 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const renderIndex = index;
             const item = items[renderIndex];
             const isVideo = item.type === 'video';
+            cancelScheduledPreload();
             activeMedia?.pause?.();
+            if (activeMedia?.tagName === 'VIDEO' && activeMediaIndex !== renderIndex) {
+                dropPreparedMedia(activeMediaIndex);
+            }
+            resetMediaPan();
             activeMedia = null;
+            clearLoadingPlaceholder();
             stage.replaceChildren();
             mediaScale = 1;
             mediaOffsetX = 0;
             mediaOffsetY = 0;
+            suppressPreviewCloseUntil = 0;
             wheelNavigationDelta = 0;
             stage.classList.add('is-loading');
             stage.setAttribute('aria-busy', 'true');
             layer.setAttribute('aria-label', text(isVideo ? '视频预览' : '图片预览'));
             updateNavigation();
+            if (isVideo && item.previewSrc) {
+                loadingPlaceholder = document.createElement('img');
+                loadingPlaceholder.className = 'qqnt-toolbox-media-placeholder';
+                loadingPlaceholder.alt = '';
+                loadingPlaceholder.decoding = 'async';
+                const placeholder = loadingPlaceholder;
+                placeholder.addEventListener('error', () => {
+                    if (loadingPlaceholder === placeholder) {
+                        clearLoadingPlaceholder();
+                    }
+                }, { once: true });
+                loadingPlaceholder.src = item.previewSrc;
+                stage.append(loadingPlaceholder);
+            }
+            trimPreparedMedia();
             const mediaPromise = prepareMedia(renderIndex);
-            preloadAdjacentMedia();
             let media;
             try {
                 media = await mediaPromise;
@@ -3127,7 +3311,26 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 activeMediaIndex = -1;
                 const error = document.createElement('div');
                 error.className = 'qqnt-toolbox-media-error';
-                error.textContent = text('媒体加载失败');
+                const errorLabel = document.createElement('span');
+                errorLabel.textContent = text('媒体加载失败');
+                const retry = document.createElement('button');
+                retry.type = 'button';
+                retry.className = 'qqnt-toolbox-media-retry qqnt-toolbox-media-control';
+                retry.setAttribute('aria-label', text('重试'));
+                retry.title = text('重试');
+                retry.textContent = '↻';
+                retry.addEventListener('click', event => {
+                    event.preventDefault();
+                    stopEvent(event);
+                    if (disposed || index !== renderIndex) {
+                        return;
+                    }
+                    items[renderIndex].loadRevision += 1;
+                    dropPreparedMedia(renderIndex);
+                    render().catch(() => {});
+                });
+                error.append(errorLabel, retry);
+                clearLoadingPlaceholder();
                 stage.replaceChildren(error);
                 stage.classList.remove('is-loading');
                 stage.removeAttribute('aria-busy');
@@ -3136,6 +3339,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (disposed || sequence !== renderSequence) {
                 return;
             }
+            clearLoadingPlaceholder();
             activeMedia = media;
             activeMediaIndex = renderIndex;
             if (isVideo) {
@@ -3156,15 +3360,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 media.alt = item.name || text('图片');
             }
             stage.replaceChildren(media);
+            applyMediaTransform();
             stage.classList.remove('is-loading');
             stage.removeAttribute('aria-busy');
             trimPreparedMedia();
+            scheduleAdjacentPreload();
         };
         const navigate = delta => {
             const nextIndex = Math.min(Math.max(index + delta, 0), items.length - 1);
             if (nextIndex === index) {
                 return;
             }
+            cancelScheduledPreload();
             index = nextIndex;
             render().catch(() => {});
         };
@@ -3175,16 +3382,72 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         render().catch(() => {});
         layer.qqntToolboxDispose = () => {
             disposed = true;
+            cancelScheduledPreload();
+            resetMediaPan();
+            clearLoadingPlaceholder();
+            window.removeEventListener('resize', handleMediaViewportResize);
             renderSequence += 1;
-            for (const entry of preparedMedia.values()) {
-                entry.promise.catch(() => {}).then(releaseMedia);
+            for (const mediaIndex of Array.from(preparedMedia.keys())) {
+                dropPreparedMedia(mediaIndex);
             }
-            preparedMedia.clear();
+            activeMedia = null;
+            activeMediaIndex = -1;
         };
         const stopEvent = event => {
             event.stopPropagation();
             event.stopImmediatePropagation?.();
         };
+        stage.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || !getMediaPanBounds().pannable) {
+                return;
+            }
+            mediaPanState = {
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                offsetX: mediaOffsetX,
+                offsetY: mediaOffsetY,
+                moved: false
+            };
+            try {
+                stage.setPointerCapture(event.pointerId);
+            } catch {
+            }
+            event.preventDefault();
+            stopEvent(event);
+        });
+        stage.addEventListener('pointermove', event => {
+            if (!mediaPanState || mediaPanState.pointerId !== event.pointerId) {
+                return;
+            }
+            const deltaX = event.clientX - mediaPanState.startX;
+            const deltaY = event.clientY - mediaPanState.startY;
+            if (!mediaPanState.moved && Math.hypot(deltaX, deltaY) < 4) {
+                stopEvent(event);
+                return;
+            }
+            mediaPanState.moved = true;
+            mediaOffsetX = mediaPanState.offsetX + deltaX;
+            mediaOffsetY = mediaPanState.offsetY + deltaY;
+            layer.classList.add('is-panning');
+            applyMediaTransform();
+            event.preventDefault();
+            stopEvent(event);
+        });
+        const finishMediaPan = (event, cancelled = false) => {
+            if (!mediaPanState || mediaPanState.pointerId !== event.pointerId) {
+                return;
+            }
+            const moved = mediaPanState.moved;
+            resetMediaPan();
+            if (moved && !cancelled) {
+                suppressPreviewCloseUntil = performance.now() + 350;
+                event.preventDefault();
+            }
+            stopEvent(event);
+        };
+        stage.addEventListener('pointerup', event => finishMediaPan(event));
+        stage.addEventListener('pointercancel', event => finishMediaPan(event, true));
         for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick']) {
             layer.addEventListener(eventName, stopEvent);
         }
@@ -3236,11 +3499,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }, { passive: false });
         layer.addEventListener('click', event => {
             stopEvent(event);
+            if (performance.now() < suppressPreviewCloseUntil) {
+                event.preventDefault();
+                return;
+            }
             if (performance.now() - inlineMediaPreviewOpenedAt < 320) {
                 event.preventDefault();
                 return;
             }
-            if (event.target instanceof Element && event.target.closest('.qqnt-toolbox-media-nav')) {
+            if (event.target instanceof Element && event.target.closest('.qqnt-toolbox-media-control, .qqnt-toolbox-media-nav')) {
                 event.preventDefault();
                 return;
             }
@@ -4653,7 +4920,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function shouldUseContextRepeat() {
-        return isFeatureEnabled('repeatMessage.enabled') && isFeatureEnabled('repeatMessage.showInContextMenu');
+        return !isSearchChatRecordWindow() &&
+            isFeatureEnabled('repeatMessage.enabled') &&
+            isFeatureEnabled('repeatMessage.showInContextMenu');
     }
 
     function getMessageElementFromElement(element) {
@@ -4667,15 +4936,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         const message = element?.closest?.('.message');
         return message?.closest?.('.message.vue-component') || message || null;
-    }
-
-    function getRepeatTargetFromElement(element) {
-        const messageElement = getMessageElementFromElement(element);
-        const record = findMessageRecordFromElement(messageElement || element);
-        if (!messageElement || !isRepeatableRecord(record)) {
-            return null;
-        }
-        return { messageElement, record };
     }
 
     function getMessageContextTargetFromEvent(event) {
@@ -4706,10 +4966,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function removeRepeatSlot(slot) {
+        const messageElement = getMessageElementFromElement(slot);
         const host = slot.parentElement;
+        window.clearTimeout(Number(slot.dataset.armedTimer || 0));
         slot.remove();
         if (host && !host.querySelector('.qqnt-toolbox-repeat-slot')) {
             host.removeAttribute('data-qqnt-toolbox-repeat-anchor');
+            if (messageElement) {
+                repeatResizeObserver?.unobserve(messageElement);
+            }
         }
     }
 
@@ -4734,9 +4999,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const namespace = 'http://www.w3.org/2000/svg';
         const svg = document.createElementNS(namespace, 'svg');
         for (const [name, value] of Object.entries({
-            width: '23',
-            height: '23',
-            viewBox: '0 0 26 26',
+            width: '16',
+            height: '16',
+            viewBox: '1 1 26 26',
             fill: 'none'
         })) {
             svg.setAttribute(name, value);
@@ -4819,25 +5084,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         host.dataset.qqntToolboxRepeatAnchor = 'true';
     }
 
-    function getRepeatPlusOneFromEvent(event) {
-        const button = event.target?.closest?.('.plus-one-btn');
-        if (!button || button.closest(`#${PANEL_ID}`) || button.closest('.qqnt-toolbox-repeat-menu-item')) {
-            return null;
-        }
-        const target = getRepeatTargetFromElement(button);
-        const record = target?.record || repeatButtonRecords.get(button);
-        if (!isRepeatableRecord(record)) {
-            return null;
-        }
-        return {
-            button,
-            messageElement: target?.messageElement || getMessageElementFromElement(button),
-            record
-        };
+    function getRepeatButtonFromEvent(event) {
+        const button = event.target?.closest?.('.qqnt-toolbox-repeat-slot');
+        return button && !button.closest(`#${PANEL_ID}`) ? button : null;
     }
 
-    function triggerRepeatFromButton(button, fallbackRecord) {
-        const record = findMessageRecordFromElement(button) || repeatButtonRecords.get(button) || fallbackRecord;
+    function triggerRepeatFromButton(button, record) {
         if (!isRepeatableRecord(record)) {
             return;
         }
@@ -4873,11 +5125,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!shouldUseSideRepeat()) {
             return;
         }
-        const target = getRepeatPlusOneFromEvent(event);
-        if (!target) {
+        const button = getRepeatButtonFromEvent(event);
+        if (!button) {
             return;
         }
-        handleRepeatButtonEvent(target.button, target.record, event);
+        if (event.type !== 'pointerdown') {
+            handleRepeatButtonEvent(button, null, event);
+            return;
+        }
+        const record = findMessageRecordFromElement(button) || repeatButtonRecords.get(button);
+        handleRepeatButtonEvent(button, record, event);
     }
 
     function handleRepeatMessagePointerOver(event) {
@@ -4886,9 +5143,27 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         const target = event.target instanceof Element ? event.target : null;
         const messageElement = target && getMessageElementFromElement(target);
+        const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+        if (messageElement?.querySelector('.qqnt-toolbox-repeat-slot') &&
+            getMessageElementFromElement(relatedTarget) === messageElement) {
+            return;
+        }
         const record = messageElement && findMessageRecordFromElement(messageElement);
         if (messageElement && isRepeatableRecord(record)) {
             ensureSideRepeatEntrypoint(messageElement, record);
+        }
+    }
+
+    function handleRepeatMessagePointerOut(event) {
+        const target = event.target instanceof Element ? event.target : null;
+        const messageElement = target && getMessageElementFromElement(target);
+        const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+        if (!messageElement || (relatedTarget && messageElement.contains(relatedTarget))) {
+            return;
+        }
+        const button = messageElement.querySelector('.qqnt-toolbox-repeat-slot');
+        if (button) {
+            removeRepeatSlot(button);
         }
     }
 
@@ -4905,6 +5180,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (existing?.dataset.msgId === msgId) {
             repeatButtonRecords.set(existing, record);
             positionSideRepeatButton(existing, messageElement, record);
+            repeatResizeObserver?.observe(messageElement);
             return;
         }
         if (existing) {
@@ -4917,6 +5193,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const button = createSideRepeatButton(record, nativePlusOne);
         getMessageLayoutHost(messageElement).append(button);
         positionSideRepeatButton(button, messageElement, record);
+        repeatResizeObserver?.observe(messageElement);
     }
 
     function refreshRepeatEntrypoints() {
@@ -4924,22 +5201,28 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         updateRepeatModeClass();
         if (!shouldUseSideRepeat()) {
             removeSideRepeatEntrypoints();
+            repeatResizeObserver?.disconnect();
             return;
         }
-        const visibleMessages = getVisibleMessageElements();
-        const visibleSet = new Set(visibleMessages);
         for (const slot of Array.from(document.querySelectorAll('.qqnt-toolbox-repeat-slot'))) {
             const messageElement = getMessageElementFromElement(slot);
             const record = messageElement ? findMessageRecordFromElement(messageElement) || repeatButtonRecords.get(slot) : null;
-            if (!messageElement || !visibleSet.has(messageElement) || !isRepeatableRecord(record)) {
+            if (!messageElement || !isRepeatableRecord(record)) {
                 removeRepeatSlot(slot);
+                continue;
             }
+            ensureSideRepeatEntrypoint(messageElement, record);
         }
-        for (const messageElement of visibleMessages) {
-            const record = findMessageRecordFromElement(messageElement);
-            if (isRepeatableRecord(record)) {
-                ensureSideRepeatEntrypoint(messageElement, record);
+        const hoveredMessages = new Set();
+        document.querySelectorAll('.message:hover, .ml-item:hover').forEach(element => {
+            const messageElement = getMessageElementFromElement(element);
+            if (messageElement) {
+                hoveredMessages.add(messageElement);
             }
+        });
+        for (const messageElement of hoveredMessages) {
+            const record = findMessageRecordFromElement(messageElement);
+            ensureSideRepeatEntrypoint(messageElement, record);
         }
     }
 
@@ -4955,18 +5238,35 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     function installRepeatEntrypoints() {
         injectStyle();
-        if (repeatObserver || !document.body) {
-            scheduleRepeatEntrypointRefresh();
-            return;
+        if (!repeatResizeObserver && typeof ResizeObserver === 'function') {
+            repeatResizeObserver = new ResizeObserver(entries => {
+                if (!shouldUseSideRepeat()) {
+                    return;
+                }
+                for (const entry of entries) {
+                    const messageElement = entry.target;
+                    if (!messageElement.isConnected) {
+                        repeatResizeObserver.unobserve(messageElement);
+                        continue;
+                    }
+                    const button = messageElement.querySelector?.('.qqnt-toolbox-repeat-slot');
+                    const record = button && (
+                        findMessageRecordFromElement(messageElement) || repeatButtonRecords.get(button)
+                    );
+                    if (button && isRepeatableRecord(record)) {
+                        positionSideRepeatButton(button, messageElement, record);
+                    }
+                }
+            });
         }
-        repeatObserver = new MutationObserver(scheduleRepeatEntrypointRefresh);
-        repeatObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['class']
-        });
         scheduleRepeatEntrypointRefresh();
+    }
+
+    function handleRepeatPeerInteraction(event) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (target && getMessageElementFromElement(target)) {
+            rememberActiveRepeatPeer();
+        }
     }
 
     function compactText(value) {
@@ -4997,7 +5297,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function getVisibleNativeContextMenus() {
         return Array.from(document.querySelectorAll('.q-context-menu, [class*="context-menu"], [role="menu"]'))
             .filter(menu => {
-                if (menu.id === POKE_FALLBACK_MENU_ID) {
+                if (menu.classList.contains('qqnt-toolbox-fallback-context-menu')) {
                     return false;
                 }
                 if (menu.matches('.q-context-menu-item, [class*="context-menu-item"], [role="menuitem"]')) {
@@ -5055,16 +5355,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!icon || icon.querySelector('.qqnt-toolbox-repeat-menu-plus-one')) {
             return;
         }
-        const plusOne = createNativePlusOneButton();
+        const plusOne = createQqPlusOneIcon();
         plusOne.classList.add('qqnt-toolbox-repeat-menu-plus-one');
-        plusOne.removeAttribute('title');
         plusOne.setAttribute('aria-hidden', 'true');
-        plusOne.querySelectorAll('svg [stroke]').forEach(element => {
+        plusOne.querySelectorAll('[stroke]').forEach(element => {
             if (element.getAttribute('stroke') !== 'none') {
                 element.setAttribute('stroke', 'currentColor');
             }
         });
-        plusOne.querySelectorAll('svg [fill]').forEach(element => {
+        plusOne.querySelectorAll('[fill]').forEach(element => {
             if (element.getAttribute('fill') !== 'none') {
                 element.setAttribute('fill', 'currentColor');
             }
@@ -5174,6 +5473,52 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function removeFallbackRepeatMenu() {
+        document.getElementById(REPEAT_FALLBACK_MENU_ID)?.remove();
+    }
+
+    function createRepeatFallbackMenuItem(record) {
+        const config = createRepeatContextMenuConfig(record);
+        const item = document.createElement('div');
+        item.className = 'q-context-menu-item qqnt-toolbox-repeat-menu-item';
+        item.setAttribute('role', 'menuitem');
+        item.setAttribute('tabindex', '-1');
+        const icon = document.createElement('span');
+        icon.className = 'q-context-menu-item__icon';
+        const label = document.createElement('span');
+        label.className = 'q-context-menu-item__text';
+        label.textContent = config.text;
+        item.append(icon, label);
+        setNativeMenuItemRepeatIcon(item);
+        const stop = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        };
+        item.addEventListener('pointerdown', stop, true);
+        item.addEventListener('mousedown', stop, true);
+        item.addEventListener('click', event => {
+            stop(event);
+            removeFallbackRepeatMenu();
+            config.handler();
+        }, true);
+        return item;
+    }
+
+    function showFallbackRepeatMenu(event, record) {
+        removeFallbackRepeatMenu();
+        injectStyle();
+        const menu = document.createElement('div');
+        menu.id = REPEAT_FALLBACK_MENU_ID;
+        menu.className = 'q-context-menu qqnt-toolbox-fallback-context-menu';
+        menu.setAttribute('role', 'menu');
+        menu.append(createRepeatFallbackMenuItem(record));
+        document.body?.append(menu);
+        const rect = menu.getBoundingClientRect();
+        menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8))}px`;
+        menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8))}px`;
+    }
+
     function removeFallbackPokeMenu() {
         nativeMenuSuppressionObserver?.disconnect();
         nativeMenuSuppressionObserver = null;
@@ -5210,7 +5555,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         injectStyle();
         const menu = document.createElement('div');
         menu.id = POKE_FALLBACK_MENU_ID;
-        menu.className = 'q-context-menu';
+        menu.className = 'q-context-menu qqnt-toolbox-fallback-context-menu';
         menu.setAttribute('role', 'menu');
         menu.append(createPokeMenuItem(menu, payload, avatar));
         document.body?.append(menu);
@@ -5372,8 +5717,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         setTimeout(run, 140);
     }
 
-    function getToolboxMessageContextMenuItems({ originalContext }) {
-        const record = originalContext?.msgRecord;
+    function getToolboxMessageContextMenuItems({ originalContext, sourceEvent }) {
+        const messageElement = getMessageContextTargetFromEvent(sourceEvent);
+        const record = isMsgRecord(originalContext?.msgRecord)
+            ? originalContext.msgRecord
+            : messageElement && findMessageRecordFromElement(messageElement);
         if (!isMsgRecord(record)) {
             return [];
         }
@@ -5513,10 +5861,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     installMessageContextMenuActions();
 
+    document.addEventListener('pointerdown', handleRepeatPeerInteraction, true);
     document.addEventListener('pointerdown', handleRepeatPlusOneEvent, true);
     document.addEventListener('mousedown', handleRepeatPlusOneEvent, true);
     document.addEventListener('click', handleRepeatPlusOneEvent, true);
     document.addEventListener('pointerover', handleRepeatMessagePointerOver, true);
+    document.addEventListener('pointerout', handleRepeatMessagePointerOut, true);
     document.addEventListener('mouseup', handleSideBackMouseUp, true);
     document.addEventListener('dragstart', handleRecentContactDragStart, true);
     document.addEventListener('pointerdown', handlePreventMessageDragPointerDown, true);
@@ -5542,6 +5892,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('contextmenu', event => {
         const pokeRequestId = ++pokeMenuRequestId;
         removeFallbackPokeMenu();
+        removeFallbackRepeatMenu();
         document.querySelectorAll('.qqnt-toolbox-poke-menu-item').forEach(item => item.remove());
         const avatar = getPokeAvatarFromEvent(event);
         const messageTarget = avatar ? null : getMessageContextTargetFromEvent(event);
@@ -5552,6 +5903,14 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             ? getPokeRecordOwnership(pokeRecord)
             : 'not-poke';
         const menuPrepared = getMessageContextMenuOrderController().handleContextMenu(event, messageTarget);
+        if (messageTarget && shouldUseContextRepeat() && isForwardRecordWindow() &&
+            Array.isArray(directRecord?.elements) &&
+            directRecord.elements.some(element => Number(element?.elementType) === 16)) {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+            showFallbackRepeatMenu(event, directRecord);
+        }
         recordRendererDiagnostic('context-menu.opened', {
             contextKind: avatar ? 'avatar' : messageTarget ? 'message' : 'other',
             elementTypes: Array.isArray(contextRecord?.elements)
@@ -5594,10 +5953,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (menu && !menu.contains(event.target)) {
             removeFallbackPokeMenu();
         }
+        const repeatMenu = document.getElementById(REPEAT_FALLBACK_MENU_ID);
+        if (repeatMenu && !repeatMenu.contains(event.target)) {
+            removeFallbackRepeatMenu();
+        }
     }, true);
 
     document.addEventListener('wheel', event => {
-        if (!document.getElementById(POKE_FALLBACK_MENU_ID)) {
+        if (!document.getElementById(POKE_FALLBACK_MENU_ID) &&
+            !document.getElementById(REPEAT_FALLBACK_MENU_ID)) {
             return;
         }
         event.preventDefault();
@@ -5608,6 +5972,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             removeFallbackPokeMenu();
+            removeFallbackRepeatMenu();
             restorePokeRecallMenu();
         }
     }, true);
@@ -5624,7 +5989,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         scheduleRepeatEntrypointRefresh();
     });
 
-    window.addEventListener('scroll', scheduleRepeatEntrypointRefresh, true);
+    window.addEventListener('hashchange', scheduleRepeatEntrypointRefresh);
     window.addEventListener('focus', rememberActiveRepeatPeer);
 
     loadConfig().then(subscribeConfig).catch(() => {});

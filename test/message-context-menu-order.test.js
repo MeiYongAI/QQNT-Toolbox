@@ -167,6 +167,17 @@ test('composes native and Toolbox configs before rendering', async () => {
     });
 });
 
+test('does not append the same Toolbox config twice', async () => {
+    const { composeContextMenuConfigs } = await modulePromise;
+    const repeat = {
+        type: 990101,
+        text: 'repeat',
+        __qqntToolboxDescriptor: { id: 'toolbox:repeat', label: 'repeat', toolbox: true }
+    };
+
+    assert.deepEqual(composeContextMenuConfigs([repeat], [repeat]), [repeat]);
+});
+
 test('patches the QQ menu provider once and keeps custom handlers native', async () => {
     const { createMessageContextMenuOrderController } = await modulePromise;
     let handledRecord = null;

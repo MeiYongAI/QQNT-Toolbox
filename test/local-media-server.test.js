@@ -50,3 +50,25 @@ test('serves images with a browser-decodable content type and cache policy', asy
     assert.equal(response.headers.get('cache-control'), 'private, max-age=300');
     assert.equal(await response.text(), 'image');
 });
+
+test('evicts the least recently used media URL from its bounded registry', async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-toolbox-media-'));
+    const paths = ['first.png', 'second.png', 'third.png'].map(name => {
+        const filePath = path.join(directory, name);
+        fs.writeFileSync(filePath, name);
+        return filePath;
+    });
+    const server = createLocalMediaServer({ maxEntries: 2 });
+    t.after(() => {
+        server.close();
+        fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const firstUrl = await server.getUrl(paths[0]);
+    const secondUrl = await server.getUrl(paths[1]);
+    assert.equal((await fetch(firstUrl)).status, 200);
+    await server.getUrl(paths[2]);
+
+    assert.equal((await fetch(firstUrl)).status, 200);
+    assert.equal((await fetch(secondUrl)).status, 404);
+});

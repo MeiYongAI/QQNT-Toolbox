@@ -13,7 +13,10 @@ const { ZipWriter } = require('@zip.js/zip.js');
 const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
-const { createRepeatMessageHandler } = require('./repeat-message');
+const {
+    createRepeatMessageHandler,
+    mapWithConcurrency
+} = require('./repeat-message');
 const { loadReactionEmojiCatalog, normalizeReactionRequest } = require('./reaction-catalog');
 const { getTencentFilesRoots } = require('./qq-data-root');
 const {
@@ -85,6 +88,7 @@ const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
 const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
 const SET_MESSAGE_REACTION_COMMAND = 'nodeIKernelMsgService/setMsgEmojiLikes';
 const MEDIA_PREVIEW_DOWNLOAD_WAIT_MS = 30 * 1000;
+const FORWARD_RESOURCE_DOWNLOAD_TIMEOUT_MS = 60 * 1000;
 const MAX_INLINE_MEDIA_PEERS = 40;
 const MAX_INLINE_MEDIA_PER_PEER = 500;
 const NUDGE_SEND_COMMAND = 'nodeIKernelMsgService/sendNudge';
@@ -1381,9 +1385,13 @@ async function showInlineMediaPreview(browserWindow, gallery) {
     state.inlineMediaDownloads.clear();
     const previewItems = await Promise.all(items.map(async item => {
         const localPath = getExistingFilePath([item.filePath]);
+        const previewPath = item.type === 'video'
+            ? getExistingFilePath([item.previewFilePath])
+            : '';
         return {
             type: item.type,
             src: localPath ? await inlineMediaServer.getUrl(localPath) : '',
+            previewSrc: previewPath ? await inlineMediaServer.getUrl(previewPath) : '',
             name: item.name,
             needsResolve: !localPath && Boolean(createInlineMediaDownloadRequest(item))
         };
@@ -1396,13 +1404,13 @@ async function showInlineMediaPreview(browserWindow, gallery) {
     });
 }
 
-async function downloadInlineMediaFile(browserWindow, item) {
+async function downloadInlineMediaFile(browserWindow, item, shouldContinue = () => true) {
     const existingPath = getExistingFilePath([item?.filePath]);
     if (existingPath) {
         return existingPath;
     }
     const payload = createInlineMediaDownloadPayload(item);
-    if (!payload) {
+    if (!payload || !shouldContinue()) {
         return '';
     }
     const request = payload[0].getReq;
@@ -1419,6 +1427,9 @@ async function downloadInlineMediaFile(browserWindow, item) {
     }
     const deadline = Date.now() + MEDIA_PREVIEW_DOWNLOAD_WAIT_MS;
     while (Date.now() < deadline) {
+        if (!shouldContinue()) {
+            return '';
+        }
         const filePath = getExistingFilePath([request.filePath]);
         if (filePath) {
             item.filePath = filePath;
@@ -1444,7 +1455,11 @@ async function prepareInlineMedia(browserWindow, payload) {
     const key = `${gallery.id}:${index}`;
     let pending = state.inlineMediaDownloads.get(key);
     if (!pending) {
-        pending = downloadInlineMediaFile(browserWindow, item)
+        pending = downloadInlineMediaFile(
+            browserWindow,
+            item,
+            () => state.inlineMediaGallery?.id === gallery.id
+        )
             .finally(() => state.inlineMediaDownloads.delete(key));
         state.inlineMediaDownloads.set(key, pending);
     }
@@ -2938,6 +2953,20 @@ function getExistingFilePath(candidates) {
     return '';
 }
 
+async function getExistingFilePathAsync(candidates) {
+    for (const candidate of candidates) {
+        const filePath = normalizePathText(candidate);
+        try {
+            const stat = filePath ? await fs.stat(filePath) : null;
+            if (stat?.isFile() && stat.size > 0) {
+                return filePath;
+            }
+        } catch {
+        }
+    }
+    return '';
+}
+
 function getAbsoluteFilePathCandidate(candidates) {
     for (const candidate of candidates) {
         const filePath = normalizePathText(candidate);
@@ -3016,9 +3045,15 @@ function createInlineMediaItem(record, element, elementIndex) {
     if (!type || !filePath) {
         return null;
     }
+    const previewFilePath = type === 'video' ? getAbsoluteFilePathCandidate([
+        media.coverPath,
+        ...getThumbPathCandidates(media.thumbPath),
+        ...getThumbPathCandidates(media.picThumbPath)
+    ]) : '';
     return {
         type,
         filePath,
+        ...(previewFilePath ? { previewFilePath } : {}),
         fingerprint: normalizeText(
             media.md5HexStr || media.originImageMd5 || media.videoMd5 || media.fileMd5
         ).toLowerCase(),
@@ -3652,13 +3687,14 @@ async function copyMediaToQqCache(browserWindow, filePath, elementType, preferre
     return { fileName, filePath: cachePath, md5 };
 }
 
-async function createBlurredVideoThumbnail(filePath, originalThumbPath = '', options = {}) {
+async function createVideoThumbnail(filePath, originalThumbPath = '', options = {}) {
     const repairDir = await ensureRepairDir();
     const stem = safeFileStem(path.basename(filePath, path.extname(filePath)));
     const extension = options.extension === '.jpg' ? '.jpg' : '.png';
+    const blur = options.blur !== false;
     const outPath = path.join(
         repairDir,
-        `${stem}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.thumb.blur${extension}`
+        `${stem}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.thumb${blur ? '.blur' : ''}${extension}`
     );
     const hasOriginalThumb = Boolean(originalThumbPath && fsSync.existsSync(originalThumbPath));
     const inputPath = hasOriginalThumb ? originalThumbPath : filePath;
@@ -3674,13 +3710,19 @@ async function createBlurredVideoThumbnail(filePath, originalThumbPath = '', opt
         ffmpegArgs.push(
             '-i', inputPath,
             '-map', '0:v:0',
-            '-frames:v', '1',
-            '-vf', options.maxWidth
-                ? `scale=w='min(${Number(options.maxWidth)},iw)':h=-2,gblur=sigma=18`
-                : 'gblur=sigma=18',
-            '-update', '1',
-            '-an'
+            '-frames:v', '1'
         );
+        const filters = [];
+        if (options.maxWidth) {
+            filters.push(`scale=w='min(${Number(options.maxWidth)},iw)':h=-2`);
+        }
+        if (blur) {
+            filters.push('gblur=sigma=18');
+        }
+        if (filters.length) {
+            ffmpegArgs.push('-vf', filters.join(','));
+        }
+        ffmpegArgs.push('-update', '1', '-an');
         if (extension === '.jpg') {
             ffmpegArgs.push('-q:v', '4');
         }
@@ -3726,15 +3768,17 @@ async function cacheGeneratedVideoThumbnail(videoCachePath, videoMd5, thumbFileP
     return cachePath;
 }
 
-async function createVideoElement(browserWindow, filePath, originalVideoElement = {}, mediaInfo = null) {
+async function createVideoElement(browserWindow, filePath, originalVideoElement = {}, mediaInfo = null, options = {}) {
     const info = mediaInfo || await probeMediaInfo(filePath);
     if (!info.width || !info.height) {
         throw new Error('Video stream dimensions are unavailable.');
     }
     const originalThumbPath = getThumbPathCandidate(originalVideoElement.thumbPath);
-    const blurredThumbPath = await createBlurredVideoThumbnail(filePath, originalThumbPath);
+    const generatedThumbPath = await createVideoThumbnail(filePath, originalThumbPath, {
+        blur: options.blurThumbnail !== false
+    });
     const cached = await copyMediaToQqCache(browserWindow, filePath, 5, originalVideoElement.fileName);
-    const thumbFilePath = await cacheGeneratedVideoThumbnail(cached.filePath, cached.md5, blurredThumbPath);
+    const thumbFilePath = await cacheGeneratedVideoThumbnail(cached.filePath, cached.md5, generatedThumbPath);
     const [fileSize, thumbStat, thumbMd5] = await Promise.all([
         fs.stat(filePath),
         fs.stat(thumbFilePath),
@@ -3774,7 +3818,7 @@ async function createFileElement(filePath, fileName, originalFileElement = {}, v
     if (videoInfo) {
         const thumbSize = getThumbSizeCandidate(originalFileElement.picThumbPath);
         const originalThumbPath = getThumbPathCandidate(originalFileElement.picThumbPath);
-        const thumbPath = await createBlurredVideoThumbnail(filePath, originalThumbPath, {
+        const thumbPath = await createVideoThumbnail(filePath, originalThumbPath, {
             extension: '.jpg',
             maxWidth: thumbSize
         });
@@ -4010,13 +4054,9 @@ async function getRepeatSourceRecord(browserWindow, peer, msgId) {
     return record;
 }
 
-async function downloadForwardDetailResource(remoteUrl, fileName, fallbackExtension) {
+async function downloadForwardDetailResource(browserWindow, remoteUrl, fileName, fallbackExtension) {
     if (!remoteUrl) {
         throw new Error('The forwarded resource has no download URL.');
-    }
-    const response = await fetch(remoteUrl);
-    if (!response.ok || !response.body) {
-        throw new Error(`Forwarded resource download failed: HTTP ${response.status}.`);
     }
     const baseName = path.basename(normalizeText(fileName)) || `forward-resource${fallbackExtension}`;
     const extension = path.extname(baseName) || fallbackExtension;
@@ -4026,30 +4066,54 @@ async function downloadForwardDetailResource(remoteUrl, fileName, fallbackExtens
         repairDir,
         `${stem}.forward.${Date.now()}.${crypto.randomBytes(4).toString('hex')}${extension}`
     );
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FORWARD_RESOURCE_DOWNLOAD_TIMEOUT_MS);
+    const handleWindowClosed = () => controller.abort();
+    timeout.unref?.();
+    browserWindow?.once?.('closed', handleWindowClosed);
     try {
+        const response = await fetch(remoteUrl, { signal: controller.signal });
+        if (!response.ok || !response.body) {
+            throw new Error(`Forwarded resource download failed: HTTP ${response.status}.`);
+        }
         await pipeline(Readable.fromWeb(response.body), fsSync.createWriteStream(targetPath));
+        const stat = await fs.stat(targetPath);
+        if (!stat.isFile() || stat.size <= 0) {
+            throw new Error('Forwarded resource download returned an empty file.');
+        }
+        cleanupOldRepairFiles().catch(() => {});
+        return targetPath;
     } catch (error) {
         await fs.rm(targetPath, { force: true }).catch(() => {});
+        if (controller.signal.aborted) {
+            throw new Error('Forwarded resource download was cancelled or timed out.');
+        }
         throw error;
+    } finally {
+        clearTimeout(timeout);
+        browserWindow?.removeListener?.('closed', handleWindowClosed);
     }
-    return targetPath;
 }
 
-async function downloadForwardDetailImage(picElement) {
+async function downloadForwardDetailImage(browserWindow, picElement) {
     const remoteUrl = getViewerRemoteUrl(picElement?.originImageUrl, picElement?.thumbPath);
     const nameExtension = path.extname(normalizeText(picElement?.fileName)).toLowerCase();
     const fallbackExtension = IMAGE_EXTENSIONS.has(nameExtension) ? nameExtension : '.png';
     return await downloadForwardDetailResource(
+        browserWindow,
         remoteUrl,
         normalizeText(picElement?.fileName) || `forward-image${fallbackExtension}`,
         fallbackExtension
     );
 }
 
-async function waitForForwardDetailFile(candidates, timeoutMs = 60000) {
+async function waitForForwardDetailFile(candidates, browserWindow, timeoutMs = 60000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-        const filePath = getExistingFilePath(candidates);
+        if (browserWindow?.isDestroyed?.() || browserWindow?.webContents?.isDestroyed?.()) {
+            return '';
+        }
+        const filePath = await getExistingFilePathAsync(candidates);
         if (filePath) {
             return filePath;
         }
@@ -4058,8 +4122,25 @@ async function waitForForwardDetailFile(candidates, timeoutMs = 60000) {
     return '';
 }
 
-async function downloadForwardDetailFile(browserWindow, record, element) {
-    const fileElement = element?.fileElement || element;
+function getForwardDetailMediaPathCandidates(media) {
+    return [
+        media?.filePath,
+        media?.sourcePath,
+        media?.originPath,
+        media?.localPath,
+        media?.path
+    ];
+}
+
+async function downloadForwardDetailMedia(
+    browserWindow,
+    record,
+    element,
+    media,
+    fallbackName,
+    fallbackExtension
+) {
+    const pathCandidates = getForwardDetailMediaPathCandidates(media);
     const result = await qqNativeInvoke(
         browserWindow,
         'ntApi',
@@ -4082,55 +4163,96 @@ async function downloadForwardDetailFile(browserWindow, record, element) {
         60000
     );
     if (isRepeatCommandFailure(result)) {
-        throw new Error(`forwarded file download failed: ${safeJson(result)}`);
+        throw new Error(`forwarded media download failed: ${safeJson(result)}`);
     }
-    const localPath = getViewerFileUrl(result, fileElement?.filePath);
+    const localPath = getViewerFileUrl(result, ...pathCandidates);
     if (localPath) {
         return fileURLToPath(localPath);
     }
-    const remoteUrl = getViewerRemoteUrl(result);
+    const remoteUrl = getViewerRemoteUrl(result, media);
     if (remoteUrl) {
         return await downloadForwardDetailResource(
+            browserWindow,
             remoteUrl,
-            normalizeText(fileElement?.fileName) || 'forward-file.bin',
-            '.bin'
+            normalizeText(media?.fileName) || fallbackName,
+            fallbackExtension
         );
     }
-    const downloadedPath = await waitForForwardDetailFile([fileElement?.filePath]);
+    const downloadedPath = await waitForForwardDetailFile(pathCandidates, browserWindow);
     if (!downloadedPath) {
-        throw new Error('QQ did not return a downloaded path for the forwarded file.');
+        throw new Error('QQ did not return a downloaded path for the forwarded media.');
     }
     return downloadedPath;
 }
 
-async function prepareForwardDetailRecord(browserWindow, record = {}) {
-    const elements = [];
-    for (const element of Array.isArray(record.elements) ? record.elements : []) {
-        if (Number(element?.elementType) === 2 || element?.picElement) {
-            const picElement = element.picElement || element;
-            const localPath = getPicSourcePath(picElement) || await downloadForwardDetailImage(picElement);
-            const rebuilt = await createPicElement(browserWindow, localPath, picElement, {
-                allowOriginalHash: true
-            });
-            rebuilt.elementGroupId = Number(element?.elementGroupId) || 0;
-            elements.push(rebuilt);
-            continue;
-        }
-        if (Number(element?.elementType) === 3 || element?.fileElement) {
-            const fileElement = element.fileElement || element;
-            const localPath = getFileSourcePath(fileElement) ||
-                await downloadForwardDetailFile(browserWindow, record, element);
-            const rebuilt = await createFileElement(
-                localPath,
-                normalizeText(fileElement?.fileName) || path.basename(localPath),
-                fileElement
-            );
-            rebuilt.elementGroupId = Number(element?.elementGroupId) || 0;
-            elements.push(rebuilt);
-            continue;
-        }
-        elements.push(element);
+async function downloadForwardDetailFile(browserWindow, record, element) {
+    const fileElement = element?.fileElement || element;
+    return await downloadForwardDetailMedia(
+        browserWindow,
+        record,
+        element,
+        fileElement,
+        'forward-file.bin',
+        '.bin'
+    );
+}
+
+async function downloadForwardDetailVideo(browserWindow, record, element) {
+    const videoElement = element?.videoElement || element;
+    const pendingPath = getPendingVideoPath(videoElement);
+    const fileName = normalizeText(videoElement?.fileName) || path.basename(pendingPath) || 'forward-video.mp4';
+    const extension = path.extname(fileName).toLowerCase();
+    const fallbackExtension = VIDEO_EXTENSIONS.has(extension) ? extension : '.mp4';
+    return await downloadForwardDetailMedia(
+        browserWindow,
+        record,
+        element,
+        videoElement,
+        `forward-video${fallbackExtension}`,
+        fallbackExtension
+    );
+}
+
+async function prepareForwardDetailElement(browserWindow, record, element) {
+    const elementType = Number(element?.elementType);
+    let rebuilt;
+    if (elementType === 2 || element?.picElement) {
+        const picElement = element.picElement || element;
+        const localPath = getPicSourcePath(picElement) ||
+            await downloadForwardDetailImage(browserWindow, picElement);
+        rebuilt = await createPicElement(browserWindow, localPath, picElement, {
+            allowOriginalHash: true
+        });
+    } else if (elementType === 3 || element?.fileElement) {
+        const fileElement = element.fileElement || element;
+        const localPath = getFileSourcePath(fileElement) ||
+            await downloadForwardDetailFile(browserWindow, record, element);
+        rebuilt = await createFileElement(
+            localPath,
+            normalizeText(fileElement?.fileName) || path.basename(localPath),
+            fileElement
+        );
+    } else if (elementType === 5 || element?.videoElement) {
+        const videoElement = element.videoElement || element;
+        const localPath = getVideoSourcePath(videoElement) ||
+            await downloadForwardDetailVideo(browserWindow, record, element);
+        rebuilt = await createVideoElement(browserWindow, localPath, videoElement, null, {
+            blurThumbnail: false
+        });
+    } else {
+        return element;
     }
+    rebuilt.elementGroupId = Number(element?.elementGroupId) || 0;
+    return rebuilt;
+}
+
+async function prepareForwardDetailRecord(browserWindow, record = {}) {
+    const sourceElements = Array.isArray(record.elements) ? record.elements : [];
+    const elements = await mapWithConcurrency(
+        sourceElements,
+        2,
+        element => prepareForwardDetailElement(browserWindow, record, element)
+    );
     return { ...record, elements };
 }
 
@@ -4169,8 +4291,12 @@ function cancelRepeatFinalWaiters(waiters) {
     waiters?.failure.cancel();
 }
 
-async function repeatBySendMsg(browserWindow, peer, record = {}, confirm = false) {
-    const msgElements = deepCloneForSend(record.elements || []);
+async function repeatBySendMsg(browserWindow, peer, record = {}, options = {}) {
+    const confirm = options.confirm === true;
+    const sourceElements = Array.isArray(record.elements) ? record.elements : [];
+    const msgElements = options.detached === true
+        ? sourceElements.map(element => element && typeof element === 'object' ? { ...element } : element)
+        : deepCloneForSend(sourceElements);
     if (!Array.isArray(msgElements) || !msgElements.length) {
         throw new Error('The source message has no repeatable elements.');
     }
@@ -4219,14 +4345,13 @@ async function repeatNestedForwardCard(browserWindow, destinationPeer, record, f
     if (typeof service?.forwardSubMsgWithComment !== 'function') {
         throw new Error('QQ does not expose forwardSubMsgWithComment.');
     }
-    const attrId = await generateMsgUniqueId(browserWindow, destinationPeer.chatType);
     const result = await service.forwardSubMsgWithComment(
         [rootMsgId],
         [subMsgId],
         rootPeer,
         [destinationPeer],
         [],
-        makeSendAttributeInfos(attrId)
+        new Map()
     );
     if (isRepeatCommandFailure(result)) {
         throw new Error(`forwardSubMsgWithComment failed: ${safeJson(result)}`);
