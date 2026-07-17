@@ -3,6 +3,7 @@ import {
     createMessageContextMenuOrderController,
     getContextMenuItemElements
 } from './message-context-menu-order.js';
+import { matchesControlLabelValue } from './control-label-match.js';
 import { createReactionLimitController } from './reaction-limit.js';
 
 let initializeToolboxSettings = async () => {};
@@ -191,6 +192,7 @@ let handleToolboxVueComponentMount = () => {};
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
     let simplifyConfigSaveTimer = 0;
+    let labeledHiddenElements = new Set();
     let activeShortcutCapture = null;
     let rendererReadyDiagnosticSent = false;
     let currentUpdateState = {
@@ -2375,15 +2377,19 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function elementMatchesAnyLabel(element, labels) {
-        const normalizedLabels = labels.map(label => compactText(label));
-        const values = [
+        const normalizedLabels = labels.map(label => compactText(label)).filter(Boolean);
+        const attributeValues = [
             element.getAttribute?.('aria-label'),
             element.getAttribute?.('title'),
             element.getAttribute?.('data-title'),
-            element.getAttribute?.('data-text'),
-            element.textContent
+            element.getAttribute?.('data-text')
         ].map(compactText).filter(Boolean);
-        return values.some(value => normalizedLabels.some(label => value === label || value.includes(label)));
+        if (attributeValues.some(value =>
+            normalizedLabels.some(label => matchesControlLabelValue(value, label)))) {
+            return true;
+        }
+        const textContent = compactText(element.textContent);
+        return normalizedLabels.some(label => textContent === label);
     }
 
     function getLabeledControlTarget(element) {
@@ -2398,12 +2404,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return contextItem || element.closest?.('button') || element;
     }
 
-    function setLabeledControlsHidden(labels, hidden) {
-        for (const root of getConfigRoots()) {
-            root.querySelectorAll('[data-qqnt-toolbox-hidden="true"]')
-                .forEach(element => setToolboxHidden(element, false));
-        }
-
+    function collectLabeledControlTargets(labels) {
         const selector = [
             '.func-menu__item_wrap',
             '.q-context-menu-item',
@@ -2415,17 +2416,47 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         ].join(',');
         const targets = new Set();
         document.querySelectorAll(selector).forEach(element => {
-            if (element.closest(`#${PANEL_ID}, #${SETTINGS_ID}`)) {
+            if (element.closest([
+                `#${PANEL_ID}`,
+                `#${SETTINGS_ID}`,
+                '.recent-contact',
+                '.recent-contact-list--wrapper',
+                '.aio',
+                '.chat-msg-area',
+                '.chat-record-list',
+                '.msg-record-container',
+                '.record-msg-panel'
+            ].join(','))) {
                 return;
             }
             if (elementMatchesAnyLabel(element, labels)) {
                 targets.add(getLabeledControlTarget(element));
             }
         });
-        const deepestTargets = Array.from(targets).filter(target =>
+        return new Set(Array.from(targets).filter(target =>
             !Array.from(targets).some(other => other !== target && target.contains(other))
-        );
-        deepestTargets.forEach(element => setToolboxHidden(element, hidden));
+        ));
+    }
+
+    function applyLabeledControlVisibility(rules) {
+        const nextHiddenElements = new Set();
+        for (const rule of rules) {
+            if (!rule.hidden) {
+                continue;
+            }
+            for (const element of collectLabeledControlTargets(rule.labels)) {
+                nextHiddenElements.add(element);
+            }
+        }
+        for (const element of labeledHiddenElements) {
+            if (!nextHiddenElements.has(element)) {
+                setToolboxHidden(element, false);
+            }
+        }
+        for (const element of nextHiddenElements) {
+            setToolboxHidden(element, true);
+        }
+        labeledHiddenElements = nextHiddenElements;
     }
 
     function normalizeSimplifyItemName(value) {
@@ -2753,10 +2784,24 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
         setSelectorHidden('.weather-widget', isConfigEnabled('interfaceTweaks.hiddenWeatherBtn'));
         setSelectorHidden('.window-control-area .narrow-toggler', isConfigEnabled('interfaceTweaks.hiddenClassicBtn'));
-        setLabeledControlsHidden([text('\u5e2e\u52a9')], isConfigEnabled('interfaceTweaks.hiddenHelpBtn'));
-        setLabeledControlsHidden([text('\u9501\u5b9a')], isConfigEnabled('interfaceTweaks.hiddenLockBtn'));
-        setLabeledControlsHidden([text('\u9000\u51fa\u8d26\u53f7'), text('\u9000\u51fa\u767b\u5f55')], isConfigEnabled('interfaceTweaks.hiddenLogoutBtn'));
-        setLabeledControlsHidden([text('\u68c0\u67e5\u66f4\u65b0'), text('\u66f4\u65b0\u901a\u77e5')], isConfigEnabled('interfaceTweaks.hiddenUpdateBtnAndNotice'));
+        applyLabeledControlVisibility([
+            {
+                labels: [text('\u5e2e\u52a9')],
+                hidden: isConfigEnabled('interfaceTweaks.hiddenHelpBtn')
+            },
+            {
+                labels: [text('\u9501\u5b9a')],
+                hidden: isConfigEnabled('interfaceTweaks.hiddenLockBtn')
+            },
+            {
+                labels: [text('\u9000\u51fa\u8d26\u53f7'), text('\u9000\u51fa\u767b\u5f55')],
+                hidden: isConfigEnabled('interfaceTweaks.hiddenLogoutBtn')
+            },
+            {
+                labels: [text('\u68c0\u67e5\u66f4\u65b0'), text('\u66f4\u65b0\u901a\u77e5')],
+                hidden: isConfigEnabled('interfaceTweaks.hiddenUpdateBtnAndNotice')
+            }
+        ]);
 
         const controlWidth = document.querySelector('.window-control-area')?.offsetWidth;
         if (controlWidth) {

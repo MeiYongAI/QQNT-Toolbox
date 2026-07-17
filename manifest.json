@@ -4,7 +4,7 @@
   "name": "QQNT Toolbox",
   "slug": "qqnt_toolbox",
   "description": "LiteLoaderQQNT 工具箱，包含文件发送修复、消息复读、语音库、阻止撤回、表情回应、戳戳和界面调整。",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "authors": [
     {
       "name": "MeiYongAI",
