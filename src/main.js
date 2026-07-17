@@ -1,6 +1,7 @@
 const { app, BrowserWindow, clipboard, ipcMain, nativeImage, shell } = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { Readable, Writable } = require('stream');
@@ -29,6 +30,7 @@ const {
 } = require('./inline-media-preview');
 const { createLocalMediaServer } = require('./local-media-server');
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
+const { createPluginUpdater } = require('./plugin-updater');
 const {
     CHANNEL_GET_CONFIG,
     CHANNEL_SET_CONFIG,
@@ -50,7 +52,11 @@ const {
     CHANNEL_VIEW_RECALL_MESSAGES,
     CHANNEL_GET_RECALL_VIEWER_DATA,
     CHANNEL_GET_RECALL_AUDIO_PREVIEW,
-    CHANNEL_JUMP_RECALL_MESSAGE
+    CHANNEL_JUMP_RECALL_MESSAGE,
+    CHANNEL_GET_UPDATE_STATE,
+    CHANNEL_CHECK_UPDATE,
+    CHANNEL_PREPARE_UPDATE,
+    CHANNEL_UPDATE_STATE_CHANGED
 } = require('./ipc-channels');
 const {
     addNativeRequestHandler,
@@ -143,6 +149,9 @@ const DEFAULT_CONFIG = {
         enabled: true,
         shortcut: 'ControlRight'
     },
+    updater: {
+        checkOnStartup: false
+    },
     preventRecall: {
         enabled: false,
         preventSelfMsg: false,
@@ -212,6 +221,8 @@ const inlineMediaServer = createLocalMediaServer();
 let reactionEmojiCatalog = null;
 let diagnosticLogger = null;
 let diagnosticActionRunner = null;
+let pluginUpdater = null;
+let automaticUpdateTimer = null;
 
 function isDebugEnabled() {
     return process.env.QQNT_TOOLBOX_DEBUG === '1' || configCache?.debug?.enabled === true;
@@ -314,6 +325,58 @@ function getPluginManifest() {
         ?.manifest || {};
 }
 
+function getInstalledPluginVersion() {
+    const version = String(getPluginManifest().version || '').trim();
+    if (version) {
+        return version;
+    }
+    try {
+        return String(JSON.parse(
+            fsSync.readFileSync(path.resolve(__dirname, '..', 'manifest.json'), 'utf8')
+        ).version || '');
+    } catch {
+        return '';
+    }
+}
+
+function broadcastUpdateState(state) {
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        if (!browserWindow.isDestroyed()) {
+            browserWindow.webContents.send(CHANNEL_UPDATE_STATE_CHANGED, state);
+        }
+    }
+}
+
+function getPluginUpdater() {
+    if (!pluginUpdater) {
+        pluginUpdater = createPluginUpdater({
+            currentVersion: getInstalledPluginVersion(),
+            pluginRoot: path.resolve(__dirname, '..'),
+            dataDir: getPluginDataDir(),
+            helperSource: path.join(__dirname, 'update-helper.ps1'),
+            processId: process.pid,
+            hostExecutable: process.execPath,
+            onStateChange: broadcastUpdateState
+        });
+    }
+    return pluginUpdater;
+}
+
+function scheduleAutomaticUpdateCheck(delayMs = 10000) {
+    if (automaticUpdateTimer) {
+        clearTimeout(automaticUpdateTimer);
+        automaticUpdateTimer = null;
+    }
+    if (getConfig().updater?.checkOnStartup !== true) {
+        return;
+    }
+    automaticUpdateTimer = setTimeout(() => {
+        automaticUpdateTimer = null;
+        getPluginUpdater().checkForUpdates({ force: false }).catch(() => {});
+    }, delayMs);
+    automaticUpdateTimer.unref?.();
+}
+
 function getLiteLoaderVersion() {
     const packageInfo = globalThis.LiteLoader?.package || global.LiteLoader?.package || {};
     return String(
@@ -397,6 +460,9 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         floatingPanel: {
             enabled: config.floatingPanel?.enabled === true,
             shortcut: String(config.floatingPanel?.shortcut || '')
+        },
+        updater: {
+            checkOnStartup: config.updater?.checkOnStartup === true
         },
         simplify: {
             sideTopHidden: (config.sideBar?.top || []).filter(item => item?.enabled === false).length,
@@ -552,6 +618,7 @@ async function saveConfig(nextConfig) {
     }
     applyVoiceMessageConfig();
     broadcastConfigChanged();
+    scheduleAutomaticUpdateCheck(1000);
     return clonePlain(configCache);
 }
 
@@ -1030,6 +1097,11 @@ function installConfigIpc() {
         return { ok: Boolean(entry) };
     });
     ipcMain.handle(CHANNEL_DIAGNOSTIC_ACTION, (_event, action) => runDiagnosticAction(action));
+    ipcMain.handle(CHANNEL_GET_UPDATE_STATE, () => getPluginUpdater().getState());
+    ipcMain.handle(CHANNEL_CHECK_UPDATE, (_event, options) => getPluginUpdater().checkForUpdates({
+        force: options?.force === true
+    }));
+    ipcMain.handle(CHANNEL_PREPARE_UPDATE, () => getPluginUpdater().prepareUpdate());
     ipcMain.handle(CHANNEL_OPEN_INLINE_MEDIA, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         const summary = {
@@ -4308,7 +4380,10 @@ function installForAllWindows() {
 
 function start() {
     loadConfig();
+    getPluginUpdater();
+    scheduleAutomaticUpdateCheck();
     app?.once?.('before-quit', () => inlineMediaServer.close());
+    app?.once?.('will-quit', () => pluginUpdater?.launchPendingInstaller());
     installConfigIpc();
     installForAllWindows();
     applyVoiceMessageConfig();

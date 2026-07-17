@@ -21,6 +21,10 @@ const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
 const CHANNEL_GET_RECALL_VIEWER_DATA = 'qqnt-toolbox:get-recall-viewer-data';
 const CHANNEL_GET_RECALL_AUDIO_PREVIEW = 'qqnt-toolbox:get-recall-audio-preview';
 const CHANNEL_JUMP_RECALL_MESSAGE = 'qqnt-toolbox:jump-recall-message';
+const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
+const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
+const CHANNEL_PREPARE_UPDATE = 'qqnt-toolbox:prepare-update';
+const CHANNEL_UPDATE_STATE_CHANGED = 'qqnt-toolbox:update-state-changed';
 
 module.exports = Object.freeze({
     CHANNEL_GET_CONFIG,
@@ -43,5 +47,9 @@ module.exports = Object.freeze({
     CHANNEL_VIEW_RECALL_MESSAGES,
     CHANNEL_GET_RECALL_VIEWER_DATA,
     CHANNEL_GET_RECALL_AUDIO_PREVIEW,
-    CHANNEL_JUMP_RECALL_MESSAGE
+    CHANNEL_JUMP_RECALL_MESSAGE,
+    CHANNEL_GET_UPDATE_STATE,
+    CHANNEL_CHECK_UPDATE,
+    CHANNEL_PREPARE_UPDATE,
+    CHANNEL_UPDATE_STATE_CHANGED
 });

@@ -61,6 +61,7 @@ let handleToolboxVueComponentMount = () => {};
             messages: false,
             preventRecall: false,
             entertainment: false,
+            updater: false,
             floatingPanel: false,
             simplifySidebar: false,
             simplifyTop: false,
@@ -105,6 +106,9 @@ let handleToolboxVueComponentMount = () => {};
         floatingPanel: {
             enabled: true,
             shortcut: 'ControlRight'
+        },
+        updater: {
+            checkOnStartup: false
         },
         preventRecall: {
             enabled: false,
@@ -188,6 +192,14 @@ let handleToolboxVueComponentMount = () => {};
     let simplifyConfigSaveTimer = 0;
     let activeShortcutCapture = null;
     let rendererReadyDiagnosticSent = false;
+    let currentUpdateState = {
+        status: 'idle',
+        supported: true,
+        currentVersion: '',
+        latestVersion: '',
+        pendingVersion: '',
+        reason: ''
+    };
     const discoveredSimplifyItems = {
         sideTop: new Map(),
         sideBottom: new Map(),
@@ -1388,6 +1400,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const button = createElement('button', 'qqnt-toolbox-action', options.label || text('\u6253\u5f00'));
         button.type = 'button';
         button.dataset.action = action;
+        if (options.updateRole) {
+            item.dataset.updateRole = options.updateRole;
+        }
         if (options.danger) {
             button.dataset.danger = 'true';
         }
@@ -1686,6 +1701,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             createSection('simplifyTop', text('顶部功能栏'), []),
             createSection('simplifyChat', text('聊天功能栏'), []),
             createCategoryTitle(text('其他')),
+            createSection('updater', text('插件更新'), [
+                createSwitchItem(text('启动时检查更新'), text('每 12 小时最多检查一次'), 'updater.checkOnStartup'),
+                createActionItem(text('检查更新'), text('读取 GitHub 上的结构化更新清单'), 'checkPluginUpdate', {
+                    label: text('检查'),
+                    updateRole: 'check'
+                }),
+                createActionItem(text('下载更新'), text('校验后暂存，退出 QQ 时自动安装'), 'preparePluginUpdate', {
+                    label: text('下载'),
+                    child: true,
+                    updateRole: 'prepare'
+                })
+            ]),
             createSection('floatingPanel', text('悬浮窗'), [
                 createSwitchItem(text('启用悬浮窗'), text('允许通过快捷键打开工具箱'), 'floatingPanel.enabled'),
                 createShortcutItem(text('唤出快捷键'), text('点击后按下新的快捷键'), 'floatingPanel.shortcut', {
@@ -1765,6 +1792,74 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return !value || String(value).split('|').every(isFeatureEnabled);
     }
 
+    function normalizeUpdateState(value) {
+        const source = value && typeof value === 'object' ? value : {};
+        const statuses = new Set([
+            'idle', 'checking', 'current', 'available', 'downloading', 'ready', 'error'
+        ]);
+        return {
+            status: statuses.has(source.status) ? source.status : 'idle',
+            supported: source.supported !== false,
+            currentVersion: String(source.currentVersion || ''),
+            latestVersion: String(source.latestVersion || ''),
+            pendingVersion: String(source.pendingVersion || ''),
+            reason: String(source.reason || '')
+        };
+    }
+
+    function getUpdateStatusText() {
+        const current = currentUpdateState.currentVersion
+            ? `v${currentUpdateState.currentVersion}`
+            : text('当前版本');
+        const latest = currentUpdateState.latestVersion
+            ? `v${currentUpdateState.latestVersion}`
+            : text('新版本');
+        if (!currentUpdateState.supported) {
+            return text('自动安装目前仅支持 Windows');
+        }
+        switch (currentUpdateState.status) {
+            case 'checking':
+                return text('正在检查 GitHub Release');
+            case 'current':
+                return `${current}，${text('已是最新版')}`;
+            case 'available':
+                return `${text('发现')} ${latest}`;
+            case 'downloading':
+                return `${text('正在下载并校验')} ${latest}`;
+            case 'ready':
+                return `${latest} ${text('已就绪，退出 QQ 后自动安装')}`;
+            case 'error':
+                return currentUpdateState.reason === 'unsupported-platform'
+                    ? text('自动安装目前仅支持 Windows')
+                    : text('更新操作失败，请重试');
+            default:
+                return `${text('当前版本')} ${current}`;
+        }
+    }
+
+    function updatePluginUpdaterUi(root) {
+        const checkItem = root.querySelector('.qqnt-toolbox-item[data-update-role="check"]');
+        const prepareItem = root.querySelector('.qqnt-toolbox-item[data-update-role="prepare"]');
+        const checkButton = checkItem?.querySelector('.qqnt-toolbox-action');
+        const prepareButton = prepareItem?.querySelector('.qqnt-toolbox-action');
+        const checkMeta = checkItem?.querySelector('.qqnt-toolbox-item-meta');
+        if (checkMeta) {
+            checkMeta.textContent = getUpdateStatusText();
+        }
+        const busy = ['checking', 'downloading'].includes(currentUpdateState.status);
+        if (checkButton && !panelActionFeedbackTimers.has(checkButton)) {
+            checkButton.textContent = currentUpdateState.status === 'error' ? text('重试') : text('检查');
+            checkButton.disabled = busy;
+        }
+        if (prepareButton && !panelActionFeedbackTimers.has(prepareButton)) {
+            prepareButton.textContent = currentUpdateState.status === 'ready' ? text('等待退出') : text('下载');
+            prepareButton.disabled = currentUpdateState.status !== 'available' || !currentUpdateState.supported;
+        }
+        if (prepareItem) {
+            prepareItem.dataset.disabled = String(prepareButton?.disabled !== false);
+        }
+    }
+
     function updateConfigUi(panel = document.getElementById(PANEL_ID)) {
         if (!panel) {
             return;
@@ -1833,6 +1928,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 button.disabled = disabled || panelActionFeedbackTimers.has(button);
             }
         });
+        updatePluginUpdaterUi(panel);
         updateGroupUi(panel);
     }
 
@@ -2064,6 +2160,20 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 result = await bridge?.runDiagnosticAction?.('open-directory');
             } else if (action === 'clearDiagnosticLog') {
                 result = await bridge?.runDiagnosticAction?.('clear');
+            } else if (action === 'checkPluginUpdate') {
+                if (typeof bridge?.checkForUpdates !== 'function') {
+                    throw new Error('The updater bridge is unavailable.');
+                }
+                result = await bridge.checkForUpdates({ force: true });
+                currentUpdateState = normalizeUpdateState(result);
+                refreshConfigViews();
+            } else if (action === 'preparePluginUpdate') {
+                if (typeof bridge?.prepareUpdate !== 'function') {
+                    throw new Error('The updater bridge is unavailable.');
+                }
+                result = await bridge.prepareUpdate();
+                currentUpdateState = normalizeUpdateState(result);
+                refreshConfigViews();
             } else {
                 throw new Error('Unknown panel action.');
             }
@@ -2075,7 +2185,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 exportDiagnosticReport: text('已导出'),
                 openDiagnosticDir: text('已打开'),
                 clearDiagnosticLog: text('已清空'),
-                clearRecallCache: text('已清理')
+                clearRecallCache: text('已清理'),
+                checkPluginUpdate: result?.status === 'available' ? text('有更新') : text('已检查'),
+                preparePluginUpdate: text('已下载')
             };
             showPanelActionFeedback(button, labels[action] || text('完成'), 'success');
         } catch (error) {
@@ -5332,6 +5444,29 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         });
     }
 
+    async function loadUpdateState() {
+        const bridge = await waitForBridge();
+        if (typeof bridge?.getUpdateState !== 'function') {
+            return;
+        }
+        try {
+            currentUpdateState = normalizeUpdateState(await bridge.getUpdateState());
+            refreshConfigViews();
+        } catch {
+        }
+    }
+
+    function subscribeUpdateState() {
+        const bridge = getBridge();
+        if (typeof bridge?.onUpdateStateChanged !== 'function') {
+            return;
+        }
+        bridge.onUpdateStateChanged(state => {
+            currentUpdateState = normalizeUpdateState(state);
+            refreshConfigViews();
+        });
+    }
+
     async function initSettingWindow(view) {
         if (!(view instanceof HTMLElement)) {
             return;
@@ -5483,6 +5618,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     window.addEventListener('focus', rememberActiveRepeatPeer);
 
     loadConfig().then(subscribeConfig).catch(() => {});
+    loadUpdateState().then(subscribeUpdateState).catch(() => {});
     subscribeInlineMediaPreview().catch(() => {});
     installProfileCardHoverBlocker();
     installPokeInteractions();

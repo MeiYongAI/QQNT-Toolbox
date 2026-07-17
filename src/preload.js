@@ -18,6 +18,10 @@ const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
 const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
 const CHANNEL_OPEN_RECALL_IMAGE_DIR = 'qqnt-toolbox:open-recall-image-dir';
 const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
+const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
+const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
+const CHANNEL_PREPARE_UPDATE = 'qqnt-toolbox:prepare-update';
+const CHANNEL_UPDATE_STATE_CHANGED = 'qqnt-toolbox:update-state-changed';
 
 contextBridge.exposeInMainWorld('qqnt_toolbox', {
     getConfig: () => ipcRenderer.invoke(CHANNEL_GET_CONFIG),
@@ -34,6 +38,9 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     openRecallDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_DIR),
     openRecallImageDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_IMAGE_DIR),
     viewRecallMessages: () => ipcRenderer.invoke(CHANNEL_VIEW_RECALL_MESSAGES),
+    getUpdateState: () => ipcRenderer.invoke(CHANNEL_GET_UPDATE_STATE),
+    checkForUpdates: options => ipcRenderer.invoke(CHANNEL_CHECK_UPDATE, options),
+    prepareUpdate: () => ipcRenderer.invoke(CHANNEL_PREPARE_UPDATE),
     openInlineMedia: payload => ipcRenderer.invoke(CHANNEL_OPEN_INLINE_MEDIA, payload),
     prepareInlineMedia: payload => ipcRenderer.invoke(CHANNEL_PREPARE_INLINE_MEDIA, payload),
     onInlineMediaPreview: callback => {
@@ -45,5 +52,10 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
         const listener = (_event, config) => callback(config);
         ipcRenderer.on(CHANNEL_CONFIG_CHANGED, listener);
         return () => ipcRenderer.removeListener(CHANNEL_CONFIG_CHANGED, listener);
+    },
+    onUpdateStateChanged: callback => {
+        const listener = (_event, state) => callback(state);
+        ipcRenderer.on(CHANNEL_UPDATE_STATE_CHANGED, listener);
+        return () => ipcRenderer.removeListener(CHANNEL_UPDATE_STATE_CHANGED, listener);
     }
 });
