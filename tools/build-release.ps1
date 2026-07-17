@@ -90,6 +90,7 @@ try {
         'QQNT-Toolbox/manifest.json',
         'QQNT-Toolbox/src/ipc-channels.js',
         'QQNT-Toolbox/src/native-ipc.js',
+        'QQNT-Toolbox/src/qq-data-root.js',
         'QQNT-Toolbox/src/recall-image-url.js',
         'QQNT-Toolbox/src/recall-viewer.html',
         'QQNT-Toolbox/src/recall-viewer.js',

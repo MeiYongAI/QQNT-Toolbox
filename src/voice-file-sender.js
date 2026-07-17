@@ -31,6 +31,7 @@ const {
     createPttSourceResolver,
     sanitizePttInfo
 } = require('./voice/ptt-source');
+const { getTencentFilesRoots } = require('./qq-data-root');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
@@ -130,14 +131,6 @@ function uniqueStrings(values) {
     return Array.from(new Set(values.filter(Boolean)));
 }
 
-function getTencentFilesRoots() {
-    return uniqueStrings([
-        path.join(app.getPath('documents'), 'Tencent Files'),
-        path.join(os.homedir(), 'Documents', 'Tencent Files'),
-        path.join(process.env.USERPROFILE || os.homedir(), 'Documents', 'Tencent Files')
-    ]);
-}
-
 function getDirectoryMtimeMs(dirPath) {
     try {
         return fsSync.statSync(dirPath).mtimeMs;
@@ -157,7 +150,7 @@ function getPttBaseActivityMs(pttBaseDir) {
 
 function getNativePttBaseDirs() {
     const candidates = [];
-    for (const root of getTencentFilesRoots()) {
+    for (const root of getTencentFilesRoots({ documentsPath: app.getPath('documents') })) {
         if (!fsSync.existsSync(root)) {
             continue;
         }

@@ -1,7 +1,6 @@
 const { app, BrowserWindow, clipboard, ipcMain, nativeImage, shell } = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { Readable, Writable } = require('stream');
@@ -15,6 +14,7 @@ const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin }
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const { createRepeatMessageHandler } = require('./repeat-message');
 const { loadReactionEmojiCatalog, normalizeReactionRequest } = require('./reaction-catalog');
+const { getTencentFilesRoots } = require('./qq-data-root');
 const {
     classifyMediaFilePath,
     createInlineMediaDownloadPayload,
@@ -963,13 +963,9 @@ function getReactionEmojiCatalog() {
         return [];
     }
     if (!reactionEmojiCatalog) {
-        const documentDirectories = [
-            app.getPath('documents'),
-            path.join(os.homedir(), 'Documents'),
-            path.join(process.env.USERPROFILE || os.homedir(), 'Documents')
-        ];
-        const tencentFilesRoots = Array.from(new Set(documentDirectories))
-            .map(directory => path.join(directory, 'Tencent Files'));
+        const tencentFilesRoots = getTencentFilesRoots({
+            documentsPath: app.getPath('documents')
+        });
         const catalog = loadReactionEmojiCatalog(tencentFilesRoots);
         if (catalog.length) {
             reactionEmojiCatalog = catalog;
