@@ -136,6 +136,7 @@ let handleToolboxVueComponentMount = () => {};
             deleteBubbleSkin: false,
             hiddenWeatherBtn: false,
             hiddenClassicBtn: false,
+            hiddenHelpBtn: false,
             hiddenLockBtn: false,
             hiddenLogoutBtn: false,
             hiddenUpdateBtnAndNotice: false,
@@ -1570,6 +1571,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('删除消息气泡装扮'), '', 'interfaceTweaks.deleteBubbleSkin'),
                 createSwitchItem(text('隐藏天气按钮'), '', 'interfaceTweaks.hiddenWeatherBtn'),
                 createSwitchItem(text('隐藏经典模式切换按钮'), '', 'interfaceTweaks.hiddenClassicBtn'),
+                createSwitchItem(text('隐藏帮助按钮'), '', 'interfaceTweaks.hiddenHelpBtn'),
                 createSwitchItem(text('隐藏锁定按钮'), '', 'interfaceTweaks.hiddenLockBtn'),
                 createSwitchItem(text('隐藏退出账号按钮'), '', 'interfaceTweaks.hiddenLogoutBtn'),
                 createSwitchItem(text('隐藏检查更新按钮和更新通知'), '', 'interfaceTweaks.hiddenUpdateBtnAndNotice'),
@@ -2592,6 +2594,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
         setSelectorHidden('.weather-widget', isConfigEnabled('interfaceTweaks.hiddenWeatherBtn'));
         setSelectorHidden('.window-control-area .narrow-toggler', isConfigEnabled('interfaceTweaks.hiddenClassicBtn'));
+        setLabeledControlsHidden([text('\u5e2e\u52a9')], isConfigEnabled('interfaceTweaks.hiddenHelpBtn'));
         setLabeledControlsHidden([text('\u9501\u5b9a')], isConfigEnabled('interfaceTweaks.hiddenLockBtn'));
         setLabeledControlsHidden([text('\u9000\u51fa\u8d26\u53f7'), text('\u9000\u51fa\u767b\u5f55')], isConfigEnabled('interfaceTweaks.hiddenLogoutBtn'));
         setLabeledControlsHidden([text('\u68c0\u67e5\u66f4\u65b0'), text('\u66f4\u65b0\u901a\u77e5')], isConfigEnabled('interfaceTweaks.hiddenUpdateBtnAndNotice'));

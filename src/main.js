@@ -173,6 +173,7 @@ const DEFAULT_CONFIG = {
         deleteBubbleSkin: false,
         hiddenWeatherBtn: false,
         hiddenClassicBtn: false,
+        hiddenHelpBtn: false,
         hiddenLockBtn: false,
         hiddenLogoutBtn: false,
         hiddenUpdateBtnAndNotice: false,
