@@ -21,6 +21,7 @@ const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
 const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
 const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
 const CHANNEL_PREPARE_UPDATE = 'qqnt-toolbox:prepare-update';
+const CHANNEL_RESTART_UPDATE = 'qqnt-toolbox:restart-update';
 const CHANNEL_UPDATE_STATE_CHANGED = 'qqnt-toolbox:update-state-changed';
 
 contextBridge.exposeInMainWorld('qqnt_toolbox', {
@@ -41,6 +42,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     getUpdateState: () => ipcRenderer.invoke(CHANNEL_GET_UPDATE_STATE),
     checkForUpdates: options => ipcRenderer.invoke(CHANNEL_CHECK_UPDATE, options),
     prepareUpdate: () => ipcRenderer.invoke(CHANNEL_PREPARE_UPDATE),
+    restartForUpdate: () => ipcRenderer.invoke(CHANNEL_RESTART_UPDATE),
     openInlineMedia: payload => ipcRenderer.invoke(CHANNEL_OPEN_INLINE_MEDIA, payload),
     prepareInlineMedia: payload => ipcRenderer.invoke(CHANNEL_PREPARE_INLINE_MEDIA, payload),
     onInlineMediaPreview: callback => {

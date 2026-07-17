@@ -56,6 +56,7 @@ const {
     CHANNEL_GET_UPDATE_STATE,
     CHANNEL_CHECK_UPDATE,
     CHANNEL_PREPARE_UPDATE,
+    CHANNEL_RESTART_UPDATE,
     CHANNEL_UPDATE_STATE_CHANGED
 } = require('./ipc-channels');
 const {
@@ -353,9 +354,6 @@ function getPluginUpdater() {
             currentVersion: getInstalledPluginVersion(),
             pluginRoot: path.resolve(__dirname, '..'),
             dataDir: getPluginDataDir(),
-            helperSource: path.join(__dirname, 'update-helper.ps1'),
-            processId: process.pid,
-            hostExecutable: process.execPath,
             onStateChange: broadcastUpdateState
         });
     }
@@ -1102,6 +1100,18 @@ function installConfigIpc() {
         force: options?.force === true
     }));
     ipcMain.handle(CHANNEL_PREPARE_UPDATE, () => getPluginUpdater().prepareUpdate());
+    ipcMain.handle(CHANNEL_RESTART_UPDATE, async () => {
+        const updater = getPluginUpdater();
+        const result = await updater.activatePendingUpdate();
+        if (!result.ok) {
+            return result;
+        }
+        setTimeout(() => {
+            app.relaunch();
+            app.quit();
+        }, 250).unref?.();
+        return result;
+    });
     ipcMain.handle(CHANNEL_OPEN_INLINE_MEDIA, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         const summary = {
@@ -4383,7 +4393,6 @@ function start() {
     getPluginUpdater();
     scheduleAutomaticUpdateCheck();
     app?.once?.('before-quit', () => inlineMediaServer.close());
-    app?.once?.('will-quit', () => pluginUpdater?.launchPendingInstaller());
     installConfigIpc();
     installForAllWindows();
     applyVoiceMessageConfig();

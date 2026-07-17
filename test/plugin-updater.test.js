@@ -1,13 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs').promises;
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { promisify } = require('node:util');
 const {
     TextReader,
     Uint8ArrayWriter,
@@ -20,8 +18,6 @@ const {
     normalizeArchiveEntryName,
     normalizeUpdateManifest
 } = require('../src/plugin-updater');
-
-const execFile = promisify(childProcess.execFile);
 
 async function withTemporaryDirectory(callback) {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qqnt-toolbox-updater-'));
@@ -112,30 +108,30 @@ test('extracts a complete package only when its plugin identity matches', async 
     });
 });
 
-test('checks, stages, and schedules one transactional installer', async () => {
+test('stages a loader-selected copy and removes the old copy after the new version starts', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox');
         const dataDir = path.join(directory, 'data');
-        const helperSource = path.join(directory, 'update-helper.ps1');
+        const updateRoot = path.join(dataDir, 'updater');
         const bytes = Buffer.from('verified-release');
         const rawRelease = makeRelease('0.8.0', bytes);
         let requestCount = 0;
-        let spawnCall = null;
         await fs.mkdir(pluginRoot, { recursive: true });
+        await fs.mkdir(updateRoot, { recursive: true });
         await fs.writeFile(
             path.join(pluginRoot, 'manifest.json'),
             JSON.stringify({ slug: 'qqnt_toolbox', version: '0.7.1' })
         );
-        await fs.writeFile(helperSource, 'param([string]$PlanPath)');
+        await fs.writeFile(path.join(pluginRoot, 'old.txt'), 'old');
+        await fs.writeFile(path.join(updateRoot, 'install-plan.json'), '{}');
+        await fs.writeFile(path.join(updateRoot, 'install-status.json'), '{}');
+        await fs.writeFile(path.join(updateRoot, 'update-helper.ps1'), 'legacy');
 
         const updater = createPluginUpdater({
             currentVersion: '0.7.1',
             pluginRoot,
             dataDir,
-            helperSource,
             platform: 'win32',
-            processId: 1234,
-            hostExecutable: 'C:\\Program Files\\Tencent\\QQNT\\QQ.exe',
             now: () => 1000,
             requestUpdateManifest: async () => {
                 requestCount += 1;
@@ -155,12 +151,8 @@ test('checks, stages, and schedules one transactional installer', async () => {
                     path.join(destination, 'manifest.json'),
                     JSON.stringify({ slug: 'qqnt_toolbox', version: expectedVersion })
                 );
+                await fs.writeFile(path.join(destination, 'new.txt'), 'new');
                 return destination;
-            },
-            powershellPath: 'powershell.exe',
-            spawnProcess(executable, args, options) {
-                spawnCall = { executable, args, options };
-                return { unref() {} };
             }
         });
 
@@ -174,75 +166,45 @@ test('checks, stages, and schedules one transactional installer', async () => {
         assert.equal(prepared.ok, true);
         assert.equal(prepared.status, 'ready');
         assert.equal(prepared.pendingVersion, '0.8.0');
-        assert.equal(updater.launchPendingInstaller(), true);
-        assert.equal(updater.launchPendingInstaller(), false);
-        assert.equal(spawnCall.executable, 'powershell.exe');
-        assert.equal(spawnCall.options.detached, true);
-        const planPath = spawnCall.args.at(-1);
-        const plan = JSON.parse(await fs.readFile(planPath, 'utf8'));
-        assert.equal(plan.version, '0.8.0');
-        assert.equal(plan.pluginRoot, pluginRoot);
-    });
-});
 
-test('PowerShell helper replaces the staged plugin and preserves a backup', {
-    skip: process.platform !== 'win32'
-}, async () => {
-    await withTemporaryDirectory(async directory => {
-        const updateRoot = path.join(directory, 'data', 'updater');
-        const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox');
-        const stagedPluginRoot = path.join(updateRoot, 'staging', 'v0.8.0');
-        const backupRoot = path.join(updateRoot, 'backups', 'v0.7.1');
-        const pendingPath = path.join(updateRoot, 'pending-update.json');
-        const statusPath = path.join(updateRoot, 'install-status.json');
-        const planPath = path.join(updateRoot, 'install-plan.json');
-        await fs.mkdir(pluginRoot, { recursive: true });
-        await fs.mkdir(stagedPluginRoot, { recursive: true });
-        await fs.writeFile(
-            path.join(pluginRoot, 'manifest.json'),
-            JSON.stringify({ slug: 'qqnt_toolbox', version: '0.7.1' })
-        );
-        await fs.writeFile(path.join(pluginRoot, 'old.txt'), 'old');
-        await fs.writeFile(
-            path.join(stagedPluginRoot, 'manifest.json'),
-            JSON.stringify({ slug: 'qqnt_toolbox', version: '0.8.0' })
-        );
-        await fs.writeFile(path.join(stagedPluginRoot, 'new.txt'), 'new');
-        await fs.writeFile(pendingPath, '{}');
-        await fs.writeFile(planPath, JSON.stringify({
-            version: '0.8.0',
-            slug: 'qqnt_toolbox',
-            processId: 999999,
-            hostExecutable: 'C:\\QQNT-Toolbox-Test-Host.exe',
-            pluginRoot,
-            stagedPluginRoot,
-            backupRoot,
-            updateRoot,
-            pendingPath,
-            statusPath,
-            nonce: '1000-2000'
-        }));
-        const powershell = path.join(
-            process.env.SystemRoot || 'C:\\Windows',
-            'System32',
-            'WindowsPowerShell',
-            'v1.0',
-            'powershell.exe'
-        );
-        await execFile(powershell, [
-            '-NoProfile',
-            '-NonInteractive',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            path.join(__dirname, '..', 'src', 'update-helper.ps1'),
-            '-PlanPath',
-            planPath
-        ]);
+        const activated = await updater.activatePendingUpdate();
+        assert.equal(activated.ok, true);
+        assert.equal(activated.status, 'restarting');
+        const activationPath = path.join(updateRoot, 'activation.json');
+        const activation = JSON.parse(await fs.readFile(activationPath, 'utf8'));
+        assert.equal(activation.version, '0.8.0');
+        assert.equal(await fs.readFile(path.join(activation.installedPluginRoot, 'new.txt'), 'utf8'), 'new');
+        assert.equal(await fs.readFile(path.join(pluginRoot, 'old.txt'), 'utf8'), 'old');
 
-        assert.equal(await fs.readFile(path.join(pluginRoot, 'new.txt'), 'utf8'), 'new');
-        assert.equal(await fs.readFile(path.join(backupRoot, 'old.txt'), 'utf8'), 'old');
-        assert.equal(JSON.parse(await fs.readFile(statusPath, 'utf8')).status, 'installed');
-        await assert.rejects(fs.stat(pendingPath), { code: 'ENOENT' });
+        const selectedRoot = (await fs.readdir(path.dirname(pluginRoot), { withFileTypes: true }))
+            .filter(entry => entry.isDirectory())
+            .map(entry => path.join(path.dirname(pluginRoot), entry.name))
+            .filter(root => {
+                try {
+                    return require(path.join(root, 'manifest.json')).slug === 'qqnt_toolbox';
+                } catch {
+                    return false;
+                }
+            })
+            .at(-1);
+        assert.equal(path.resolve(selectedRoot), path.resolve(activation.installedPluginRoot));
+        await assert.rejects(fs.stat(path.join(updateRoot, 'install-plan.json')), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(path.join(updateRoot, 'install-status.json')), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(path.join(updateRoot, 'update-helper.ps1')), { code: 'ENOENT' });
+
+        const restartedUpdater = createPluginUpdater({
+            currentVersion: '0.8.0',
+            pluginRoot: activation.installedPluginRoot,
+            dataDir,
+            platform: 'win32'
+        });
+        const restartedState = await restartedUpdater.getState();
+        assert.equal(restartedState.currentVersion, '0.8.0');
+        await assert.rejects(fs.stat(pluginRoot), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(path.join(updateRoot, 'pending-update.json')), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(path.join(updateRoot, 'downloads')), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(path.join(updateRoot, 'staging')), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(activationPath), { code: 'ENOENT' });
+        assert.equal(await fs.readFile(path.join(activation.installedPluginRoot, 'new.txt'), 'utf8'), 'new');
     });
 });

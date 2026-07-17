@@ -5,7 +5,6 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const https = require('https');
 const path = require('path');
-const { spawn } = require('child_process');
 const {
     Uint8ArrayReader,
     Uint8ArrayWriter,
@@ -308,6 +307,61 @@ function cloneState(state) {
     return JSON.parse(JSON.stringify(state));
 }
 
+function normalizeComparablePath(value, platform = process.platform) {
+    const resolved = path.resolve(String(value || ''));
+    return platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function pathsEqual(left, right, platform = process.platform) {
+    return normalizeComparablePath(left, platform) === normalizeComparablePath(right, platform);
+}
+
+function isPathInside(root, candidate) {
+    if (!root || !candidate) {
+        return false;
+    }
+    const relative = path.relative(path.resolve(String(root)), path.resolve(String(candidate)));
+    return Boolean(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isDirectChildPath(root, candidate) {
+    return Boolean(root && candidate && pathsEqual(path.dirname(path.resolve(String(candidate))), root));
+}
+
+function listPluginRoots(pluginParent, slug) {
+    const roots = [];
+    for (const entry of fsSync.readdirSync(pluginParent, { withFileTypes: true })) {
+        if (!entry.isDirectory()) {
+            continue;
+        }
+        const pluginRoot = path.join(pluginParent, entry.name);
+        try {
+            const manifest = JSON.parse(fsSync.readFileSync(path.join(pluginRoot, 'manifest.json'), 'utf8'));
+            if (manifest.slug === slug) {
+                roots.push(pluginRoot);
+            }
+        } catch {
+        }
+    }
+    return roots;
+}
+
+function getSelectedPluginRoot(pluginParent, slug) {
+    return listPluginRoots(pluginParent, slug).at(-1) || '';
+}
+
+function readPluginIdentity(pluginRoot) {
+    try {
+        const manifest = JSON.parse(fsSync.readFileSync(path.join(pluginRoot, 'manifest.json'), 'utf8'));
+        return {
+            slug: String(manifest.slug || ''),
+            version: normalizeVersion(manifest.version)?.value || ''
+        };
+    } catch {
+        return null;
+    }
+}
+
 function isUsableCachedRelease(value) {
     const version = normalizeVersion(value?.version)?.value;
     return Boolean(
@@ -329,16 +383,16 @@ function createPluginUpdater(options = {}) {
     const updateRoot = path.join(dataDir, 'updater');
     const cachePath = path.join(updateRoot, 'release-cache.json');
     const pendingPath = path.join(updateRoot, 'pending-update.json');
-    const helperPath = path.join(updateRoot, 'update-helper.ps1');
-    const planPath = path.join(updateRoot, 'install-plan.json');
-    const statusPath = path.join(updateRoot, 'install-status.json');
+    const activationPath = path.join(updateRoot, 'activation.json');
+    const stagingRoot = path.join(updateRoot, 'staging');
+    const pluginParent = path.dirname(pluginRoot);
+    const pluginSlug = 'qqnt_toolbox';
     const repository = options.repository || DEFAULT_REPOSITORY;
     const manifestUrl = options.manifestUrl || DEFAULT_UPDATE_MANIFEST_URL;
     const platform = options.platform || process.platform;
     const requestManifest = options.requestUpdateManifest || requestUpdateManifest;
     const downloadAsset = options.downloadReleaseAsset || downloadReleaseAsset;
     const extractArchive = options.extractPluginArchive || extractPluginArchive;
-    const spawnProcess = options.spawnProcess || spawn;
     const now = options.now || Date.now;
     const checkIntervalMs = Number(options.checkIntervalMs) || DEFAULT_CHECK_INTERVAL_MS;
     let cache = null;
@@ -346,7 +400,6 @@ function createPluginUpdater(options = {}) {
     let initialized = false;
     let initializePromise = null;
     let operationPromise = null;
-    let installerLaunched = false;
     let state = {
         status: 'idle',
         supported: platform === 'win32',
@@ -380,10 +433,51 @@ function createPluginUpdater(options = {}) {
         });
     }
 
+    async function removeLegacyInstallerArtifacts() {
+        await Promise.all([
+            'install-plan.json',
+            'install-status.json',
+            'update-helper.ps1'
+        ].map(name => fs.rm(path.join(updateRoot, name), { force: true }).catch(() => {})));
+        await fs.rm(path.join(updateRoot, 'install.lock'), { recursive: true, force: true }).catch(() => {});
+        await fs.rm(path.join(updateRoot, 'backups'), { recursive: true, force: true }).catch(() => {});
+    }
+
+    async function finalizeActivatedUpdate() {
+        const activation = await readJson(activationPath);
+        if (!activation || activation.version !== currentVersion ||
+            !pathsEqual(activation.installedPluginRoot, pluginRoot) ||
+            !isDirectChildPath(pluginParent, activation.installedPluginRoot)) {
+            return false;
+        }
+        await fs.rm(pendingPath, { force: true }).catch(() => {});
+        await fs.rm(path.join(updateRoot, 'downloads'), { recursive: true, force: true }).catch(() => {});
+        await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+        let cleanupComplete = true;
+        for (const previousRoot of Array.isArray(activation.previousPluginRoots)
+            ? activation.previousPluginRoots
+            : []) {
+            if (!isDirectChildPath(pluginParent, previousRoot) || pathsEqual(previousRoot, pluginRoot)) {
+                continue;
+            }
+            try {
+                await fs.rm(previousRoot, { recursive: true, force: true });
+            } catch {
+                cleanupComplete = false;
+            }
+        }
+        if (cleanupComplete) {
+            await fs.rm(activationPath, { force: true }).catch(() => {});
+        }
+        return true;
+    }
+
     async function initialize() {
         if (initialized) {
             return;
         }
+        await removeLegacyInstallerArtifacts();
+        await finalizeActivatedUpdate();
         cache = await readJson(cachePath);
         const pending = await readJson(pendingPath);
         if (pending?.version && compareVersions(pending.version, currentVersion) > 0 &&
@@ -492,11 +586,7 @@ function createPluginUpdater(options = {}) {
                     expectedVersion: release.version,
                     expectedSlug: 'qqnt_toolbox'
                 });
-                if (!options.helperSource || !fsSync.existsSync(options.helperSource)) {
-                    throw createUpdaterError('installer-helper-missing');
-                }
                 await fs.mkdir(updateRoot, { recursive: true });
-                await fs.copyFile(options.helperSource, helperPath);
                 const pending = {
                     version: release.version,
                     createdAt: Number(now()),
@@ -532,74 +622,79 @@ function createPluginUpdater(options = {}) {
         return cloneState(state);
     }
 
-    function launchPendingInstaller() {
-        if (installerLaunched || platform !== 'win32') {
-            return false;
+    async function activatePendingUpdate() {
+        await ensureInitialized();
+        if (state.status !== 'ready') {
+            return { ok: false, ...cloneState(state), reason: 'update-not-ready' };
         }
-        let pending;
+        if (operationPromise) {
+            return await operationPromise;
+        }
+        operationPromise = (async () => {
+            const pending = await readJson(pendingPath);
+            const version = normalizeVersion(pending?.version)?.value;
+            const stagedPluginRoot = path.resolve(String(pending?.stagedPluginRoot || ''));
+            const stagedIdentity = readPluginIdentity(stagedPluginRoot);
+            if (!version || compareVersions(version, currentVersion) <= 0 ||
+                !isPathInside(stagingRoot, stagedPluginRoot) ||
+                stagedIdentity?.slug !== pluginSlug || stagedIdentity.version !== version) {
+                return { ok: false, ...emit({ status: 'error', reason: 'invalid-pending-update' }) };
+            }
+
+            const existingActivation = await readJson(activationPath);
+            if (existingActivation?.version === version &&
+                isDirectChildPath(pluginParent, existingActivation.installedPluginRoot) &&
+                readPluginIdentity(existingActivation.installedPluginRoot)?.version === version &&
+                pathsEqual(
+                    getSelectedPluginRoot(pluginParent, pluginSlug),
+                    existingActivation.installedPluginRoot
+                )) {
+                return { ok: true, ...emit({ status: 'restarting', reason: '' }) };
+            }
+
+            const nonce = `${Number(now())}-${crypto.randomBytes(4).toString('hex')}`;
+            const temporaryRoot = path.join(pluginParent, `.qqnt-toolbox-update-${nonce}`);
+            const installedPluginRoot = path.join(pluginParent, `~qqnt_toolbox-${version}-${nonce}`);
+            const previousPluginRoots = listPluginRoots(pluginParent, pluginSlug);
+            try {
+                await fs.cp(stagedPluginRoot, temporaryRoot, {
+                    recursive: true,
+                    force: false,
+                    errorOnExist: true
+                });
+                const copiedIdentity = readPluginIdentity(temporaryRoot);
+                if (copiedIdentity?.slug !== pluginSlug || copiedIdentity.version !== version) {
+                    throw createUpdaterError('copied-plugin-mismatch');
+                }
+                await fs.rename(temporaryRoot, installedPluginRoot);
+                if (!pathsEqual(getSelectedPluginRoot(pluginParent, pluginSlug), installedPluginRoot)) {
+                    throw createUpdaterError('loader-selection-mismatch');
+                }
+                await writeJson(activationPath, {
+                    version,
+                    createdAt: Number(now()),
+                    installedPluginRoot,
+                    previousPluginRoots
+                });
+                return { ok: true, ...emit({ status: 'restarting', reason: '' }) };
+            } catch (error) {
+                await fs.rm(temporaryRoot, { recursive: true, force: true }).catch(() => {});
+                await fs.rm(installedPluginRoot, { recursive: true, force: true }).catch(() => {});
+                const reason = String(error?.reason || 'activation-failed');
+                return { ok: false, ...emit({ status: 'error', reason }) };
+            }
+        })();
         try {
-            pending = JSON.parse(fsSync.readFileSync(pendingPath, 'utf8'));
-        } catch {
-            return false;
-        }
-        if (!pending?.version || !fsSync.existsSync(path.join(pending.stagedPluginRoot, 'manifest.json')) ||
-            !fsSync.existsSync(helperPath)) {
-            return false;
-        }
-        const nonce = `${Date.now()}-${process.pid}`;
-        const backupRoot = path.join(updateRoot, 'backups', `v${currentVersion}`);
-        const plan = {
-            version: pending.version,
-            slug: 'qqnt_toolbox',
-            processId: Number(options.processId) || process.pid,
-            hostExecutable: String(options.hostExecutable || process.execPath),
-            pluginRoot,
-            stagedPluginRoot: pending.stagedPluginRoot,
-            backupRoot,
-            updateRoot,
-            pendingPath,
-            statusPath,
-            nonce
-        };
-        try {
-            fsSync.mkdirSync(updateRoot, { recursive: true });
-            fsSync.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf8');
-            const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-            const bundledPowerShell = path.join(
-                systemRoot,
-                'System32',
-                'WindowsPowerShell',
-                'v1.0',
-                'powershell.exe'
-            );
-            const executable = options.powershellPath ||
-                (fsSync.existsSync(bundledPowerShell) ? bundledPowerShell : 'powershell.exe');
-            const child = spawnProcess(executable, [
-                '-NoProfile',
-                '-NonInteractive',
-                '-ExecutionPolicy',
-                'Bypass',
-                '-File',
-                helperPath,
-                '-PlanPath',
-                planPath
-            ], {
-                detached: true,
-                stdio: 'ignore',
-                windowsHide: true
-            });
-            child.unref?.();
-            installerLaunched = true;
-            return true;
-        } catch {
-            return false;
+            return await operationPromise;
+        } finally {
+            operationPromise = null;
         }
     }
 
     return Object.freeze({
+        activatePendingUpdate,
         checkForUpdates,
         getState,
-        launchPendingInstaller,
         prepareUpdate
     });
 }

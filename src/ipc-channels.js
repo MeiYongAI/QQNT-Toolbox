@@ -24,6 +24,7 @@ const CHANNEL_JUMP_RECALL_MESSAGE = 'qqnt-toolbox:jump-recall-message';
 const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
 const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
 const CHANNEL_PREPARE_UPDATE = 'qqnt-toolbox:prepare-update';
+const CHANNEL_RESTART_UPDATE = 'qqnt-toolbox:restart-update';
 const CHANNEL_UPDATE_STATE_CHANGED = 'qqnt-toolbox:update-state-changed';
 
 module.exports = Object.freeze({
@@ -51,5 +52,6 @@ module.exports = Object.freeze({
     CHANNEL_GET_UPDATE_STATE,
     CHANNEL_CHECK_UPDATE,
     CHANNEL_PREPARE_UPDATE,
+    CHANNEL_RESTART_UPDATE,
     CHANNEL_UPDATE_STATE_CHANGED
 });

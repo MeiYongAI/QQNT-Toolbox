@@ -75,6 +75,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.getUpdateState();
     await api.checkForUpdates({ force: true });
     await api.prepareUpdate();
+    await api.restartForUpdate();
     await api.openInlineMedia({ filePath: 'D:\\cache\\media.mp4' });
     await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
     const unsubscribePreview = api.onInlineMediaPreview(() => {});
@@ -99,6 +100,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:get-update-state',
         'qqnt-toolbox:check-update',
         'qqnt-toolbox:prepare-update',
+        'qqnt-toolbox:restart-update',
         'qqnt-toolbox:open-inline-media',
         'qqnt-toolbox:prepare-inline-media'
     ]);

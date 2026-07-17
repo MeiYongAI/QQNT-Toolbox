@@ -100,7 +100,6 @@ try {
         'QQNT-Toolbox/src/reaction-limit.js',
         'QQNT-Toolbox/src/repeat-message.js',
         'QQNT-Toolbox/src/settings.css',
-        'QQNT-Toolbox/src/update-helper.ps1',
         'QQNT-Toolbox/src/voice/media.js',
         'QQNT-Toolbox/src/voice/ptt-source.js',
         'QQNT-Toolbox/src/voice/renderer-ui.js',

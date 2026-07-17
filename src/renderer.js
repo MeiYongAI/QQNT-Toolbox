@@ -1707,7 +1707,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     label: text('检查'),
                     updateRole: 'check'
                 }),
-                createActionItem(text('下载更新'), text('校验后暂存，退出 QQ 时自动安装'), 'preparePluginUpdate', {
+                createActionItem(text('下载更新'), text('校验后暂存，重启 QQ 后生效'), 'preparePluginUpdate', {
                     label: text('下载'),
                     child: true,
                     updateRole: 'prepare'
@@ -1795,7 +1795,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function normalizeUpdateState(value) {
         const source = value && typeof value === 'object' ? value : {};
         const statuses = new Set([
-            'idle', 'checking', 'current', 'available', 'downloading', 'ready', 'error'
+            'idle', 'checking', 'current', 'available', 'downloading', 'ready', 'restarting', 'error'
         ]);
         return {
             status: statuses.has(source.status) ? source.status : 'idle',
@@ -1827,7 +1827,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             case 'downloading':
                 return `${text('正在下载并校验')} ${latest}`;
             case 'ready':
-                return `${latest} ${text('已就绪，退出 QQ 后自动安装')}`;
+                return `${latest} ${text('已就绪，点击“重启安装”后生效')}`;
+            case 'restarting':
+                return text('正在重启 QQ 并安装更新');
             case 'error':
                 return currentUpdateState.reason === 'unsupported-platform'
                     ? text('自动安装目前仅支持 Windows')
@@ -1846,14 +1848,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (checkMeta) {
             checkMeta.textContent = getUpdateStatusText();
         }
-        const busy = ['checking', 'downloading'].includes(currentUpdateState.status);
+        const busy = ['checking', 'downloading', 'restarting'].includes(currentUpdateState.status);
         if (checkButton && !panelActionFeedbackTimers.has(checkButton)) {
             checkButton.textContent = currentUpdateState.status === 'error' ? text('重试') : text('检查');
             checkButton.disabled = busy;
         }
         if (prepareButton && !panelActionFeedbackTimers.has(prepareButton)) {
-            prepareButton.textContent = currentUpdateState.status === 'ready' ? text('等待退出') : text('下载');
-            prepareButton.disabled = currentUpdateState.status !== 'available' || !currentUpdateState.supported;
+            prepareButton.textContent = currentUpdateState.status === 'ready' ? text('重启安装') : text('下载');
+            prepareButton.disabled = !['available', 'ready'].includes(currentUpdateState.status) ||
+                !currentUpdateState.supported;
         }
         if (prepareItem) {
             prepareItem.dataset.disabled = String(prepareButton?.disabled !== false);
@@ -2168,10 +2171,17 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 currentUpdateState = normalizeUpdateState(result);
                 refreshConfigViews();
             } else if (action === 'preparePluginUpdate') {
-                if (typeof bridge?.prepareUpdate !== 'function') {
-                    throw new Error('The updater bridge is unavailable.');
+                if (currentUpdateState.status === 'ready') {
+                    if (typeof bridge?.restartForUpdate !== 'function') {
+                        throw new Error('The updater restart bridge is unavailable.');
+                    }
+                    result = await bridge.restartForUpdate();
+                } else {
+                    if (typeof bridge?.prepareUpdate !== 'function') {
+                        throw new Error('The updater bridge is unavailable.');
+                    }
+                    result = await bridge.prepareUpdate();
                 }
-                result = await bridge.prepareUpdate();
                 currentUpdateState = normalizeUpdateState(result);
                 refreshConfigViews();
             } else {
@@ -2187,7 +2197,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 clearDiagnosticLog: text('已清空'),
                 clearRecallCache: text('已清理'),
                 checkPluginUpdate: result?.status === 'available' ? text('有更新') : text('已检查'),
-                preparePluginUpdate: text('已下载')
+                preparePluginUpdate: result?.status === 'restarting' ? text('正在重启') : text('已下载')
             };
             showPanelActionFeedback(button, labels[action] || text('完成'), 'success');
         } catch (error) {
