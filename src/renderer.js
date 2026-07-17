@@ -1,4 +1,5 @@
 import {
+    closeNativeContextMenu,
     createMessageContextMenuOrderController,
     getContextMenuItemElements
 } from './message-context-menu-order.js';
@@ -935,9 +936,6 @@ let handleToolboxVueComponentMount = () => {};
     opacity: .58;
 }
 .qqnt-toolbox-poke-recall-native-hidden {
-    display: none !important;
-}
-.qqnt-toolbox-native-menu-dismissed {
     display: none !important;
 }
 #${POKE_FALLBACK_MENU_ID} {
@@ -4888,14 +4886,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             });
     }
 
-    function restoreDismissedNativeContextMenus() {
-        document.querySelectorAll('.qqnt-toolbox-native-menu-dismissed')
-            .forEach(menu => menu.classList.remove('qqnt-toolbox-native-menu-dismissed'));
-    }
-
-    function dismissNativeContextMenu(menu) {
-        menu?.classList?.add('qqnt-toolbox-native-menu-dismissed');
-        queueMicrotask(() => restorePokeRecallMenu(menu));
+    function closePokeContextMenu(menu) {
+        const closed = closeNativeContextMenu(menu);
+        if (closed) {
+            queueMicrotask(() => restorePokeRecallMenu(menu));
+        }
+        return closed;
     }
 
     function findNativeContextMenuNear(point) {
@@ -5044,11 +5040,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         item.addEventListener('mousedown', stop, true);
         item.addEventListener('click', event => {
             stop(event);
+            closePokeContextMenu(menu);
             sendAvatarPoke(payload, avatar, 'context-menu');
             if (menu.id === POKE_FALLBACK_MENU_ID) {
                 removeFallbackPokeMenu();
-            } else {
-                dismissNativeContextMenu(menu);
             }
         }, true);
         return item;
@@ -5193,7 +5188,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             stop(event);
             const payload = createPokeRecallPayload(record);
             const recallPoke = getBridge()?.recallPoke;
-            dismissNativeContextMenu(menu);
+            closePokeContextMenu(menu);
             if (!payload || typeof recallPoke !== 'function') {
                 return;
             }
@@ -5384,7 +5379,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('pointerup', handleImageViewerPointerUp, true);
 
     document.addEventListener('contextmenu', event => {
-        restoreDismissedNativeContextMenus();
         if (supportsNativeNudge()) {
             return;
         }

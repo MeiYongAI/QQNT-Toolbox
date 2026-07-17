@@ -67,6 +67,36 @@ export function getContextMenuItemElements(menu, includeToolbox = true) {
         .slice(0, 48);
 }
 
+export function closeNativeContextMenu(menu) {
+    const elements = [menu, ...getContextMenuItemElements(menu, false)];
+    const seen = new WeakSet();
+    for (const element of elements) {
+        const starts = [
+            ...Array.from(element?.__VUE__ || []),
+            element?.__vueParentComponent
+        ].filter(Boolean);
+        for (const start of starts) {
+            for (let component = start, depth = 0; component && depth < 12;
+                component = component.parent, depth += 1) {
+                if (seen.has(component)) {
+                    continue;
+                }
+                seen.add(component);
+                const context = component.ctx || component.proxy;
+                if (typeof context?.close !== 'function' ||
+                    typeof context?.closeWhenEscPressed !== 'function' ||
+                    typeof context?.closeWhenBlur !== 'function' ||
+                    typeof context?.preventEventWhenMouseNotInMenu !== 'function') {
+                    continue;
+                }
+                Reflect.apply(context.close, component.proxy || context, []);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 export function normalizeContextMenuOrder(values) {
     const seen = new Set();
     const result = [];

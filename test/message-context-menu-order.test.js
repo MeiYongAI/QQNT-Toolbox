@@ -118,6 +118,33 @@ test('collects Toolbox entries for sorting but excludes them as native templates
     assert.deepEqual(getContextMenuItemElements(menu, false), [nativeItem]);
 });
 
+test('closes a mounted QQ context menu through its Vue lifecycle', async () => {
+    const { closeNativeContextMenu } = await modulePromise;
+    let closeCalls = 0;
+    const unrelated = {
+        ctx: { close: () => assert.fail('must not call an unrelated close method') }
+    };
+    const context = {
+        close() {
+            closeCalls += 1;
+        },
+        closeWhenEscPressed() {},
+        closeWhenBlur() {},
+        preventEventWhenMouseNotInMenu() {}
+    };
+    const item = {
+        __VUE__: [{ parent: unrelated }, { parent: { ctx: context } }],
+        classList: { contains: () => false },
+        contains: () => false
+    };
+    const menu = {
+        querySelectorAll: selector => selector === '.q-context-menu-item' ? [item] : []
+    };
+
+    assert.equal(closeNativeContextMenu(menu), true);
+    assert.equal(closeCalls, 1);
+});
+
 test('composes native and Toolbox configs before rendering', async () => {
     const { composeContextMenuConfigs, describeContextMenuConfig } = await modulePromise;
     const repeat = {
