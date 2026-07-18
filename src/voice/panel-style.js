@@ -160,6 +160,7 @@ const VOICE_LIBRARY_PANEL_CSS = String.raw`
     flex: 1;
     overflow: auto;
     padding: 3px 8px;
+    scrollbar-gutter: stable both-edges;
     scrollbar-width: thin;
     scrollbar-color: var(--voice-border) transparent;
 }

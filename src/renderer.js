@@ -2996,7 +2996,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function isImageViewerWindow() {
-        return location.hash === '#/image-viewer' || Boolean(document.querySelector('.main-area.main-area--image, .main-area--image'));
+        return String(location.hash || '').toLowerCase().includes('#/image-viewer') ||
+            Boolean(document.querySelector('.main-area.main-area--image, .main-area--image'));
+    }
+
+    function isNativeMediaViewerWindow() {
+        const hash = String(location.hash || '').toLowerCase();
+        return ['#/image-viewer', '#/video-viewer', '#/media-viewer'].some(route => hash.includes(route)) ||
+            isImageViewerWindow() ||
+            Boolean(document.querySelector([
+                '.main-area--video',
+                '[class*="media-viewer"]'
+            ].join(',')));
     }
 
     function closeInlineMediaPreview() {
@@ -3024,7 +3035,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }))
             .filter(item => item.src || item.needsResolve);
         let index = Math.min(Math.max(Number(payload?.index) || 0, 0), items.length - 1);
-        if (!items.length || !document.body || isImageViewerWindow()) {
+        if (!items.length || !document.body || isNativeMediaViewerWindow()) {
             return;
         }
         recordRendererDiagnostic('media.preview-rendered', {
@@ -3293,8 +3304,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 if (disposed || index !== scheduledIndex) {
                     return;
                 }
-                prepareMedia(index - 1)?.catch(() => {});
-                prepareMedia(index + 1)?.catch(() => {});
+                for (const mediaIndex of [index - 1, index + 1]) {
+                    if (!items[mediaIndex] || items[mediaIndex].needsResolve) {
+                        continue;
+                    }
+                    prepareMedia(mediaIndex)?.catch(() => {});
+                }
                 trimPreparedMedia();
             }, 140);
         };
@@ -3357,7 +3372,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 const error = document.createElement('div');
                 error.className = 'qqnt-toolbox-media-error';
                 const errorLabel = document.createElement('span');
-                errorLabel.textContent = text('媒体加载失败');
+                errorLabel.textContent = text('\u5a92\u4f53\u52a0\u8f7d\u5931\u8d25');
                 const retry = document.createElement('button');
                 retry.type = 'button';
                 retry.className = 'qqnt-toolbox-media-retry qqnt-toolbox-media-control';
@@ -3628,22 +3643,24 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const type = hasFileMediaExtension(recordElement, VIDEO_FILE_EXTENSIONS)
             ? 'video'
             : hasFileMediaExtension(recordElement, IMAGE_FILE_EXTENSIONS) ? 'image' : '';
-        if (!peer || !filePath || !type) {
+        const identity = {
+            chatType: Number(peer?.chatType) || 0,
+            peerUid: normalizeText(peer?.peerUid),
+            msgId: normalizeText(record?.msgId),
+            msgSeq: normalizeText(record?.msgSeq),
+            elementId: normalizeText(recordElement?.elementId)
+        };
+        const canDownload = identity.chatType && identity.peerUid && identity.msgId && identity.elementId;
+        if (!peer || !type || (!filePath && !canDownload)) {
             return null;
         }
         return {
             type,
-            filePath,
+            ...(filePath ? { filePath } : {}),
             fingerprint: normalizeText(file?.md5HexStr || file?.fileMd5).toLowerCase(),
             name: normalizeText(file?.fileName) || filePath.split(/[\\/]/).pop(),
             sourceIndex,
-            identity: {
-                chatType: peer.chatType,
-                peerUid: peer.peerUid,
-                msgId: normalizeText(record?.msgId),
-                msgSeq: normalizeText(record?.msgSeq),
-                elementId: normalizeText(recordElement?.elementId)
-            }
+            identity
         };
     }
 
@@ -3760,7 +3777,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const singleClickEnabled = isConfigEnabled('interfaceTweaks.singleClickMediaViewer');
         const inlineViewerEnabled = isConfigEnabled('interfaceTweaks.inlineMediaViewer');
         if ((!singleClickEnabled && !inlineViewerEnabled) || event.button !== 0 ||
-            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isImageViewerWindow()) {
+            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isNativeMediaViewerWindow()) {
             return;
         }
         const target = getSingleClickMediaTarget(event);
@@ -3794,7 +3811,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function handleInlineFileMediaDoubleClick(event) {
         if (!isConfigEnabled('interfaceTweaks.inlineMediaViewer') ||
             isConfigEnabled('interfaceTweaks.singleClickMediaViewer') || event.button !== 0 ||
-            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isImageViewerWindow()) {
+            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isNativeMediaViewerWindow()) {
             return;
         }
         const target = getSingleClickMediaTarget(event);

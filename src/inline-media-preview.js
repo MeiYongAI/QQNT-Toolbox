@@ -44,25 +44,32 @@ function extractInlineMediaItem(media, sourceIndex) {
     if (!context) {
         return null;
     }
-    const type = context.video?.path ? 'video' : 'image';
-    const filePath = resolveLocalFilePath(type === 'video' ? context.video.path : context.sourcePath);
-    if (!filePath || !path.isAbsolute(filePath)) {
+    const identity = {
+        chatType: Number(context.chatType || media?.chatType) || 0,
+        peerUid: String(context.peerUid || media?.peerUid || '').trim(),
+        msgId: String(context.msgId || media?.msgId || '').trim(),
+        msgSeq: String(context.msgSeq || media?.msgSeq || '').trim(),
+        elementId: String(context.elementId || media?.elementId || '').trim()
+    };
+    const hasVideo = Boolean(context.video && typeof context.video === 'object');
+    const type = hasVideo ? 'video' : 'image';
+    const candidatePath = resolveLocalFilePath(hasVideo ? context.video.path : context.sourcePath);
+    const filePath = candidatePath && path.isAbsolute(candidatePath) ? candidatePath : '';
+    const canDownload = identity.chatType && identity.peerUid && identity.msgId && identity.elementId;
+    if (!filePath && !canDownload) {
         return null;
     }
     const previewFilePath = type === 'video' ? resolveLocalFilePath(context.sourcePath) : '';
+    const explicitName = String(
+        context.video?.fileName || context.fileName || context.name || media?.fileName || media?.name || ''
+    ).trim();
     return {
         type,
-        filePath,
+        ...(filePath ? { filePath } : {}),
         ...(previewFilePath && path.isAbsolute(previewFilePath) ? { previewFilePath } : {}),
-        name: path.basename(filePath),
+        name: explicitName || path.basename(filePath) || (type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex,
-        identity: {
-            chatType: Number(context.chatType) || 0,
-            peerUid: String(context.peerUid || ''),
-            msgId: String(context.msgId || ''),
-            msgSeq: String(context.msgSeq || ''),
-            elementId: String(context.elementId || '')
-        }
+        identity
     };
 }
 
@@ -86,32 +93,37 @@ function extractInlineMediaPreview(command) {
 }
 
 function normalizeInlineMediaOpenItem(value) {
-    const filePath = resolveLocalFilePath(value?.filePath);
+    const candidatePath = resolveLocalFilePath(value?.filePath);
+    const filePath = candidatePath && path.isAbsolute(candidatePath) ? candidatePath : '';
+    const identity = value?.identity || {};
+    const normalizedIdentity = {
+        chatType: Number(identity.chatType) || 0,
+        peerUid: String(identity.peerUid || '').trim(),
+        msgId: String(identity.msgId || '').trim(),
+        msgSeq: String(identity.msgSeq || '').trim(),
+        elementId: String(identity.elementId || '').trim()
+    };
     const type = classifyMediaFilePath(value?.name, filePath);
-    if (!type || !filePath || !path.isAbsolute(filePath)) {
+    const canDownload = normalizedIdentity.chatType && normalizedIdentity.peerUid &&
+        normalizedIdentity.msgId && normalizedIdentity.elementId;
+    if (!type || (!filePath && !canDownload)) {
         return null;
     }
     const previewFilePath = type === 'video' ? resolveLocalFilePath(value?.previewFilePath) : '';
-    const identity = value?.identity || {};
     return {
         type,
-        filePath,
+        ...(filePath ? { filePath } : {}),
         ...(previewFilePath && path.isAbsolute(previewFilePath) ? { previewFilePath } : {}),
         fingerprint: String(value?.fingerprint || '').trim().toLowerCase(),
         name: String(value?.name || '').trim() || path.basename(filePath),
         sourceIndex: Number.isInteger(Number(value?.sourceIndex)) ? Number(value.sourceIndex) : 0,
-        identity: {
-            chatType: Number(identity.chatType) || 0,
-            peerUid: String(identity.peerUid || '').trim(),
-            msgId: String(identity.msgId || '').trim(),
-            msgSeq: String(identity.msgSeq || '').trim(),
-            elementId: String(identity.elementId || '').trim()
-        }
+        identity: normalizedIdentity
     };
 }
 
 function createInlineMediaDownloadRequest(item) {
     const identity = item?.identity || {};
+    const filePath = resolveLocalFilePath(item?.filePath);
     const request = {
         fileModelId: '0',
         downSourceType: 0,
@@ -122,9 +134,10 @@ function createInlineMediaDownloadRequest(item) {
         elementId: String(identity.elementId || '').trim(),
         thumbSize: 0,
         downloadType: 1,
-        filePath: String(item?.filePath || '').trim()
+        filePath
     };
-    return request.msgId && request.chatType && request.peerUid && request.elementId
+    return request.msgId && request.chatType && request.peerUid && request.elementId &&
+        path.isAbsolute(request.filePath)
         ? request
         : null;
 }

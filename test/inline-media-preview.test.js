@@ -106,6 +106,33 @@ test('accepts pending local files and rejects invalid media payloads', () => {
     assert.equal(extractInlineMediaPreview(makeCommand([{}])), null);
 });
 
+test('extracts undownloaded native media so the inline viewer can show loading immediately', () => {
+    assert.deepEqual(extractInlineMediaPreview(makeCommand([{
+        context: {
+            video: { fileName: 'pending-video.mp4' },
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    }])), {
+        type: 'video',
+        name: 'pending-video.mp4',
+        sourceIndex: 0,
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    });
+    assert.equal(extractInlineMediaPreview(makeCommand([{
+        context: { video: { fileName: 'pending-video.mp4' } }
+    }])), null);
+});
+
 test('classifies image and video file messages without accepting normal files', () => {
     assert.equal(classifyMediaFilePath('preview.PNG'), 'image');
     assert.equal(classifyMediaFilePath('', 'D:\\media\\clip.MP4'), 'video');
@@ -153,6 +180,36 @@ test('normalizes file-message media for direct inline viewing', () => {
     assert.equal(normalizeInlineMediaOpenItem({ filePath: 'D:\\cache\\document.pdf' }), null);
 });
 
+test('accepts an undownloaded file-message media item with complete download identity', () => {
+    assert.deepEqual(normalizeInlineMediaOpenItem({
+        filePath: 'appimg://pending-video.mp4',
+        name: 'pending-video.mp4',
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    }), {
+        type: 'video',
+        fingerprint: '',
+        name: 'pending-video.mp4',
+        sourceIndex: 0,
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    });
+    assert.equal(normalizeInlineMediaOpenItem({
+        name: 'pending-video.mp4',
+        identity: { msgId: 'incomplete' }
+    }), null);
+});
+
 test('builds a version-compatible native rich-media download request', () => {
     const item = {
         filePath: 'D:\\cache\\pending.webp',
@@ -178,6 +235,9 @@ test('builds a version-compatible native rich-media download request', () => {
 
     assert.deepEqual(createInlineMediaDownloadRequest(item), request);
     assert.deepEqual(createInlineMediaDownloadPayload(item), [{ getReq: request }, null]);
+    assert.equal(createInlineMediaDownloadRequest({
+        identity: item.identity
+    }), null);
     assert.equal(createInlineMediaDownloadRequest({ identity: { msgId: 'incomplete' } }), null);
     assert.equal(createInlineMediaDownloadPayload({ identity: { msgId: 'incomplete' } }), null);
 });
