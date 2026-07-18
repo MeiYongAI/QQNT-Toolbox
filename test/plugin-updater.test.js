@@ -108,9 +108,13 @@ test('extracts a complete package only when its plugin identity matches', async 
     });
 });
 
-test('stages a loader-selected copy and removes the old copy after the new version starts', async () => {
+test('stages a clean loader-selected copy and removes the old copy after the new version starts', async () => {
     await withTemporaryDirectory(async directory => {
-        const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox');
+        const pluginRoot = path.join(
+            directory,
+            'plugins',
+            '~qqnt_toolbox-0.7.1-1000-deadbeef'
+        );
         const dataDir = path.join(directory, 'data');
         const updateRoot = path.join(dataDir, 'updater');
         const bytes = Buffer.from('verified-release');
@@ -173,8 +177,14 @@ test('stages a loader-selected copy and removes the old copy after the new versi
         const activationPath = path.join(updateRoot, 'activation.json');
         const activation = JSON.parse(await fs.readFile(activationPath, 'utf8'));
         assert.equal(activation.version, '0.8.0');
+        assert.equal(path.basename(activation.installedPluginRoot), 'QQNT-Toolbox-v0.8.0');
         assert.equal(await fs.readFile(path.join(activation.installedPluginRoot, 'new.txt'), 'utf8'), 'new');
         assert.equal(await fs.readFile(path.join(pluginRoot, 'old.txt'), 'utf8'), 'old');
+        await assert.rejects(fs.stat(path.join(pluginRoot, 'manifest.json')), { code: 'ENOENT' });
+        assert.equal(
+            (await fs.readdir(pluginRoot)).filter(name => name.startsWith('.qqnt-toolbox-retired-manifest-')).length,
+            1
+        );
 
         const selectedRoot = (await fs.readdir(path.dirname(pluginRoot), { withFileTypes: true }))
             .filter(entry => entry.isDirectory())

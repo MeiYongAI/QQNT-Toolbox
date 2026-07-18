@@ -19,6 +19,8 @@ const MAX_API_BYTES = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 512;
+const INSTALLED_PLUGIN_DIRECTORY_PREFIX = 'QQNT-Toolbox-v';
+const RETIRED_MANIFEST_PREFIX = '.qqnt-toolbox-retired-manifest-';
 const REQUIRED_PLUGIN_FILES = Object.freeze([
     'manifest.json',
     'package.json',
@@ -362,6 +364,34 @@ function readPluginIdentity(pluginRoot) {
     }
 }
 
+async function retirePluginManifests(pluginRoots, nonce) {
+    const retired = [];
+    try {
+        for (const pluginRoot of pluginRoots) {
+            const manifestPath = path.join(pluginRoot, 'manifest.json');
+            const retiredPath = path.join(pluginRoot, `${RETIRED_MANIFEST_PREFIX}${nonce}.json`);
+            await fs.rename(manifestPath, retiredPath);
+            retired.push({ manifestPath, retiredPath });
+        }
+        return retired;
+    } catch (error) {
+        await restorePluginManifests(retired);
+        throw error;
+    }
+}
+
+async function restorePluginManifests(retired) {
+    let restored = true;
+    for (const entry of [...retired].reverse()) {
+        try {
+            await fs.rename(entry.retiredPath, entry.manifestPath);
+        } catch {
+            restored = false;
+        }
+    }
+    return restored;
+}
+
 function isUsableCachedRelease(value) {
     const version = normalizeVersion(value?.version)?.value;
     return Boolean(
@@ -654,9 +684,25 @@ function createPluginUpdater(options = {}) {
 
             const nonce = `${Number(now())}-${crypto.randomBytes(4).toString('hex')}`;
             const temporaryRoot = path.join(pluginParent, `.qqnt-toolbox-update-${nonce}`);
-            const installedPluginRoot = path.join(pluginParent, `~qqnt_toolbox-${version}-${nonce}`);
-            const previousPluginRoots = listPluginRoots(pluginParent, pluginSlug);
+            const installedPluginRoot = path.join(
+                pluginParent,
+                `${INSTALLED_PLUGIN_DIRECTORY_PREFIX}${version}`
+            );
+            const previousPluginRoots = listPluginRoots(pluginParent, pluginSlug)
+                .filter(root => !pathsEqual(root, installedPluginRoot));
+            let retiredManifests = [];
+            let activationWritten = false;
             try {
+                if (pathsEqual(installedPluginRoot, pluginRoot)) {
+                    throw createUpdaterError('activation-target-conflict');
+                }
+                if (fsSync.existsSync(installedPluginRoot)) {
+                    const existingIdentity = readPluginIdentity(installedPluginRoot);
+                    if (existingIdentity?.slug !== pluginSlug || existingIdentity.version !== version) {
+                        throw createUpdaterError('activation-target-exists');
+                    }
+                    await fs.rm(installedPluginRoot, { recursive: true, force: true });
+                }
                 await fs.cp(stagedPluginRoot, temporaryRoot, {
                     recursive: true,
                     force: false,
@@ -667,20 +713,30 @@ function createPluginUpdater(options = {}) {
                     throw createUpdaterError('copied-plugin-mismatch');
                 }
                 await fs.rename(temporaryRoot, installedPluginRoot);
-                if (!pathsEqual(getSelectedPluginRoot(pluginParent, pluginSlug), installedPluginRoot)) {
-                    throw createUpdaterError('loader-selection-mismatch');
-                }
                 await writeJson(activationPath, {
                     version,
                     createdAt: Number(now()),
                     installedPluginRoot,
                     previousPluginRoots
                 });
+                activationWritten = true;
+                retiredManifests = await retirePluginManifests(previousPluginRoots, nonce);
+                if (!pathsEqual(getSelectedPluginRoot(pluginParent, pluginSlug), installedPluginRoot)) {
+                    throw createUpdaterError('loader-selection-mismatch');
+                }
                 return { ok: true, ...emit({ status: 'restarting', reason: '' }) };
             } catch (error) {
+                const restored = await restorePluginManifests(retiredManifests);
                 await fs.rm(temporaryRoot, { recursive: true, force: true }).catch(() => {});
-                await fs.rm(installedPluginRoot, { recursive: true, force: true }).catch(() => {});
-                const reason = String(error?.reason || 'activation-failed');
+                if (restored) {
+                    await fs.rm(installedPluginRoot, { recursive: true, force: true }).catch(() => {});
+                    if (activationWritten) {
+                        await fs.rm(activationPath, { force: true }).catch(() => {});
+                    }
+                }
+                const reason = restored
+                    ? String(error?.reason || 'activation-failed')
+                    : 'activation-rollback-failed';
                 return { ok: false, ...emit({ status: 'error', reason }) };
             }
         })();
