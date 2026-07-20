@@ -14,6 +14,7 @@ const {
     isNativeMediaViewerUrl,
     mergeInlineMediaItems,
     normalizeInlineMediaOpenItem,
+    normalizeInlineMediaSourceUrl,
     resolveInlineReplyPreview
 } = require('../src/inline-media-preview');
 
@@ -67,7 +68,7 @@ test('extracts a local video from openMediaViewer', t => {
     }])), {
         type: 'video',
         filePath,
-        previewFilePath: 'C:\\video-cover.png',
+        previewSource: 'appimg://D:/cache/video-cover.png',
         name: 'preview.mp4',
         sourceIndex: 0,
         identity: {
@@ -106,53 +107,57 @@ test('accepts pending local files and rejects invalid media payloads', () => {
     assert.equal(extractInlineMediaPreview(makeCommand([{}])), null);
 });
 
-test('extracts undownloaded native media so the inline viewer can show loading immediately', () => {
+test('keeps a renderer-readable image source when the original file is not local', () => {
     assert.deepEqual(extractInlineMediaPreview(makeCommand([{
         context: {
-            video: { fileName: 'pending-video.mp4' },
+            sourcePath: 'appimg://chat/pending-image.webp',
             chatType: 2,
             peerUid: 'group-uid',
             msgId: 'message-id',
-            msgSeq: '100',
-            elementId: 'element-id'
+            elementId: 'image-element'
         }
     }])), {
-        type: 'video',
-        name: 'pending-video.mp4',
+        type: 'image',
+        sourceUrl: 'appimg://chat/pending-image.webp',
+        name: 'image.png',
         sourceIndex: 0,
         identity: {
             chatType: 2,
             peerUid: 'group-uid',
             msgId: 'message-id',
-            msgSeq: '100',
-            elementId: 'element-id'
+            msgSeq: '',
+            elementId: 'image-element'
         }
     });
-    assert.equal(extractInlineMediaPreview(makeCommand([{
-        context: { video: { fileName: 'pending-video.mp4' } }
-    }])), null);
 });
 
-test('classifies image and video file messages without accepting normal files', () => {
-    assert.equal(classifyMediaFilePath('preview.PNG'), 'image');
-    assert.equal(classifyMediaFilePath('', 'D:\\media\\clip.MP4'), 'video');
-    assert.equal(classifyMediaFilePath('archive.zip'), '');
-    assert.equal(classifyMediaFilePath('document.pdf'), '');
+test('keeps the rendered image URL beside a pending original path', () => {
+    const item = extractInlineMediaPreview(makeCommand([{
+        context: {
+            sourcePath: 'C:\\pending\\original.webp',
+            originPath: 'appimg://chat/rendered-thumbnail.webp'
+        }
+    }]));
+
+    assert.equal(item.filePath, 'C:\\pending\\original.webp');
+    assert.equal(item.sourceUrl, 'appimg://chat/rendered-thumbnail.webp');
 });
 
-test('recognizes native image, video, and media viewer windows', () => {
-    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/image-viewer'), true);
-    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/video-viewer'), true);
-    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/media-viewer'), true);
-    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/main/message'), false);
+test('normalizes only renderer-safe media URLs', () => {
+    assert.equal(normalizeInlineMediaSourceUrl('https://example.test/image'), 'https://example.test/image');
+    assert.equal(normalizeInlineMediaSourceUrl('appimg://chat/image.webp'), 'appimg://chat/image.webp');
+    assert.equal(normalizeInlineMediaSourceUrl('blob:https://example.test/id'), 'blob:https://example.test/id');
+    assert.equal(normalizeInlineMediaSourceUrl('data:image/png;base64,AA=='), 'data:image/png;base64,AA==');
+    assert.equal(normalizeInlineMediaSourceUrl('javascript:alert(1)'), '');
+    assert.equal(normalizeInlineMediaSourceUrl('data:text/html,test'), '');
 });
 
-test('normalizes file-message media for direct inline viewing', () => {
+test('normalizes a video selected directly from its message record', () => {
     assert.deepEqual(normalizeInlineMediaOpenItem({
-        filePath: 'D:\\cache\\pending.MP4',
-        previewFilePath: 'D:\\cache\\pending-cover.jpg',
-        name: 'clip.MP4',
-        fingerprint: 'AABB',
+        type: 'video',
+        filePath: 'D:\\cache\\pending.mp4',
+        previewSource: 'D:\\cache\\pending-cover.jpg',
+        name: 'pending.mp4',
         sourceIndex: 2,
         identity: {
             chatType: 2,
@@ -163,39 +168,11 @@ test('normalizes file-message media for direct inline viewing', () => {
         }
     }), {
         type: 'video',
-        filePath: 'D:\\cache\\pending.MP4',
-        previewFilePath: 'D:\\cache\\pending-cover.jpg',
-        fingerprint: 'aabb',
-        name: 'clip.MP4',
-        sourceIndex: 2,
-        identity: {
-            chatType: 2,
-            peerUid: 'group-uid',
-            msgId: 'message-id',
-            msgSeq: '100',
-            elementId: 'element-id'
-        }
-    });
-    assert.equal(normalizeInlineMediaOpenItem({ filePath: 'relative.mp4' }), null);
-    assert.equal(normalizeInlineMediaOpenItem({ filePath: 'D:\\cache\\document.pdf' }), null);
-});
-
-test('accepts an undownloaded file-message media item with complete download identity', () => {
-    assert.deepEqual(normalizeInlineMediaOpenItem({
-        filePath: 'appimg://pending-video.mp4',
-        name: 'pending-video.mp4',
-        identity: {
-            chatType: 2,
-            peerUid: 'group-uid',
-            msgId: 'message-id',
-            msgSeq: '100',
-            elementId: 'element-id'
-        }
-    }), {
-        type: 'video',
+        filePath: 'D:\\cache\\pending.mp4',
+        previewSource: 'D:\\cache\\pending-cover.jpg',
         fingerprint: '',
-        name: 'pending-video.mp4',
-        sourceIndex: 0,
+        name: 'pending.mp4',
+        sourceIndex: 2,
         identity: {
             chatType: 2,
             peerUid: 'group-uid',
@@ -204,15 +181,12 @@ test('accepts an undownloaded file-message media item with complete download ide
             elementId: 'element-id'
         }
     });
-    assert.equal(normalizeInlineMediaOpenItem({
-        name: 'pending-video.mp4',
-        identity: { msgId: 'incomplete' }
-    }), null);
+    assert.equal(normalizeInlineMediaOpenItem({ type: 'video', filePath: 'relative.mp4' }), null);
 });
 
-test('builds a version-compatible native rich-media download request', () => {
+test('builds the QQ rich-media request used by one-click video download', () => {
     const item = {
-        filePath: 'D:\\cache\\pending.webp',
+        filePath: 'D:\\cache\\pending.mp4',
         identity: {
             chatType: 2,
             peerUid: 'group-uid',
@@ -230,16 +204,138 @@ test('builds a version-compatible native rich-media download request', () => {
         elementId: 'element-id',
         thumbSize: 0,
         downloadType: 1,
-        filePath: 'D:\\cache\\pending.webp'
+        filePath: 'D:\\cache\\pending.mp4'
     };
 
     assert.deepEqual(createInlineMediaDownloadRequest(item), request);
     assert.deepEqual(createInlineMediaDownloadPayload(item), [{ getReq: request }, null]);
-    assert.equal(createInlineMediaDownloadRequest({
-        identity: item.identity
-    }), null);
-    assert.equal(createInlineMediaDownloadRequest({ identity: { msgId: 'incomplete' } }), null);
-    assert.equal(createInlineMediaDownloadPayload({ identity: { msgId: 'incomplete' } }), null);
+    assert.equal(createInlineMediaDownloadPayload({ identity: item.identity }), null);
+});
+
+test('activates the QQ forward-detail video control before opening the inline preview', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(rendererSource, /item\.recordSource\s*=\s*'forward-detail'/);
+    assert.match(rendererSource, /payload\.recordSource\s*===\s*'forward-detail'[\s\S]*dispatchNativeMediaOpen\(target, sourceEvent\)/);
+    assert.match(rendererSource, /payload\.nativeDownloadStarted\s*=\s*true/);
+    assert.match(mainSource, /nativeDownloadStarted[\s\S]*getAbsoluteFilePathCandidate\(\[item\.filePath\]\)/);
+    assert.doesNotMatch(mainSource, /requestForwardDetailInlineMediaDownload/);
+    assert.match(mainSource, /nodeIKernelRichMediaService\/downloadRichMediaInVisit'[\s\S]*?\}\],\s*false\s*\)/);
+});
+
+test('resolves an unopened gallery item through QQ when navigation first reaches it', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(mainSource, /CHANNEL_PREPARE_INLINE_MEDIA/);
+    assert.match(mainSource, /prepareInlineMedia[\s\S]*requestInlineMediaDownload\(browserWindow, item\)/);
+    assert.match(rendererSource, /prepareInlineMedia\?\.\(\{ galleryId, index: mediaIndex \}\)/);
+    assert.match(rendererSource, /if \(item\.needsResolve\) \{\s*item\.src = '';/);
+    assert.doesNotMatch(mainSource, /inlineMediaDownloads|MEDIA_PREVIEW_DOWNLOAD_WAIT_MS/);
+});
+
+test('keeps the displayed media until the navigated item is ready', () => {
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(rendererSource, /if \(!activeMedia\) \{\s*stage\.replaceChildren\(\);\s*\}/);
+    assert.match(rendererSource, /const previousMedia = activeMedia;\s*activeMedia = media;[\s\S]*stage\.replaceChildren\(media\);[\s\S]*releaseMedia\(previousMedia\)/);
+    assert.doesNotMatch(rendererSource, /activeMedia = null;\s*clearLoadingPlaceholder\(\);\s*stage\.replaceChildren\(\);/);
+});
+
+test('preloads only the adjacent images in the inline gallery', () => {
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(rendererSource, /const retained = new Set\(\[index - 1, index \+ 1\]\)/);
+    assert.match(rendererSource, /items\[mediaIndex\]\?\.type !== 'image'/);
+    assert.match(rendererSource, /scheduleAdjacentPreload\(\);/);
+    assert.doesNotMatch(rendererSource, /for \(let mediaIndex = 0; mediaIndex < items\.length/);
+});
+
+test('uses an inline swatch group for media background selection', () => {
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+    const settingsCss = fs.readFileSync(path.join(__dirname, '..', 'src', 'settings.css'), 'utf8');
+
+    assert.match(rendererSource, /createSwatchItem\(text\('媒体查看背景'\)/);
+    assert.match(rendererSource, /setAttribute\('role', 'radiogroup'\)/);
+    assert.match(rendererSource, /setAttribute\('role', 'radio'\)/);
+    assert.match(settingsCss, /qqnt-toolbox-swatch\[data-value="transparent"\]/);
+    assert.doesNotMatch(rendererSource, /createSelectItem|qqnt-toolbox-select|HTMLSelectElement/);
+    assert.doesNotMatch(settingsCss, /qqnt-toolbox-select/);
+});
+
+test('keeps an undownloaded native media item only with a download destination', () => {
+    assert.deepEqual(extractInlineMediaPreview(makeCommand([{
+        context: {
+            video: {
+                path: 'C:\\pending-video.mp4',
+                fileName: 'pending-video.mp4'
+            },
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    }])), {
+        type: 'video',
+        filePath: 'C:\\pending-video.mp4',
+        name: 'pending-video.mp4',
+        sourceIndex: 0,
+        identity: {
+            chatType: 2,
+            peerUid: 'group-uid',
+            msgId: 'message-id',
+            msgSeq: '100',
+            elementId: 'element-id'
+        }
+    });
+    assert.equal(extractInlineMediaPreview(makeCommand([{
+        context: { video: { fileName: 'pending-video.mp4' } }
+    }])), null);
+});
+
+test('does not attach transient request state to gallery items', () => {
+    const gallery = extractInlineMediaGallery(makeCommand([
+        {
+            context: {
+                sourcePath: 'C:\\pending-image.png',
+                chatType: 2,
+                peerUid: 'group-uid',
+                msgId: 'message-id',
+                elementId: 'image-element'
+            }
+        },
+        {
+            context: {
+                video: {
+                    path: 'C:\\pending-video.mp4',
+                    fileName: 'pending-video.mp4'
+                },
+                chatType: 2,
+                peerUid: 'group-uid',
+                msgId: 'video-message-id',
+                elementId: 'video-element'
+            }
+        }
+    ], 1));
+
+    assert.equal(gallery.items.length, 2);
+    assert.equal(gallery.items.some(item => 'downloadRequested' in item || 'nativeDownload' in item), false);
+});
+
+test('classifies image and video file messages without accepting normal files', () => {
+    assert.equal(classifyMediaFilePath('preview.PNG'), 'image');
+    assert.equal(classifyMediaFilePath('', 'D:\\media\\clip.MP4'), 'video');
+    assert.equal(classifyMediaFilePath('archive.zip'), '');
+    assert.equal(classifyMediaFilePath('document.pdf'), '');
+});
+
+test('recognizes native image, video, and media viewer windows', () => {
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/image-viewer'), true);
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/video-viewer'), true);
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/media-viewer'), true);
+    assert.equal(isNativeMediaViewerUrl('file:///app/index.html#/main/message'), false);
 });
 
 test('deduplicates one media item described by native viewer and message records', () => {
@@ -271,6 +367,20 @@ test('keeps identical media sent in different messages as separate gallery items
     }], [{
         type: 'image',
         filePath,
+        identity: { msgId: 'message-2', elementId: 'element-2' }
+    }]);
+
+    assert.equal(merged.length, 2);
+});
+
+test('keeps different rendered URLs without local paths as separate gallery items', () => {
+    const merged = mergeInlineMediaItems([{
+        type: 'image',
+        sourceUrl: 'appimg://chat/first.webp',
+        identity: { msgId: 'message-1', elementId: 'element-1' }
+    }], [{
+        type: 'image',
+        sourceUrl: 'appimg://chat/second.webp',
         identity: { msgId: 'message-2', elementId: 'element-2' }
     }]);
 

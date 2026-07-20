@@ -8,6 +8,8 @@ const VIDEO_EXTENSIONS = new Set([
     '.mts', '.ogv', '.ts', '.vob', '.webm', '.wmv'
 ]);
 const NATIVE_MEDIA_VIEWER_ROUTES = ['/image-viewer', '/video-viewer', '/media-viewer'];
+const SOURCE_URL_PATTERN = /^(?:https?|appimg|local|blob):/i;
+const DATA_IMAGE_URL_PATTERN = /^data:image\/[a-z0-9.+-]+(?:;[^,]*)?,/i;
 
 function isNativeMediaViewerUrl(value) {
     const url = String(value || '').toLowerCase();
@@ -39,6 +41,33 @@ function resolveLocalFilePath(value) {
     }
 }
 
+function normalizeInlineMediaSourceUrl(value) {
+    const source = String(value || '').trim();
+    return SOURCE_URL_PATTERN.test(source) || DATA_IMAGE_URL_PATTERN.test(source)
+        ? source
+        : '';
+}
+
+function firstSourceUrl(...values) {
+    for (const value of values) {
+        const sourceUrl = normalizeInlineMediaSourceUrl(value);
+        if (sourceUrl) {
+            return sourceUrl;
+        }
+    }
+    return '';
+}
+
+function firstAbsoluteFilePath(...values) {
+    for (const value of values) {
+        const filePath = resolveLocalFilePath(value);
+        if (filePath && path.isAbsolute(filePath)) {
+            return filePath;
+        }
+    }
+    return '';
+}
+
 function extractInlineMediaItem(media, sourceIndex) {
     const context = media?.context;
     if (!context) {
@@ -53,20 +82,52 @@ function extractInlineMediaItem(media, sourceIndex) {
     };
     const hasVideo = Boolean(context.video && typeof context.video === 'object');
     const type = hasVideo ? 'video' : 'image';
-    const candidatePath = resolveLocalFilePath(hasVideo ? context.video.path : context.sourcePath);
-    const filePath = candidatePath && path.isAbsolute(candidatePath) ? candidatePath : '';
-    const canDownload = identity.chatType && identity.peerUid && identity.msgId && identity.elementId;
-    if (!filePath && !canDownload) {
+    const sourceValues = hasVideo
+        ? [
+            context.video.path,
+            context.video.filePath,
+            context.video.sourcePath,
+            context.video.originPath,
+            context.video.localPath,
+            context.video.remoteUrl,
+            context.video.originUrl
+        ]
+        : [
+            context.sourcePath,
+            context.filePath,
+            context.originPath,
+            context.localPath,
+            context.path,
+            media?.sourcePath,
+            media?.originPath,
+            context.remoteUrl,
+            context.originUrl,
+            context.url,
+            media?.remoteUrl,
+            media?.originUrl
+        ];
+    const filePath = firstAbsoluteFilePath(...sourceValues);
+    const sourceUrl = firstSourceUrl(...sourceValues);
+    if (!filePath && !sourceUrl) {
         return null;
     }
-    const previewFilePath = type === 'video' ? resolveLocalFilePath(context.sourcePath) : '';
+    const previewValues = type === 'video' ? [
+        context.sourcePath,
+        context.coverPath,
+        context.previewPath,
+        context.coverUrl,
+        context.previewUrl,
+        media?.originPath
+    ] : [];
+    const previewSource = firstSourceUrl(...previewValues) || firstAbsoluteFilePath(...previewValues);
     const explicitName = String(
         context.video?.fileName || context.fileName || context.name || media?.fileName || media?.name || ''
     ).trim();
     return {
         type,
         ...(filePath ? { filePath } : {}),
-        ...(previewFilePath && path.isAbsolute(previewFilePath) ? { previewFilePath } : {}),
+        ...(sourceUrl ? { sourceUrl } : {}),
+        ...(previewSource ? { previewSource } : {}),
         name: explicitName || path.basename(filePath) || (type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex,
         identity
@@ -95,6 +156,8 @@ function extractInlineMediaPreview(command) {
 function normalizeInlineMediaOpenItem(value) {
     const candidatePath = resolveLocalFilePath(value?.filePath);
     const filePath = candidatePath && path.isAbsolute(candidatePath) ? candidatePath : '';
+    const sourceUrl = normalizeInlineMediaSourceUrl(value?.sourceUrl) ||
+        normalizeInlineMediaSourceUrl(value?.filePath);
     const identity = value?.identity || {};
     const normalizedIdentity = {
         chatType: Number(identity.chatType) || 0,
@@ -103,19 +166,23 @@ function normalizeInlineMediaOpenItem(value) {
         msgSeq: String(identity.msgSeq || '').trim(),
         elementId: String(identity.elementId || '').trim()
     };
-    const type = classifyMediaFilePath(value?.name, filePath);
-    const canDownload = normalizedIdentity.chatType && normalizedIdentity.peerUid &&
-        normalizedIdentity.msgId && normalizedIdentity.elementId;
-    if (!type || (!filePath && !canDownload)) {
+    const explicitType = value?.type === 'video' || value?.type === 'image' ? value.type : '';
+    const type = explicitType || classifyMediaFilePath(value?.name, filePath, sourceUrl);
+    if (!type || (!filePath && !sourceUrl)) {
         return null;
     }
-    const previewFilePath = type === 'video' ? resolveLocalFilePath(value?.previewFilePath) : '';
+    const previewValue = value?.previewSource || value?.previewFilePath;
+    const previewPath = resolveLocalFilePath(previewValue);
+    const previewSource = normalizeInlineMediaSourceUrl(previewValue) ||
+        (previewPath && path.isAbsolute(previewPath) ? previewPath : '');
     return {
         type,
         ...(filePath ? { filePath } : {}),
-        ...(previewFilePath && path.isAbsolute(previewFilePath) ? { previewFilePath } : {}),
+        ...(sourceUrl ? { sourceUrl } : {}),
+        ...(previewSource ? { previewSource } : {}),
         fingerprint: String(value?.fingerprint || '').trim().toLowerCase(),
-        name: String(value?.name || '').trim() || path.basename(filePath),
+        name: String(value?.name || '').trim() || path.basename(filePath) ||
+            (type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex: Number.isInteger(Number(value?.sourceIndex)) ? Number(value.sourceIndex) : 0,
         identity: normalizedIdentity
     };
@@ -180,9 +247,16 @@ function hasSameInlineMediaContent(left, right) {
     if (!left || !right || left.type !== right.type) {
         return false;
     }
-    const leftPath = path.normalize(String(left.filePath || '')).toLowerCase();
-    const rightPath = path.normalize(String(right.filePath || '')).toLowerCase();
+    const leftPathValue = String(left.filePath || '').trim();
+    const rightPathValue = String(right.filePath || '').trim();
+    const leftPath = leftPathValue ? path.normalize(leftPathValue).toLowerCase() : '';
+    const rightPath = rightPathValue ? path.normalize(rightPathValue).toLowerCase() : '';
     if (leftPath && rightPath && leftPath === rightPath) {
+        return true;
+    }
+    const leftSourceUrl = normalizeInlineMediaSourceUrl(left.sourceUrl);
+    const rightSourceUrl = normalizeInlineMediaSourceUrl(right.sourceUrl);
+    if (leftSourceUrl && rightSourceUrl && leftSourceUrl === rightSourceUrl) {
         return true;
     }
     const leftFingerprint = getInlineMediaFingerprint(left);
@@ -272,5 +346,6 @@ module.exports = {
     isSameInlineMediaItem,
     mergeInlineMediaItems,
     normalizeInlineMediaOpenItem,
+    normalizeInlineMediaSourceUrl,
     resolveInlineReplyPreview
 };

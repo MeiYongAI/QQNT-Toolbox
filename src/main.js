@@ -17,6 +17,7 @@ const {
     createRepeatMessageHandler,
     mapWithConcurrency
 } = require('./repeat-message');
+const { applyCustomImageSummary } = require('./image-summary');
 const { loadReactionEmojiCatalog, normalizeReactionRequest } = require('./reaction-catalog');
 const { getTencentFilesRoots } = require('./qq-data-root');
 const {
@@ -28,8 +29,14 @@ const {
     isSameInlineMediaItem,
     mergeInlineMediaItems,
     normalizeInlineMediaOpenItem,
+    normalizeInlineMediaSourceUrl,
     resolveInlineReplyPreview
 } = require('./inline-media-preview');
+const {
+    buildEmojiMediaViewerPayload,
+    collectEmojiImageSources,
+    sanitizeMarketFaceData
+} = require('./emoji-image-preview');
 const { createLocalMediaServer } = require('./local-media-server');
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
 const { createPluginUpdater } = require('./plugin-updater');
@@ -42,6 +49,7 @@ const {
     CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_OPEN_INLINE_MEDIA,
     CHANNEL_PREPARE_INLINE_MEDIA,
+    CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,
@@ -86,7 +94,6 @@ const REPAIR_FILE_TTL_MS = 24 * 60 * 60 * 1000;
 const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
 const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
 const SET_MESSAGE_REACTION_COMMAND = 'nodeIKernelMsgService/setMsgEmojiLikes';
-const MEDIA_PREVIEW_DOWNLOAD_WAIT_MS = 30 * 1000;
 const FORWARD_RESOURCE_DOWNLOAD_TIMEOUT_MS = 60 * 1000;
 const MAX_INLINE_MEDIA_PEERS = 40;
 const MAX_INLINE_MEDIA_PER_PEER = 500;
@@ -115,6 +122,7 @@ try {
 } catch {
     voiceFileSender = null;
 }
+const INLINE_MEDIA_BACKGROUND_VALUES = new Set(['transparent', 'white', 'semi', 'black']);
 const DEFAULT_CONFIG = {
     fileRetryFixer: {
         enabled: false,
@@ -139,6 +147,8 @@ const DEFAULT_CONFIG = {
     },
     messageTweaks: {
         promptNoSeq: false,
+        customImageSummaryEnabled: false,
+        customImageSummary: '',
         removeReactionLimit: false,
         keepReactionPanelOpen: false,
         removeReplyAt: false
@@ -169,6 +179,8 @@ const DEFAULT_CONFIG = {
     },
     interfaceTweaks: {
         inlineMediaViewer: false,
+        inlineMediaBackground: 'black',
+        openEmojiAsImage: false,
         singleClickMediaViewer: false,
         showFullUnreadCount: false,
         messageContextMenuOrder: {
@@ -432,6 +444,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         },
         message: {
             promptNoSeq: config.messageTweaks?.promptNoSeq === true,
+            customImageSummary: config.messageTweaks?.customImageSummaryEnabled === true,
             removeReplyAt: config.messageTweaks?.removeReplyAt === true
         },
         reactions: {
@@ -452,6 +465,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         },
         interface: {
             inlineMedia: config.interfaceTweaks?.inlineMediaViewer === true,
+            emojiAsImage: config.interfaceTweaks?.openEmojiAsImage === true,
             singleClickMedia: config.interfaceTweaks?.singleClickMediaViewer === true,
             singleMediaWindow: config.interfaceTweaks?.singleMediaViewer === true,
             menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
@@ -570,6 +584,9 @@ function normalizeSimplifyItemList(items, prefix) {
 }
 
 function normalizeSimplifyConfig(config) {
+    if (!INLINE_MEDIA_BACKGROUND_VALUES.has(config.interfaceTweaks?.inlineMediaBackground)) {
+        config.interfaceTweaks.inlineMediaBackground = DEFAULT_CONFIG.interfaceTweaks.inlineMediaBackground;
+    }
     config.sideBar.top = normalizeSimplifyItemList(config.sideBar.top, 'sidebar-top');
     config.sideBar.bottom = normalizeSimplifyItemList(config.sideBar.bottom, 'sidebar-bottom');
     config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
@@ -1119,10 +1136,12 @@ function installConfigIpc() {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         const summary = {
             type: payload?.type || '',
-            source: payload?.identity ? 'file-message' : 'message'
+            source: payload?.source || 'message'
         };
         try {
-            const opened = browserWindow ? await openInlineMediaFromRenderer(browserWindow, payload) : false;
+            const opened = browserWindow
+                ? await openInlineMediaFromRenderer(browserWindow, payload)
+                : false;
             recordDiagnostic(opened ? 'info' : 'warn', 'media.inline-open', {
                 ...summary,
                 ok: opened
@@ -1130,26 +1149,26 @@ function installConfigIpc() {
             return opened;
         } catch (error) {
             recordDiagnostic('error', 'media.inline-open-failed', { ...summary, error });
-            throw error;
+            return false;
         }
     });
     ipcMain.handle(CHANNEL_PREPARE_INLINE_MEDIA, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
-        const index = Number(payload?.index);
+        return browserWindow ? await prepareInlineMedia(browserWindow, payload) : null;
+    });
+    ipcMain.handle(CHANNEL_OPEN_EMOJI_AS_IMAGE, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
         try {
-            const prepared = browserWindow ? await prepareInlineMedia(browserWindow, payload) : null;
-            recordDiagnostic(prepared ? 'info' : 'warn', 'media.prepare-completed', {
-                ok: Boolean(prepared),
-                index: Number.isInteger(index) ? index : -1,
-                type: prepared?.type || ''
+            const opened = browserWindow
+                ? await openEmojiAsImageFromRenderer(browserWindow, payload)
+                : false;
+            recordDiagnostic(opened ? 'info' : 'warn', 'emoji-image.open-request', {
+                ok: opened
             });
-            return prepared;
+            return opened;
         } catch (error) {
-            recordDiagnostic('error', 'media.prepare-failed', {
-                index: Number.isInteger(index) ? index : -1,
-                error
-            });
-            throw error;
+            recordDiagnostic('error', 'emoji-image.open-failed', { error });
+            return false;
         }
     });
     ipcMain.handle(CHANNEL_REPEAT_MESSAGE, async (event, payload) => {
@@ -1287,8 +1306,7 @@ function getWindowState(browserWindow) {
             pluginAttrIds: new Map(),
             inlineMediaByPeer: new Map(),
             inlineReplySourcesByPeer: new Map(),
-            inlineMediaGallery: null,
-            inlineMediaDownloads: new Map()
+            inlineMediaGallery: null
         };
         windowStates.set(browserWindow, state);
     }
@@ -1321,6 +1339,17 @@ function getInterfaceTweaksConfig() {
         loadConfig();
     }
     return configCache.interfaceTweaks;
+}
+
+function getMessageTweaksConfig() {
+    if (!configCache) {
+        loadConfig();
+    }
+    return configCache.messageTweaks;
+}
+
+function isInlineMediaViewerEnabled(tweaks = getInterfaceTweaksConfig()) {
+    return tweaks?.inlineMediaViewer === true;
 }
 
 function replyWithNativeResult(event, request, result) {
@@ -1372,127 +1401,311 @@ function isInlineMediaHost(browserWindow) {
     return ['#/main/message', '#/chat', '#/forward', '#/record'].some(route => url.includes(route));
 }
 
-async function showInlineMediaPreview(browserWindow, gallery) {
-    gallery = completeInlineMediaGallery(browserWindow, gallery);
-    const state = getWindowState(browserWindow);
-    const selected = gallery.items[gallery.index];
-    const selectedKey = getInlineMediaItemKey(selected);
-    const items = gallery.items;
-    const index = Math.max(items.findIndex(item => getInlineMediaItemKey(item) === selectedKey), 0);
-    const galleryId = crypto.randomUUID();
-    state.inlineMediaGallery = { id: galleryId, items };
-    const previewItems = await Promise.all(items.map(async item => {
-        const localPath = getExistingFilePath([item.filePath]);
-        const previewPath = item.type === 'video'
-            ? getExistingFilePath([item.previewFilePath])
-            : '';
-        return {
-            type: item.type,
-            src: localPath ? await inlineMediaServer.getUrl(localPath) : '',
-            previewSrc: previewPath ? await inlineMediaServer.getUrl(previewPath) : '',
-            name: item.name,
-            needsResolve: !localPath && canResolveInlineMediaItem(item)
-        };
-    }));
-    const sender = browserWindow.webContents;
-    sender.send(CHANNEL_INLINE_MEDIA_PREVIEW, {
-        galleryId,
-        index,
-        items: previewItems
-    });
+function isInlineMediaItemAvailable(item) {
+    return Boolean(
+        getExistingFilePath([item?.filePath]) ||
+        normalizeInlineMediaSourceUrl(item?.sourceUrl)
+    );
 }
 
-async function downloadInlineMediaFile(browserWindow, item, shouldContinue = () => true) {
-    const existingPath = getExistingFilePath([item?.filePath]);
-    if (existingPath) {
-        return existingPath;
-    }
-    const payload = createInlineMediaDownloadPayload(item);
-    if (!payload || !shouldContinue()) {
-        return '';
-    }
-    const request = payload[0].getReq;
+function canResolveInlineMediaItem(item) {
+    return Boolean(createInlineMediaDownloadPayload(item));
+}
+
+function canOpenInlineMediaItem(item) {
+    return isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) ||
+        Boolean(getAbsoluteFilePathCandidate([item?.filePath]));
+}
+
+async function showInlineMediaPreview(browserWindow, gallery) {
     try {
-        await qqNativeInvoke(
-            browserWindow,
-            'ntApi',
-            'nodeIKernelMsgService/downloadRichMedia',
-            payload,
-            false
+        recordDiagnostic('info', 'media.preview-build-started', {
+            itemCount: Array.isArray(gallery?.items) ? gallery.items.length : 0,
+            selectedIndex: Number(gallery?.index)
+        });
+        gallery = completeInlineMediaGallery(browserWindow, gallery);
+        const selected = gallery?.items?.[gallery.index];
+        if (!selected) {
+            recordDiagnostic('info', 'media.preview-skipped', {
+                reason: 'invalid-selection'
+            });
+            return false;
+        }
+        if (!browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+            return false;
+        }
+        const selectedKey = getInlineMediaItemKey(selected);
+        const items = gallery.items.filter(item =>
+            isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) || (
+                getInlineMediaItemKey(item) === selectedKey &&
+                Boolean(getAbsoluteFilePathCandidate([item?.filePath]))
+            )
         );
-    } catch {
-        const existingAfterFailure = getExistingFilePath([request.filePath]);
-        if (existingAfterFailure) {
-            item.filePath = existingAfterFailure;
-            return existingAfterFailure;
+        const index = items.findIndex(item => getInlineMediaItemKey(item) === selectedKey);
+        if (index < 0) {
+            recordDiagnostic('info', 'media.preview-skipped', {
+                reason: 'selected-media-not-ready'
+            });
+            return false;
         }
-        return '';
+        const galleryId = crypto.randomUUID();
+        getWindowState(browserWindow).inlineMediaGallery = { id: galleryId, items };
+        const previewItems = await Promise.all(items.map(async item => {
+            const localPath = getExistingFilePath([item.filePath]);
+            const selectedItem = getInlineMediaItemKey(item) === selectedKey;
+            const pendingPath = !localPath && selectedItem
+                ? getAbsoluteFilePathCandidate([item.filePath])
+                : '';
+            const sourceUrl = normalizeInlineMediaSourceUrl(item.sourceUrl);
+            const needsResolve = !localPath && canResolveInlineMediaItem(item);
+            const previewPath = getExistingFilePath([item.previewSource]);
+            const previewUrl = !previewPath
+                ? normalizeInlineMediaSourceUrl(item.previewSource)
+                : '';
+            const localUrl = localPath
+                ? await inlineMediaServer.getUrl(localPath)
+                : pendingPath
+                    ? await inlineMediaServer.getUrl(pendingPath, {
+                        waitForReady: true,
+                        waitMs: item.type === 'video' ? 60000 : 10000
+                    })
+                    : '';
+            const src = localUrl || sourceUrl;
+            return {
+                type: item.type,
+                src,
+                previewSrc: previewPath ? await inlineMediaServer.getUrl(previewPath) : previewUrl,
+                name: item.name,
+                pending: Boolean(pendingPath),
+                needsResolve
+            };
+        }));
+        const sender = browserWindow.webContents;
+        sender.send(CHANNEL_INLINE_MEDIA_PREVIEW, {
+            galleryId,
+            index,
+            items: previewItems
+        });
+        recordDiagnostic('info', 'media.preview-build-completed', {
+            itemCount: previewItems.length,
+            selectedIndex: index,
+            selectedSource: previewItems[index]?.pending
+                ? 'pending-local'
+                : previewItems[index]?.src?.startsWith('http://127.0.0.1:') ? 'local' : 'resource',
+            unresolvedItems: previewItems.filter(item => item.needsResolve).length
+        });
+        return true;
+    } catch (error) {
+        recordDiagnostic('error', 'media.preview-build-failed', {
+            reason: error?.message || String(error)
+        });
+        throw error;
     }
-    const deadline = Date.now() + MEDIA_PREVIEW_DOWNLOAD_WAIT_MS;
-    while (Date.now() < deadline) {
-        if (!shouldContinue()) {
-            return '';
-        }
-        const filePath = getExistingFilePath([request.filePath]);
-        if (filePath) {
-            item.filePath = filePath;
-            return filePath;
-        }
-        await new Promise(resolve => setTimeout(resolve, 100));
+}
+
+function requestInlineMediaDownload(browserWindow, item) {
+    if (getExistingFilePath([item?.filePath])) {
+        return false;
     }
-    return '';
+    const nativePayload = createInlineMediaDownloadPayload(item);
+    if (!nativePayload) {
+        return false;
+    }
+    Promise.resolve(qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        'nodeIKernelMsgService/downloadRichMedia',
+        nativePayload,
+        false
+    )).catch(error => {
+        recordDiagnostic('warn', 'media.download-request-failed', {
+            type: item?.type || '',
+            error
+        });
+    });
+    recordDiagnostic('info', 'media.download-requested', {
+        type: item?.type || '',
+        source: 'chat',
+        method: 'downloadRichMedia'
+    });
+    return true;
 }
 
 async function prepareInlineMedia(browserWindow, payload) {
-    if (getInterfaceTweaksConfig().inlineMediaViewer !== true) {
+    if (!isInlineMediaViewerEnabled() || !browserWindow || browserWindow.isDestroyed() ||
+        browserWindow.webContents.isDestroyed()) {
         return null;
     }
-    const state = getWindowState(browserWindow);
-    const gallery = state.inlineMediaGallery;
+    const gallery = getWindowState(browserWindow).inlineMediaGallery;
     const index = Number(payload?.index);
     if (!gallery || normalizeText(payload?.galleryId) !== gallery.id ||
         !Number.isInteger(index) || index < 0 || index >= gallery.items.length) {
         return null;
     }
     const item = gallery.items[index];
-    if (!await ensureInlineMediaDownloadPath(item)) {
-        return null;
+    const existingPath = getExistingFilePath([item.filePath]);
+    if (existingPath) {
+        return {
+            type: item.type,
+            src: await inlineMediaServer.getUrl(existingPath),
+            name: item.name,
+            pending: false
+        };
     }
-    const key = getInlineMediaDownloadKey(item);
-    let pending = state.inlineMediaDownloads.get(key);
-    if (!pending) {
-        pending = downloadInlineMediaFile(
-            browserWindow,
-            item,
-            () => !browserWindow.isDestroyed() && !browserWindow.webContents.isDestroyed()
-        ).finally(() => {
-            if (state.inlineMediaDownloads.get(key) === pending) {
-                state.inlineMediaDownloads.delete(key);
-            }
-        });
-        state.inlineMediaDownloads.set(key, pending);
+    const pendingPath = getAbsoluteFilePathCandidate([item.filePath]);
+    if (pendingPath && requestInlineMediaDownload(browserWindow, item)) {
+        return {
+            type: item.type,
+            src: await inlineMediaServer.getUrl(pendingPath, {
+                waitForReady: true,
+                waitMs: item.type === 'video' ? 60000 : 10000
+            }),
+            name: item.name,
+            pending: true
+        };
     }
-    const filePath = await pending;
-    if (!filePath || state.inlineMediaGallery?.id !== gallery.id) {
-        return null;
-    }
-    return {
+    const sourceUrl = normalizeInlineMediaSourceUrl(item.sourceUrl);
+    return sourceUrl ? {
         type: item.type,
-        src: await inlineMediaServer.getUrl(filePath),
-        name: item.name
-    };
+        src: sourceUrl,
+        name: item.name,
+        pending: false
+    } : null;
 }
 
 async function openInlineMediaFromRenderer(browserWindow, payload) {
-    if (getInterfaceTweaksConfig().inlineMediaViewer !== true) {
+    if (!isInlineMediaViewerEnabled() ||
+        !browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
         return false;
     }
     const item = normalizeInlineMediaOpenItem(payload);
     if (!item) {
         return false;
     }
+    const hasLocalFile = Boolean(getExistingFilePath([item.filePath]));
+    const hasResourceSource = Boolean(normalizeInlineMediaSourceUrl(item.sourceUrl));
+    const nativeDownloadStarted = payload?.recordSource === 'forward-detail' &&
+        payload?.nativeDownloadStarted === true;
+    const downloadRequested = hasLocalFile
+        ? false
+        : nativeDownloadStarted
+            ? Boolean(getAbsoluteFilePathCandidate([item.filePath]))
+            : requestInlineMediaDownload(browserWindow, item);
+    if (!hasLocalFile && !hasResourceSource && !downloadRequested) {
+        return false;
+    }
     closeExistingMediaViewers(browserWindow.webContents);
-    await showInlineMediaPreview(browserWindow, { items: [item], index: 0 });
+    return await showInlineMediaPreview(browserWindow, { items: [item], index: 0 });
+}
+
+async function waitForEmojiImageFile(filePath, timeoutMs = 8000) {
+    const candidate = normalizePathText(filePath);
+    if (!candidate) {
+        return '';
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const existing = getExistingFilePath([candidate]);
+        if (existing) {
+            return existing;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return '';
+}
+
+async function requestEmojiImageDownload(browserWindow, face, filePath) {
+    const data = sanitizeMarketFaceData(face);
+    if (!filePath || !data.emojiId || !data.key || !data.emojiPackageId) {
+        return '';
+    }
+    try {
+        await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/fetchMarketEmoticonAioImage',
+            [{
+                marketEmoticonAioImageReq: {
+                    eId: data.emojiId,
+                    epId: data.emojiPackageId,
+                    name: data.faceName,
+                    width: data.imageWidth,
+                    height: data.imageHeight,
+                    jobType: 0,
+                    encryptKey: data.key,
+                    filePath,
+                    downloadType: 4
+                }
+            }, undefined],
+            false,
+            10000
+        );
+    } catch (error) {
+        recordDiagnostic('warn', 'emoji-image.download-request-failed', {
+            error: error?.message || error
+        });
+        return '';
+    }
+    return await waitForEmojiImageFile(filePath);
+}
+
+async function openEmojiAsImageFromRenderer(browserWindow, payload) {
+    if (getInterfaceTweaksConfig().openEmojiAsImage !== true) {
+        return false;
+    }
+    if (!browserWindow || browserWindow.isDestroyed()) {
+        return false;
+    }
+    const face = payload?.marketFace && typeof payload.marketFace === 'object'
+        ? payload.marketFace
+        : {};
+    const sources = collectEmojiImageSources(face, Array.isArray(payload?.sources) ? payload.sources : []);
+    let filePath = getExistingFilePath(sources.localPaths);
+    if (!filePath && sources.localPaths[0]) {
+        filePath = await requestEmojiImageDownload(browserWindow, face, sources.localPaths[0]);
+    }
+    const sourceUrl = sources.remoteUrls[0] || normalizeText(payload?.sourceUrl);
+    const mediaPayload = buildEmojiMediaViewerPayload({
+        sourcePath: filePath,
+        sourceUrl,
+        name: normalizeText(payload?.name) || face.faceName,
+        width: Number(payload?.width) || face.imageWidth,
+        height: Number(payload?.height) || face.imageHeight
+    });
+    if (!mediaPayload) {
+        return false;
+    }
+    const source = filePath || sourceUrl;
+    if (isInlineMediaViewerEnabled() && isInlineMediaHost(browserWindow)) {
+        closeExistingMediaViewers(browserWindow.webContents);
+        const opened = await showInlineMediaPreview(browserWindow, {
+            items: [{
+                type: 'image',
+                ...(filePath ? { filePath } : { sourceUrl }),
+                name: normalizeText(payload?.name) || face.faceName || path.basename(source) || 'emoji.png'
+            }],
+            index: 0
+        });
+        if (opened) {
+            recordDiagnostic('info', 'emoji-image.opened', {
+                source: filePath ? 'local' : 'resource',
+                viewer: 'inline'
+            });
+        }
+        return opened;
+    }
+    await qqNativeInvoke(
+        browserWindow,
+        'WindowApi',
+        OPEN_MEDIA_VIEWER_COMMAND,
+        mediaPayload,
+        false,
+        10000
+    );
+    recordDiagnostic('info', 'emoji-image.opened', {
+        source: filePath ? 'local' : 'resource',
+        viewer: 'native'
+    });
     return true;
 }
 
@@ -1500,6 +1713,18 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
     const command = args.find(value => value?.cmdName && value?.payload !== undefined);
     if (!command) {
         return false;
+    }
+    applyCustomImageSummary(command, getMessageTweaksConfig());
+    if (isDebugEnabled() && getWindowRoute(browserWindow?.webContents?.getURL()) === 'forward' &&
+        /(?:RichMedia|VideoPlay)/i.test(command.cmdName)) {
+        const firstArgument = Array.isArray(command.payload) ? command.payload[0] : command.payload;
+        recordDiagnostic('info', 'media.forward-native-request', {
+            cmdName: command.cmdName,
+            argumentCount: Array.isArray(command.payload) ? command.payload.length : 1,
+            fields: firstArgument && typeof firstArgument === 'object'
+                ? Object.keys(firstArgument).sort()
+                : []
+        });
     }
     const tweaks = getInterfaceTweaksConfig();
     const request = args.find(value => typeof value?.callbackId === 'string');
@@ -1510,9 +1735,13 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
     if (command.cmdName !== OPEN_MEDIA_VIEWER_COMMAND) {
         return false;
     }
-    if (tweaks.inlineMediaViewer === true && isInlineMediaHost(browserWindow)) {
+    if (isInlineMediaViewerEnabled(tweaks) && isInlineMediaHost(browserWindow)) {
         const gallery = extractInlineMediaGallery(command);
         if (!gallery) {
+            return false;
+        }
+        const selected = gallery.items[gallery.index];
+        if (!canOpenInlineMediaItem(selected)) {
             return false;
         }
         closeExistingMediaViewers(browserWindow.webContents);
@@ -2981,6 +3210,16 @@ function getAbsoluteFilePathCandidate(candidates) {
     return '';
 }
 
+function getInlineMediaSourceUrl(candidates) {
+    for (const candidate of Array.isArray(candidates) ? candidates : []) {
+        const sourceUrl = normalizeInlineMediaSourceUrl(candidate);
+        if (sourceUrl) {
+            return sourceUrl;
+        }
+    }
+    return '';
+}
+
 function getPendingPicPath(picElement) {
     return getAbsoluteFilePathCandidate([
         picElement?.sourcePath,
@@ -3026,81 +3265,33 @@ function getInlineMediaItemKey(item) {
     const elementId = normalizeText(identity.elementId);
     return msgId && elementId
         ? `${msgId}:${elementId}`
-        : `${normalizeText(item?.type)}:${normalizeComparablePath(item?.filePath)}`;
-}
-
-function canResolveInlineMediaItem(item) {
-    const identity = item?.identity || {};
-    return Boolean(
-        Number(identity.chatType) &&
-        normalizeText(identity.peerUid) &&
-        normalizeText(identity.msgId) &&
-        normalizeText(identity.elementId)
-    );
-}
-
-function getInlineMediaDownloadKey(item) {
-    const identity = item?.identity || {};
-    const chatType = Number(identity.chatType) || 0;
-    const peerUid = normalizeText(identity.peerUid);
-    const msgId = normalizeText(identity.msgId);
-    const elementId = normalizeText(identity.elementId);
-    if (chatType && peerUid && msgId && elementId) {
-        return `identity:${chatType}:${peerUid}:${msgId}:${elementId}`;
-    }
-    return `path:${normalizeComparablePath(item?.filePath)}:${normalizeText(item?.type)}`;
-}
-
-async function ensureInlineMediaDownloadPath(item) {
-    const currentPath = normalizePathText(item?.filePath);
-    if (currentPath && path.isAbsolute(currentPath) && getExistingFilePath([currentPath])) {
-        item.filePath = currentPath;
-        return currentPath;
-    }
-    const identity = item?.identity || {};
-    const chatType = Number(identity.chatType) || 0;
-    const peerUid = normalizeText(identity.peerUid);
-    const msgId = normalizeText(identity.msgId);
-    const elementId = normalizeText(identity.elementId);
-    const type = classifyMediaFilePath(item?.name, currentPath);
-    if (!type || !chatType || !peerUid || !msgId || !elementId) {
-        return '';
-    }
-    if (currentPath && path.isAbsolute(currentPath)) {
-        item.filePath = currentPath;
-        return currentPath;
-    }
-    const sourceExtension = path.extname(normalizeText(item?.name)).toLowerCase();
-    const extension = sourceExtension || (type === 'video' ? '.mp4' : '.png');
-    const stem = safeFileStem(path.basename(normalizeText(item?.name), sourceExtension) || type);
-    const identityHash = crypto.createHash('sha256')
-        .update(`${chatType}:${peerUid}:${msgId}:${elementId}`)
-        .digest('hex')
-        .slice(0, 16);
-    const repairDir = await ensureRepairDir();
-    const targetPath = path.join(repairDir, `${stem}.inline.${identityHash}${extension}`);
-    item.filePath = targetPath;
-    cleanupOldRepairFiles().catch(() => {});
-    return targetPath;
+        : `${normalizeText(item?.type)}:${normalizeComparablePath(
+            item?.filePath || item?.sourceUrl
+        )}`;
 }
 
 function createInlineMediaItem(record, element, elementIndex) {
     let type;
     let media;
     let filePath;
+    let sourceValues = [];
     if (Number(element?.elementType) === 2 || element?.picElement) {
         type = 'image';
         media = element.picElement || element;
+        sourceValues = [media.sourcePath, media.filePath, media.originPath, media.localPath, media.path];
         filePath = getPicSourcePath(media) || getPendingPicPath(media);
     } else if (Number(element?.elementType) === 5 || element?.videoElement) {
         type = 'video';
         media = element.videoElement || element;
+        sourceValues = [media.filePath, media.sourcePath, media.originPath, media.localPath, media.path];
         filePath = getVideoSourcePath(media) || getPendingVideoPath(media);
     } else if (Number(element?.elementType) === 3 || element?.fileElement) {
         media = element.fileElement || element;
+        sourceValues = [media.filePath, media.sourcePath, media.originPath, media.localPath, media.path];
         filePath = getFileSourcePath(media) || getPendingFilePath(media);
-        type = classifyMediaFilePath(media.fileName, filePath);
+        type = classifyMediaFilePath(media.fileName, filePath, ...sourceValues);
     }
+    const sourceUrl = getInlineMediaSourceUrl(sourceValues);
     const identity = {
         chatType: Number(record?.chatType || record?.peer?.chatType) || 0,
         peerUid: normalizeText(
@@ -3110,19 +3301,22 @@ function createInlineMediaItem(record, element, elementIndex) {
         msgSeq: normalizeText(record?.msgSeq),
         elementId: normalizeText(element?.elementId)
     };
-    const canDownload = identity.chatType && identity.peerUid && identity.msgId && identity.elementId;
-    if (!type || (!filePath && !canDownload)) {
+    if (!type || (!filePath && !sourceUrl)) {
         return null;
     }
-    const previewFilePath = type === 'video' ? getAbsoluteFilePathCandidate([
-        media.coverPath,
+    const previewCandidates = [
+        ...(type === 'video' ? [media.coverPath] : []),
         ...getThumbPathCandidates(media.thumbPath),
         ...getThumbPathCandidates(media.picThumbPath)
-    ]) : '';
+    ];
+    const previewSource = getExistingFilePath(previewCandidates) ||
+        getInlineMediaSourceUrl(previewCandidates) ||
+        getAbsoluteFilePathCandidate(previewCandidates);
     return {
         type,
         ...(filePath ? { filePath } : {}),
-        ...(previewFilePath ? { previewFilePath } : {}),
+        ...(sourceUrl ? { sourceUrl } : {}),
+        ...(previewSource ? { previewSource } : {}),
         fingerprint: normalizeText(
             media.md5HexStr || media.originImageMd5 || media.videoMd5 || media.fileMd5
         ).toLowerCase(),
@@ -3147,7 +3341,7 @@ function compareInlineMediaItems(left, right) {
 }
 
 function rememberInlineMediaRecords(browserWindow, context) {
-    if (getInterfaceTweaksConfig().inlineMediaViewer !== true) {
+    if (!isInlineMediaViewerEnabled()) {
         return;
     }
     const state = getWindowState(browserWindow);
@@ -3375,7 +3569,7 @@ async function cleanupOldRepairFiles(force = false) {
         return;
     }
     cleanupState.lastRunAt = now;
-    const repairDir = await ensureRepairDir();
+    const repairDir = getRepairDir();
     let entries = [];
     try {
         entries = await fs.readdir(repairDir, { withFileTypes: true });
@@ -3394,6 +3588,13 @@ async function cleanupOldRepairFiles(force = false) {
             } catch {
             }
         }));
+    try {
+        const remaining = await fs.readdir(repairDir);
+        if (!remaining.length) {
+            await fs.rmdir(repairDir);
+        }
+    } catch {
+    }
 }
 
 function safeFileStem(value) {
@@ -4193,16 +4394,8 @@ function getForwardDetailMediaPathCandidates(media) {
     ];
 }
 
-async function downloadForwardDetailMedia(
-    browserWindow,
-    record,
-    element,
-    media,
-    fallbackName,
-    fallbackExtension
-) {
-    const pathCandidates = getForwardDetailMediaPathCandidates(media);
-    const result = await qqNativeInvoke(
+async function invokeForwardDetailMediaDownload(browserWindow, record, element) {
+    return await qqNativeInvoke(
         browserWindow,
         'ntApi',
         'nodeIKernelRichMediaService/downloadRichMediaInVisit',
@@ -4219,10 +4412,21 @@ async function downloadForwardDetailMedia(
             guildId: normalizeText(record?.guildId),
             ele: element,
             useHttps: true
-        }, null],
-        true,
-        60000
+        }],
+        false
     );
+}
+
+async function downloadForwardDetailMedia(
+    browserWindow,
+    record,
+    element,
+    media,
+    fallbackName,
+    fallbackExtension
+) {
+    const pathCandidates = getForwardDetailMediaPathCandidates(media);
+    const result = await invokeForwardDetailMediaDownload(browserWindow, record, element);
     if (isRepeatCommandFailure(result)) {
         throw new Error(`forwarded media download failed: ${safeJson(result)}`);
     }

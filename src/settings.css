@@ -187,10 +187,73 @@
 #qqnt-toolbox-settings .qqnt-toolbox-switch:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-action:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-password-input:disabled,
+#qqnt-toolbox-settings .qqnt-toolbox-text-input:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-number-input:disabled,
+#qqnt-toolbox-settings .qqnt-toolbox-swatch:disabled,
 #qqnt-toolbox-settings .qqnt-toolbox-shortcut-button:disabled {
     cursor: default;
     opacity: 0.58;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatches {
+    display: flex;
+    flex: none;
+    gap: 3px;
+    padding: 2px;
+    border-radius: 6px;
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, 0.1)));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch {
+    display: grid;
+    place-items: center;
+    width: 27px;
+    height: 27px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    outline: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch:hover:not(:disabled) {
+    background: var(--overlay_hover, rgba(127, 127, 127, 0.16));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch[data-checked="true"] {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    background: var(--overlay_hover, rgba(127, 127, 127, 0.14));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch:focus-visible {
+    box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.3);
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch-sample {
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
+    border: 1px solid rgba(127, 127, 127, 0.52);
+    border-radius: 3px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch[data-value="transparent"] .qqnt-toolbox-swatch-sample {
+    background: conic-gradient(#b8bcc4 25%, #fff 0 50%, #b8bcc4 0 75%, #fff 0) 0 0 / 8px 8px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch[data-value="white"] .qqnt-toolbox-swatch-sample {
+    background: #fff;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch[data-value="semi"] .qqnt-toolbox-swatch-sample {
+    background:
+        linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.72)),
+        conic-gradient(#b8bcc4 25%, #fff 0 50%, #b8bcc4 0 75%, #fff 0) 0 0 / 8px 8px;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-swatch[data-value="black"] .qqnt-toolbox-swatch-sample {
+    background: #000;
 }
 
 #qqnt-toolbox-settings .qqnt-toolbox-action,
@@ -237,6 +300,7 @@
 }
 
 #qqnt-toolbox-settings .qqnt-toolbox-password-input,
+#qqnt-toolbox-settings .qqnt-toolbox-text-input,
 #qqnt-toolbox-settings .qqnt-toolbox-number-input {
     flex: none;
     height: 30px;
@@ -253,7 +317,8 @@
     user-select: text;
 }
 
-#qqnt-toolbox-settings .qqnt-toolbox-password-input {
+#qqnt-toolbox-settings .qqnt-toolbox-password-input,
+#qqnt-toolbox-settings .qqnt-toolbox-text-input {
     width: min(180px, 32vw);
 }
 
@@ -265,6 +330,7 @@
 }
 
 #qqnt-toolbox-settings .qqnt-toolbox-password-input:focus,
+#qqnt-toolbox-settings .qqnt-toolbox-text-input:focus,
 #qqnt-toolbox-settings .qqnt-toolbox-number-input:focus {
     border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
 }

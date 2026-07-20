@@ -51,6 +51,28 @@ test('serves images with a browser-decodable content type and cache policy', asy
     assert.equal(await response.text(), 'image');
 });
 
+test('holds a pending media request until QQ finishes creating the file', async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-toolbox-media-'));
+    const filePath = path.join(directory, 'pending.jpg');
+    const server = createLocalMediaServer({
+        pendingFileWaitMs: 1000,
+        pendingFilePollMs: 10,
+        pendingFileStableMs: 20
+    });
+    t.after(() => {
+        server.close();
+        fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const responsePromise = fetch(await server.getUrl(filePath, { waitForReady: true }));
+    setTimeout(() => fs.writeFileSync(filePath, Buffer.from('ready')), 30);
+    const response = await responsePromise;
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/jpeg');
+    assert.equal(await response.text(), 'ready');
+});
+
 test('evicts the least recently used media URL from its bounded registry', async t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-toolbox-media-'));
     const paths = ['first.png', 'second.png', 'third.png'].map(name => {

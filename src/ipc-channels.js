@@ -8,6 +8,7 @@ const CHANNEL_DIAGNOSTIC_ACTION = 'qqnt-toolbox:diagnostic-action';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_OPEN_INLINE_MEDIA = 'qqnt-toolbox:open-inline-media';
 const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
+const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -36,6 +37,7 @@ module.exports = Object.freeze({
     CHANNEL_INLINE_MEDIA_PREVIEW,
     CHANNEL_OPEN_INLINE_MEDIA,
     CHANNEL_PREPARE_INLINE_MEDIA,
+    CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,

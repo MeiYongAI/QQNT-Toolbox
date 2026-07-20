@@ -66,6 +66,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     assert.ok(api);
     await api.recordDiagnosticEvent({ event: 'renderer.ready' });
     await api.runDiagnosticAction('copy-report');
+    await api.openInlineMedia({ type: 'video' });
+    await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
     await api.repeatMessage({ id: 'repeat' });
     await api.getReactionEmojiCatalog();
     await api.setMessageReaction({ emojiId: '14' });
@@ -76,8 +78,6 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.checkForUpdates({ force: true });
     await api.prepareUpdate();
     await api.restartForUpdate();
-    await api.openInlineMedia({ filePath: 'D:\\cache\\media.mp4' });
-    await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
     const unsubscribePreview = api.onInlineMediaPreview(() => {});
     const unsubscribeUpdate = api.onUpdateStateChanged(() => {});
     const unsubscribe = api.onConfigChanged(() => {});
@@ -91,6 +91,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     assert.deepEqual(runtime.invocations.map(item => item[0]), [
         'qqnt-toolbox:diagnostic-event',
         'qqnt-toolbox:diagnostic-action',
+        'qqnt-toolbox:open-inline-media',
+        'qqnt-toolbox:prepare-inline-media',
         'qqnt-toolbox:repeat-message',
         'qqnt-toolbox:get-reaction-catalog',
         'qqnt-toolbox:set-message-reaction',
@@ -100,9 +102,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:get-update-state',
         'qqnt-toolbox:check-update',
         'qqnt-toolbox:prepare-update',
-        'qqnt-toolbox:restart-update',
-        'qqnt-toolbox:open-inline-media',
-        'qqnt-toolbox:prepare-inline-media'
+        'qqnt-toolbox:restart-update'
     ]);
 });
 

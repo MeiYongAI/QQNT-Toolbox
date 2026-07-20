@@ -8,6 +8,7 @@ const CHANNEL_DIAGNOSTIC_ACTION = 'qqnt-toolbox:diagnostic-action';
 const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
 const CHANNEL_OPEN_INLINE_MEDIA = 'qqnt-toolbox:open-inline-media';
 const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
+const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -45,6 +46,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     restartForUpdate: () => ipcRenderer.invoke(CHANNEL_RESTART_UPDATE),
     openInlineMedia: payload => ipcRenderer.invoke(CHANNEL_OPEN_INLINE_MEDIA, payload),
     prepareInlineMedia: payload => ipcRenderer.invoke(CHANNEL_PREPARE_INLINE_MEDIA, payload),
+    openEmojiAsImage: payload => ipcRenderer.invoke(CHANNEL_OPEN_EMOJI_AS_IMAGE, payload),
     onInlineMediaPreview: callback => {
         const listener = (_event, payload) => callback(payload);
         ipcRenderer.on(CHANNEL_INLINE_MEDIA_PREVIEW, listener);
