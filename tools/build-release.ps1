@@ -51,6 +51,9 @@ $runtimeFiles = @(
     'manifest.json',
     'package.json',
     'native/poke-bridge.win32-x64.node',
+    'node_modules/@saltify/typeproto/LICENSE',
+    'node_modules/@saltify/typeproto/package.json',
+    'node_modules/@saltify/typeproto/dist/index.mjs',
     'node_modules/@zip.js/zip.js/LICENSE',
     'node_modules/@zip.js/zip.js/index.cjs',
     'node_modules/@zip.js/zip.js/package.json',
@@ -78,7 +81,7 @@ $archive = [IO.Compression.ZipFile]::OpenRead($assetPath)
 try {
     $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
     $forbidden = @($entries | Where-Object {
-        $_ -match '(^|/)(dist|release)/' -or
+        $_ -match '^QQNT-Toolbox/(dist|release)/' -or
         $_ -match '\.(log|tmp)$' -or
         $_ -match 'poke-bridge\.(cpp|obj)$' -or
         $_ -match '(^|/)build\.cmd$'
@@ -89,6 +92,10 @@ try {
     foreach ($required in @(
         'QQNT-Toolbox/manifest.json',
         'QQNT-Toolbox/src/ipc-channels.js',
+        'QQNT-Toolbox/src/fake-forward-editor.css',
+        'QQNT-Toolbox/src/fake-forward-editor.js',
+        'QQNT-Toolbox/src/fake-forward.js',
+        'QQNT-Toolbox/src/file-retry.js',
         'QQNT-Toolbox/src/native-ipc.js',
         'QQNT-Toolbox/src/plugin-updater.js',
         'QQNT-Toolbox/src/qq-data-root.js',
@@ -104,6 +111,8 @@ try {
         'QQNT-Toolbox/src/voice/ptt-source.js',
         'QQNT-Toolbox/src/voice/renderer-ui.js',
         'QQNT-Toolbox/native/poke-bridge.win32-x64.node',
+        'QQNT-Toolbox/node_modules/@saltify/typeproto/package.json',
+        'QQNT-Toolbox/node_modules/@saltify/typeproto/dist/index.mjs',
         'QQNT-Toolbox/node_modules/silk-wasm/lib/silk_wasm.wasm'
     )) {
         if ($required -notin $entries) {
