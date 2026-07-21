@@ -5,6 +5,7 @@ import {
 } from './message-context-menu-order.js';
 import { matchesControlLabelValue } from './control-label-match.js';
 import { createReactionLimitController } from './reaction-limit.js';
+import { createFakeForwardEditor } from './fake-forward-editor.js';
 
 let initializeToolboxSettings = async () => {};
 let handleToolboxVueComponentMount = () => {};
@@ -108,6 +109,9 @@ let handleToolboxVueComponentMount = () => {};
             doubleClick: false,
             showInContextMenu: false
         },
+        fakeForward: {
+            enabled: false
+        },
         voiceMessage: {
             enabled: false,
             saveInContextMenu: false,
@@ -192,6 +196,7 @@ let handleToolboxVueComponentMount = () => {};
     let messageContextMenuOrderController = null;
     let messageContextMenuActionsInstalled = false;
     let reactionLimitController = null;
+    let fakeForwardEditor = null;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let unreadCountObserver = null;
@@ -601,6 +606,23 @@ let handleToolboxVueComponentMount = () => {};
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
     background: #000;
     cursor: default;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-panel {
+    padding: 0 8px;
+    background-color: rgba(0, 0, 0, .82);
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-timeline {
+    min-width: 0;
+    margin: 0 8px;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-current-time-display,
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-time-remaining-display {
+    padding: 0 2px;
+    font-variant-numeric: tabular-nums;
+}
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-fullscreen-button,
+#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-overflow-button {
+    display: none !important;
 }
 #${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav {
     position: absolute;
@@ -1173,6 +1195,7 @@ body.qqnt-toolbox-side-repeat .ml-item .qqnt-toolbox-repeat-slot.plus-one-btn {
     pointer-events: none !important;
     cursor: pointer;
     transform: translateY(-50%) !important;
+    overflow-anchor: none;
 }
 body.qqnt-toolbox-side-repeat .qqnt-toolbox-repeat-slot.plus-one-btn > svg {
     display: block !important;
@@ -1262,6 +1285,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     pointer-events: auto;
     transition: opacity .15s ease, transform .15s ease;
     transform: scale(.92);
+    overflow-anchor: none;
 }
 .qqnt-toolbox-recall-badge {
     color: var(--qqnt-toolbox-recall-color, var(--text-secondary, var(--text-02, #8a8f99)));
@@ -1719,6 +1743,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             updateConfigUi(root);
         }
         syncInlineMediaPreviewBackground();
+        fakeForwardEditor?.sync();
         const panel = document.getElementById(PANEL_ID);
         if (panel && !panel.hidden && !isConfigEnabled('floatingPanel.enabled')) {
             setVisible(panel, false);
@@ -1819,7 +1844,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: ['fileRetryFixer.enabled', 'fileRetryFixer.otherFiles'],
                     childLevel: 2
                 }),
-                createSwitchItem(text('自定义图片外显'), text('修改发送图片的摘要文字'), 'messageTweaks.customImageSummaryEnabled'),
+                createSwitchItem(text('自定义图片外显'), text('修改图片与表情的外显文字'), 'messageTweaks.customImageSummaryEnabled'),
                 createTextItem(text('外显文字'), text('留空时不修改'), 'messageTweaks.customImageSummary', {
                     requires: 'messageTweaks.customImageSummaryEnabled',
                     child: true
@@ -1855,7 +1880,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'repeatMessage.enabled',
                     child: true
                 }),
-                createSwitchItem(text('移除回复 @'), text('移除回复消息时的 @ 标记'), 'messageTweaks.removeReplyAt')
+                createSwitchItem(text('移除回复 @'), text('移除回复消息时的 @ 标记'), 'messageTweaks.removeReplyAt'),
+                createSwitchItem(text('伪造合并转发'), text('在当前会话创建自定义聊天记录'), 'fakeForward.enabled')
             ]),
             createSection('preventRecall', text('阻止撤回'), [
                 createSwitchItem(text('启用'), text('将撤回灰条替换回原消息'), 'preventRecall.enabled'),
@@ -3562,7 +3588,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             mediaOffsetY = 0;
             suppressPreviewCloseUntil = 0;
             wheelNavigationDelta = 0;
-            stage.classList.remove('is-loading');
+            stage.classList.add('is-loading');
             stage.setAttribute('aria-busy', 'true');
             layer.setAttribute('aria-label', text(isVideo ? '视频预览' : '图片预览'));
             updateNavigation();
@@ -3634,6 +3660,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             activeMediaIndex = renderIndex;
             if (isVideo) {
                 media.controls = true;
+                media.setAttribute('controlsList', 'nodownload nofullscreen noremoteplayback');
+                media.disablePictureInPicture = true;
+                media.disableRemotePlayback = true;
                 media.autoplay = true;
                 media.preload = 'auto';
                 media.playsInline = true;
@@ -4175,7 +4204,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             media?.picThumbPath
         ].flatMap(getRecordMediaValues)[0] || '';
         const peer = getPeerFromRecord(record);
-        if (!filePath && !sourceUrl) {
+        const identity = {
+            chatType: Number(peer?.chatType || record?.chatType) || 0,
+            peerUid: normalizeText(peer?.peerUid || record?.peerUid || record?.peer?.peerUid),
+            msgId: normalizeText(record?.msgId),
+            msgSeq: normalizeText(record?.msgSeq),
+            elementId: normalizeText(recordElement?.elementId)
+        };
+        const pendingFile = kind.endsWith('-file') && !filePath && !sourceUrl &&
+            Boolean(identity.msgId && identity.elementId);
+        if (!filePath && !sourceUrl && !pendingFile) {
             return null;
         }
         const item = {
@@ -4189,13 +4227,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             name: normalizeText(media?.fileName || media?.summary) ||
                 filePath.split(/[\\/]/).pop() || (type === 'video' ? 'video.mp4' : 'image.png'),
             sourceIndex,
-            identity: {
-                chatType: Number(peer?.chatType || record?.chatType) || 0,
-                peerUid: normalizeText(peer?.peerUid || record?.peerUid || record?.peer?.peerUid),
-                msgId: normalizeText(record?.msgId),
-                msgSeq: normalizeText(record?.msgSeq),
-                elementId: normalizeText(recordElement?.elementId)
-            }
+            identity,
+            ...(pendingFile ? { pendingFile: true } : {})
         };
         if (!isForwardRecordWindow()) {
             return item;
@@ -4432,7 +4465,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     isFileMedia: isFileVideo || isFileImage,
                     source: isFileMessage ? 'file-message' : 'message',
                     openControl: resolvedIsVideo || isFileMessage ? getVideoOpenControl(element) : element,
-                    inlineMedia: resolvedIsVideo
+                    inlineMedia: resolvedIsVideo || isFileImage
                         ? createInlineMediaOpenItem(record, inlineElement, elements.indexOf(inlineElement))
                         : null
                 };
@@ -4495,8 +4528,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             ...target.inlineMedia,
             source: target.source || 'message'
         };
+        if (target.isFileMedia && payload.pendingFile === true) {
+            let opened = false;
+            try {
+                opened = await getBridge()?.openInlineMedia?.(payload) === true;
+            } catch {
+            }
+            dispatchNativeMediaOpen(target, sourceEvent);
+            if (!opened) {
+                recordRendererDiagnostic('media.pending-file-preview-failed', {
+                    mediaType: target.isVideo ? 'video' : 'image'
+                }, 'warn');
+            }
+            return;
+        }
         let nativeActivated = false;
-        if (target.isVideo && payload.recordSource === 'forward-detail') {
+        if (target.isVideo && !target.isFileMedia) {
             dispatchNativeMediaOpen(target, sourceEvent);
             nativeActivated = true;
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -4576,20 +4623,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const clickedOpenControl = target.isVideo && target.openControl && eventPath.some(item =>
             item === target.openControl || (item instanceof Node && target.openControl?.contains?.(item))
         );
-        const openInlineVideo = inlineViewerEnabled && target.isVideo && target.inlineMedia &&
+        const openInlineMedia = inlineViewerEnabled && (target.isVideo || target.isFileMedia) &&
+            target.inlineMedia &&
             (singleClickEnabled || clickedOpenControl || target.isFileMedia);
         const shouldActivateNative = singleClickEnabled || clickedOpenControl || target.isFileMedia;
-        if (!openInlineVideo && !shouldActivateNative) {
+        if (!openInlineMedia && !shouldActivateNative) {
             return;
         }
         recordRendererDiagnostic('media.open-requested', {
             gesture: 'single-click',
-            viewer: openInlineVideo ? 'inline' : 'native',
+            viewer: openInlineMedia ? 'inline' : 'native',
             mediaType: target.isVideo ? 'video' : 'image',
             source: target.source || 'message'
         });
         stopMediaOpenEvent(event);
-        queueMicrotask(() => openInlineVideo
+        queueMicrotask(() => openInlineMedia
             ? openInlineMediaTarget(target, event)
             : dispatchNativeMediaOpen(target, event));
     }
@@ -5563,6 +5611,14 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return {
             chatType,
             peerUid,
+            peerUin: normalizeUin(
+                record?.peerUin ||
+                record?.peer?.peerUin ||
+                aioData.peerUin ||
+                aioData.peer?.peerUin ||
+                header.peerUin ||
+                header.uin
+            ),
             guildId: normalizeText(record?.guildId || aioData.guildId || header.guildId)
         };
     }
@@ -5979,19 +6035,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const record = messageElement && findMessageRecordFromElement(messageElement);
         if (messageElement && isRepeatableRecord(record)) {
             ensureSideRepeatEntrypoint(messageElement, record);
-        }
-    }
-
-    function handleRepeatMessagePointerOut(event) {
-        const target = event.target instanceof Element ? event.target : null;
-        const messageElement = target && getMessageElementFromElement(target);
-        const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
-        if (!messageElement || (relatedTarget && messageElement.contains(relatedTarget))) {
-            return;
-        }
-        const button = messageElement.querySelector('.qqnt-toolbox-repeat-slot');
-        if (button) {
-            removeRepeatSlot(button);
         }
     }
 
@@ -6694,7 +6737,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('mousedown', handleRepeatPlusOneEvent, true);
     document.addEventListener('click', handleRepeatPlusOneEvent, true);
     document.addEventListener('pointerover', handleRepeatMessagePointerOver, true);
-    document.addEventListener('pointerout', handleRepeatMessagePointerOut, true);
     document.addEventListener('mouseup', handleSideBackMouseUp, true);
     document.addEventListener('dragstart', handleRecentContactDragStart, true);
     document.addEventListener('pointerdown', handlePreventMessageDragPointerDown, true);
@@ -6819,6 +6861,33 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     window.addEventListener('hashchange', scheduleRepeatEntrypointRefresh);
     window.addEventListener('focus', rememberActiveRepeatPeer);
+
+    fakeForwardEditor = createFakeForwardEditor({
+        getEnabled: () => isConfigEnabled('fakeForward.enabled'),
+        getPeer: () => getPeerFromRecord({}),
+        getStorageScope: () => registeredPokeAccountUin || 'default',
+        stageImage: payload => {
+            const stageFakeForwardImage = getBridge()?.stageFakeForwardImage;
+            if (typeof stageFakeForwardImage !== 'function') {
+                throw new Error('图片暂存接口不可用');
+            }
+            return stageFakeForwardImage(payload);
+        },
+        send: payload => {
+            const sendFakeForward = getBridge()?.sendFakeForward;
+            if (typeof sendFakeForward !== 'function') {
+                throw new Error('伪造合并转发接口不可用');
+            }
+            return sendFakeForward({
+                ...payload,
+                selfUin: registeredPokeAccountUin || registerPokeAccountFromPage(true)
+            });
+        },
+        onError: error => recordRendererDiagnostic('fake-forward.failed', {
+            reason: error?.message || String(error)
+        }, 'error')
+    });
+    fakeForwardEditor.install();
 
     loadConfig().then(subscribeConfig).catch(() => {});
     loadUpdateState().then(subscribeUpdateState).catch(() => {});

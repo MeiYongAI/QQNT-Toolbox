@@ -18,6 +18,16 @@ const {
     mapWithConcurrency
 } = require('./repeat-message');
 const { applyCustomImageSummary } = require('./image-summary');
+const { PRESERVE_KIND, createFileRetryPlan, getRepairKinds } = require('./file-retry');
+const {
+    MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE,
+    buildFakeForwardImageUploadParams,
+    buildFakeForwardSendRequest,
+    buildFakeForwardUploadRequest,
+    createFakeForwardImageMsgInfo,
+    parseFakeForwardSendResponse,
+    parseFakeForwardUploadResponse
+} = require('./fake-forward');
 const { loadReactionEmojiCatalog, normalizeReactionRequest } = require('./reaction-catalog');
 const { getTencentFilesRoots } = require('./qq-data-root');
 const {
@@ -51,6 +61,8 @@ const {
     CHANNEL_PREPARE_INLINE_MEDIA,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
+    CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
+    CHANNEL_SEND_FAKE_FORWARD,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,
     CHANNEL_SEND_POKE,
@@ -108,6 +120,16 @@ const MAX_RECALL_CACHE_SIZE = 100000;
 const IMAGE_EXTENSIONS = new Set([
     '.apng', '.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'
 ]);
+const FAKE_FORWARD_STAGED_IMAGE_PREFIX = 'qqnt-toolbox-fake-forward-';
+const MAX_FAKE_FORWARD_STAGED_IMAGE_BYTES = 32 * 1024 * 1024;
+const FAKE_FORWARD_IMAGE_MIME_EXTENSIONS = Object.freeze({
+    'image/apng': '.apng',
+    'image/bmp': '.bmp',
+    'image/gif': '.gif',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp'
+});
 const VIDEO_EXTENSIONS = new Set([
     '.3g2', '.3gp', '.asf', '.avi', '.flv', '.m2ts', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg',
     '.mts', '.ogv', '.ts', '.vob', '.webm', '.wmv'
@@ -137,6 +159,9 @@ const DEFAULT_CONFIG = {
         enabled: false,
         doubleClick: false,
         showInContextMenu: false
+    },
+    fakeForward: {
+        enabled: false
     },
     voiceMessage: {
         enabled: false,
@@ -435,6 +460,9 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             enabled: config.repeatMessage?.enabled === true,
             doubleClick: config.repeatMessage?.doubleClick === true,
             contextMenu: config.repeatMessage?.showInContextMenu === true
+        },
+        fakeForward: {
+            enabled: config.fakeForward?.enabled === true
         },
         voice: {
             enabled: config.voiceMessage?.enabled === true,
@@ -878,6 +906,319 @@ async function sendSsoThroughWrapperSession(command, packet) {
     };
 }
 
+async function resolveFakeForwardSenderUid(browserWindow, senderUin) {
+    const aliases = getWindowState(browserWindow).peerUidByUin;
+    const cached = normalizeText(aliases.get(senderUin));
+    if (cached) {
+        return cached;
+    }
+    try {
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelProfileService/getUidByUin',
+            [{ uin: senderUin, callFrom: 'QQNT-Toolbox' }, null],
+            true,
+            5000
+        );
+        const uid = normalizeText(findFirstByKey(result, ['uid', 'peerUid', 'ntUid']));
+        if (uid) {
+            aliases.set(senderUin, uid);
+            return uid;
+        }
+    } catch {
+    }
+    return '';
+}
+
+async function resolveFakeForwardPeerUin(browserWindow, peer) {
+    if (Number(peer?.chatType) === 2) {
+        return normalizeUin(peer?.peerUid);
+    }
+    const peerUid = normalizeText(peer?.peerUid);
+    const cached = normalizeUin(peer?.peerUin) || resolveUinFromUid(browserWindow, peerUid);
+    if (cached) {
+        return cached;
+    }
+    try {
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelProfileService/getUinByUid',
+            [{ uid: peerUid, callFrom: 'QQNT-Toolbox' }, null],
+            true,
+            5000
+        );
+        const uin = normalizeUin(findFirstByKey(result, ['uin', 'peerUin']));
+        if (uin) {
+            getWindowState(browserWindow).peerUidByUin.set(uin, peerUid);
+            return uin;
+        }
+    } catch {
+    }
+    return '';
+}
+
+async function invokeFakeForwardSso(browserWindow, request) {
+    installPokeBridge();
+    const directResult = await sendSsoThroughWrapperSession(request.command, request.packet);
+    return directResult
+        ? directResult.response
+        : await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendSsoCmdReqByContend',
+            [request.command, request.packet],
+            true,
+            30000
+        );
+}
+
+function findRichMediaUploadInfo(value, filePath, depth = 0, seen = new WeakSet()) {
+    if (!value || typeof value !== 'object' || value instanceof Uint8Array || depth > 7 || seen.has(value)) {
+        return null;
+    }
+    seen.add(value);
+    const candidatePath = normalizePathText(value.filePath || value.commonFileInfo?.filePath);
+    const matchesPath = !filePath ||
+        normalizeComparablePath(candidatePath) === normalizeComparablePath(filePath);
+    if (matchesPath && (value.commonFileInfo || value.fileErrCode !== undefined) && candidatePath) {
+        return value;
+    }
+    const children = value instanceof Map ? value.values() : Object.values(value);
+    for (const child of children) {
+        const found = findRichMediaUploadInfo(child, filePath, depth + 1, seen);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+}
+
+function createFakeForwardImageUploadWaiters(filePath, timeoutMs = 60 * 1000) {
+    const waiters = BrowserWindow.getAllWindows()
+        .filter(window => window && !window.isDestroyed() && !window.webContents?.isDestroyed())
+        .map(window => createNativeEventWaiter(window, (response, result) => {
+            const cmdName = normalizeText(result?.cmdName || response?.cmdName);
+            if (!/nodeIKernelMsgListener\/onRichMediaUploadComplete$/i.test(cmdName)) {
+                return false;
+            }
+            return Boolean(findRichMediaUploadInfo(result, filePath) || findRichMediaUploadInfo(response, filePath));
+        }, timeoutMs));
+    if (!waiters.length) {
+        throw new Error('No QQ window is available for image upload events.');
+    }
+    return {
+        cancel: () => waiters.forEach(waiter => waiter.cancel()),
+        promise: Promise.any(waiters.map(waiter => waiter.promise)).catch(error => {
+            const first = error?.errors?.find(item => item instanceof Error);
+            throw first || error;
+        })
+    };
+}
+
+function startFakeForwardImageUpload(peer, filePath) {
+    const service = getQqWrapperSession()?.getRichMediaService?.();
+    if (typeof service?.uploadRMFileWithoutMsg !== 'function') {
+        throw new Error('QQ rich-media upload service is unavailable.');
+    }
+    return service.uploadRMFileWithoutMsg(buildFakeForwardImageUploadParams(peer, filePath));
+}
+
+async function uploadFakeForwardImage(browserWindow, peer, filePath) {
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat?.isFile() || !stat.size) {
+        throw new Error(`图片文件不存在或为空：${path.basename(filePath)}`);
+    }
+    const extension = await nativeFileType(browserWindow, filePath);
+    if (!IMAGE_EXTENSIONS.has(`.${extension}`)) {
+        throw new Error(`不支持的图片格式：${path.basename(filePath)}`);
+    }
+    const waiter = createFakeForwardImageUploadWaiters(filePath);
+    try {
+        const invocation = startFakeForwardImageUpload(peer, filePath);
+        const invocationFailure = Promise.resolve(invocation).then(() => new Promise(() => {}));
+        const eventResult = await Promise.race([waiter.promise, invocationFailure]);
+        const uploadInfo = findRichMediaUploadInfo(eventResult, filePath) || eventResult;
+        const errorCode = Number(uploadInfo?.fileErrCode);
+        if (Number.isFinite(errorCode) && errorCode !== 0) {
+            throw new Error(`图片上传失败：${uploadInfo?.fileErrMsg || errorCode}`);
+        }
+        const commonFileInfo = uploadInfo?.commonFileInfo || {};
+        const fileUuid = normalizeText(commonFileInfo.uuid || uploadInfo?.fileId);
+        if (!fileUuid) {
+            throw new Error(`QQ 未返回图片资源 ID：${path.basename(filePath)}`);
+        }
+        const [imageSize, fileSize, md5, sha1] = await Promise.all([
+            nativeImageSize(browserWindow, filePath),
+            nativeFileSize(browserWindow, filePath),
+            getFileMd5(filePath),
+            getFileSha1(filePath)
+        ]);
+        return createFakeForwardImageMsgInfo({
+            peer,
+            fileUuid,
+            fileSize,
+            width: imageSize.width,
+            height: imageSize.height,
+            extension,
+            fileName: `${md5}.${extension}`,
+            md5,
+            sha1
+        });
+    } finally {
+        waiter.cancel();
+    }
+}
+
+async function prepareFakeForwardImages(browserWindow, payload) {
+    const peer = payload?.peer || {};
+    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+    const selected = [];
+    const paths = new Map();
+    for (const [messageIndex, message] of messages.entries()) {
+        const segments = getFakeForwardSourceSegments(message);
+        const images = segments.filter(segment => segment?.type === 'image');
+        if (images.length > MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE) {
+            throw new Error(`第 ${messageIndex + 1} 条消息的图片数量过多。`);
+        }
+        for (const image of images) {
+            const filePath = normalizePathText(image?.path);
+            if (!filePath || !path.isAbsolute(filePath)) {
+                throw new Error(`第 ${messageIndex + 1} 条消息包含无效的图片路径。`);
+            }
+            const key = normalizeComparablePath(filePath);
+            if (!paths.has(key)) {
+                paths.set(key, filePath);
+                selected.push(filePath);
+            }
+        }
+    }
+    const uploaded = await mapWithConcurrency(selected, 2, async filePath => ({
+        key: normalizeComparablePath(filePath),
+        msgInfo: await uploadFakeForwardImage(browserWindow, peer, filePath)
+    }));
+    const byPath = new Map(uploaded.map(item => [item.key, item.msgInfo]));
+    return {
+        ...payload,
+        messages: messages.map(message => ({
+            ...message,
+            segments: getFakeForwardSourceSegments(message).map(segment => segment?.type === 'image'
+                ? {
+                    type: 'image',
+                    name: normalizeText(segment.name) || path.basename(normalizePathText(segment.path)),
+                    msgInfo: byPath.get(normalizeComparablePath(normalizePathText(segment.path)))
+                }
+                : { type: 'text', text: String(segment?.text ?? '') }
+            )
+        }))
+    };
+}
+
+function getFakeForwardSourceSegments(message) {
+    if (Array.isArray(message?.segments)) {
+        return message.segments;
+    }
+    return [
+        ...(String(message?.content ?? '') ? [{ type: 'text', text: String(message.content) }] : []),
+        ...(Array.isArray(message?.images)
+            ? message.images.map(image => ({ type: 'image', ...image }))
+            : [])
+    ];
+}
+
+function toFakeForwardImageBuffer(value) {
+    if (Buffer.isBuffer(value)) {
+        return value;
+    }
+    if (value instanceof ArrayBuffer) {
+        return Buffer.from(value);
+    }
+    if (ArrayBuffer.isView(value)) {
+        return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (value?.type === 'Buffer' && Array.isArray(value.data)) {
+        return Buffer.from(value.data);
+    }
+    return Buffer.alloc(0);
+}
+
+async function stageFakeForwardImage(payload) {
+    const data = toFakeForwardImageBuffer(payload?.data);
+    if (!data.length || data.length > MAX_FAKE_FORWARD_STAGED_IMAGE_BYTES) {
+        throw new Error('图片为空或超过 32 MB。');
+    }
+    const originalName = path.basename(normalizeText(payload?.name)) || 'image.png';
+    const nameExtension = path.extname(originalName).toLowerCase();
+    const mimeExtension = FAKE_FORWARD_IMAGE_MIME_EXTENSIONS[normalizeText(payload?.type).toLowerCase()];
+    const extension = IMAGE_EXTENSIONS.has(nameExtension) ? nameExtension : mimeExtension;
+    if (!extension) {
+        throw new Error('不支持该图片格式。');
+    }
+    const filePath = path.join(
+        os.tmpdir(),
+        `${FAKE_FORWARD_STAGED_IMAGE_PREFIX}${crypto.randomUUID()}${extension}`
+    );
+    await fs.writeFile(filePath, data, { flag: 'wx' });
+    const baseName = path.basename(originalName, nameExtension);
+    return {
+        path: filePath,
+        name: `${baseName || 'image'}${extension}`
+    };
+}
+
+async function cleanupFakeForwardStagedImages(payload) {
+    const tempDirectory = normalizeComparablePath(os.tmpdir());
+    const paths = new Set();
+    for (const message of Array.isArray(payload?.messages) ? payload.messages : []) {
+        for (const segment of getFakeForwardSourceSegments(message)) {
+            const filePath = normalizePathText(segment?.type === 'image' ? segment.path : '');
+            if (normalizeComparablePath(path.dirname(filePath)) === tempDirectory &&
+                path.basename(filePath).startsWith(FAKE_FORWARD_STAGED_IMAGE_PREFIX)) {
+                paths.add(filePath);
+            }
+        }
+    }
+    await Promise.all(Array.from(paths, filePath => fs.unlink(filePath).catch(() => {})));
+}
+
+async function sendFakeForwardFromRenderer(browserWindow, payload) {
+    if (getConfig().fakeForward?.enabled !== true) {
+        throw new Error('伪造合并转发功能未开启。');
+    }
+    registerPokeAccount(browserWindow, payload?.selfUin);
+    let selfUid = '';
+    if (Number(payload?.peer?.chatType) === 1) {
+        const selfUin = getWindowState(browserWindow).selfUin;
+        if (!selfUin) {
+            throw new Error('无法获取当前账号。');
+        }
+        selfUid = await resolveFakeForwardSenderUid(browserWindow, selfUin);
+    }
+    const preparedPayload = await prepareFakeForwardImages(browserWindow, payload);
+    const upload = await buildFakeForwardUploadRequest(preparedPayload, { selfUid });
+    const response = await invokeFakeForwardSso(browserWindow, upload);
+    if (isNativeFailure(response)) {
+        throw new Error(`上传合并转发记录失败：${safeJson(response)}`);
+    }
+    const resId = await parseFakeForwardUploadResponse(response);
+    const peerUin = await resolveFakeForwardPeerUin(browserWindow, upload.peer);
+    const sendRequest = await buildFakeForwardSendRequest(upload, resId, { peerUin });
+    const sendResponse = await parseFakeForwardSendResponse(
+        await invokeFakeForwardSso(browserWindow, sendRequest)
+    );
+    if (sendResponse.result !== 0) {
+        throw new Error(`发送合并转发卡片失败：${sendResponse.result}${
+            sendResponse.errMsg ? ` (${sendResponse.errMsg})` : ''
+        }`);
+    }
+    await cleanupFakeForwardStagedImages(payload);
+    return {
+        ok: true,
+        count: upload.count
+    };
+}
+
 function getNativeNudgePeer(browserWindow, payload, chatType, targetUin, groupUin) {
     if (chatType === 2) {
         return {
@@ -1191,6 +1532,30 @@ function installConfigIpc() {
             throw error;
         }
     });
+    ipcMain.handle(CHANNEL_STAGE_FAKE_FORWARD_IMAGE, (_event, payload) => stageFakeForwardImage(payload));
+    ipcMain.handle(CHANNEL_SEND_FAKE_FORWARD, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            throw new Error('BrowserWindow was not found.');
+        }
+        const summary = {
+            chatType: Number(payload?.peer?.chatType) || 0,
+            messageCount: Array.isArray(payload?.messages) ? payload.messages.length : 0,
+            imageCount: Array.isArray(payload?.messages)
+                ? payload.messages.reduce((count, message) => count + getFakeForwardSourceSegments(message)
+                    .filter(segment => segment?.type === 'image').length, 0)
+                : 0
+        };
+        recordDiagnostic('info', 'fake-forward.requested', summary);
+        try {
+            const result = await sendFakeForwardFromRenderer(browserWindow, payload);
+            recordDiagnostic('info', 'fake-forward.completed', summary);
+            return result;
+        } catch (error) {
+            recordDiagnostic('error', 'fake-forward.failed', { ...summary, error });
+            throw error;
+        }
+    });
     ipcMain.handle(CHANNEL_GET_REACTION_CATALOG, () => {
         try {
             return getReactionEmojiCatalog();
@@ -1306,7 +1671,8 @@ function getWindowState(browserWindow) {
             pluginAttrIds: new Map(),
             inlineMediaByPeer: new Map(),
             inlineReplySourcesByPeer: new Map(),
-            inlineMediaGallery: null
+            inlineMediaGallery: null,
+            pendingInlineFileDownload: null
         };
         windowStates.set(browserWindow, state);
     }
@@ -1414,7 +1780,7 @@ function canResolveInlineMediaItem(item) {
 
 function canOpenInlineMediaItem(item) {
     return isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) ||
-        Boolean(getAbsoluteFilePathCandidate([item?.filePath]));
+        Boolean(getAbsoluteFilePathCandidate([item?.filePath])) || item?.pendingFile === true;
 }
 
 async function showInlineMediaPreview(browserWindow, gallery) {
@@ -1438,7 +1804,7 @@ async function showInlineMediaPreview(browserWindow, gallery) {
         const items = gallery.items.filter(item =>
             isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) || (
                 getInlineMediaItemKey(item) === selectedKey &&
-                Boolean(getAbsoluteFilePathCandidate([item?.filePath]))
+                (Boolean(getAbsoluteFilePathCandidate([item?.filePath])) || item?.pendingFile === true)
             )
         );
         const index = items.findIndex(item => getInlineMediaItemKey(item) === selectedKey);
@@ -1457,7 +1823,7 @@ async function showInlineMediaPreview(browserWindow, gallery) {
                 ? getAbsoluteFilePathCandidate([item.filePath])
                 : '';
             const sourceUrl = normalizeInlineMediaSourceUrl(item.sourceUrl);
-            const needsResolve = !localPath && canResolveInlineMediaItem(item);
+            const needsResolve = !localPath && (item.pendingFile === true || canResolveInlineMediaItem(item));
             const previewPath = getExistingFilePath([item.previewSource]);
             const previewUrl = !previewPath
                 ? normalizeInlineMediaSourceUrl(item.previewSource)
@@ -1476,7 +1842,7 @@ async function showInlineMediaPreview(browserWindow, gallery) {
                 src,
                 previewSrc: previewPath ? await inlineMediaServer.getUrl(previewPath) : previewUrl,
                 name: item.name,
-                pending: Boolean(pendingPath),
+                pending: Boolean(pendingPath) || item.pendingFile === true,
                 needsResolve
             };
         }));
@@ -1531,6 +1897,88 @@ function requestInlineMediaDownload(browserWindow, item) {
     return true;
 }
 
+function createPendingInlineFileDownload() {
+    let resolvePromise;
+    let rejectPromise;
+    let settled = false;
+    let timer = null;
+    const promise = new Promise((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
+    });
+    const finish = (error, filePath = '') => {
+        if (settled) {
+            return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        if (error) {
+            rejectPromise(error);
+        } else {
+            resolvePromise(filePath);
+        }
+    };
+    timer = setTimeout(() => finish(new Error('Timed out waiting for QQ file download.')), 65 * 1000);
+    promise.catch(() => {});
+    return {
+        bound: false,
+        promise,
+        reject: error => finish(error),
+        resolve: filePath => finish(null, filePath)
+    };
+}
+
+function getFileAssistantDownloadIds(payload) {
+    const values = Array.isArray(payload?.[0]) ? payload[0] : [payload?.[0]];
+    return values.map(value => normalizeText(value?.id ?? value)).filter(Boolean);
+}
+
+function getFileAssistantStatus(result, fileIds) {
+    return findIpcObject(result?.payload, value =>
+        fileIds.includes(normalizeText(value?.id)) && value?.fileStatus !== undefined
+    );
+}
+
+function bindPendingInlineFileDownload(browserWindow, command) {
+    if (!/nodeIKernelFileAssistantService\/downloadFile$/i.test(normalizeText(command?.cmdName))) {
+        return;
+    }
+    const state = getWindowState(browserWindow);
+    const gallery = state.inlineMediaGallery;
+    const item = gallery?.items?.[gallery.index];
+    const pending = state.pendingInlineFileDownload;
+    const fileIds = getFileAssistantDownloadIds(command.payload);
+    if (!pending || pending.itemKey !== getInlineMediaItemKey(item) || pending.bound || !fileIds.length) {
+        return;
+    }
+    pending.bound = true;
+    recordDiagnostic('info', 'media.file-download-bound', { fileCount: fileIds.length });
+    const waiter = createNativeEventWaiter(browserWindow, (_response, result) => {
+        if (!/nodeIKernelFileAssistantListener\/onFileStatusChanged$/i.test(normalizeText(result?.cmdName))) {
+            return false;
+        }
+        const status = getFileAssistantStatus(result, fileIds);
+        return Number(status?.fileStatus) === 2 && normalizeText(status?.fileProgress) === '0' &&
+            Boolean(getAbsoluteFilePathCandidate([status?.filePath]));
+    }, 60 * 1000);
+    waiter.promise.then(result => {
+        const status = getFileAssistantStatus(result, fileIds);
+        const filePath = getAbsoluteFilePathCandidate([status?.filePath]);
+        if (!filePath) {
+            throw new Error('QQ file download completed without a local path.');
+        }
+        item.filePath = filePath;
+        item.pendingFile = false;
+        recordDiagnostic('info', 'media.file-download-resolved');
+        pending.resolve(filePath);
+    }).catch(error => {
+        recordDiagnostic('warn', 'media.file-download-failed', {
+            error: error?.message || String(error)
+        });
+        pending.reject(error);
+    });
+}
+
 async function prepareInlineMedia(browserWindow, payload) {
     if (!isInlineMediaViewerEnabled() || !browserWindow || browserWindow.isDestroyed() ||
         browserWindow.webContents.isDestroyed()) {
@@ -1543,6 +1991,16 @@ async function prepareInlineMedia(browserWindow, payload) {
         return null;
     }
     const item = gallery.items[index];
+    const pendingFile = getWindowState(browserWindow).pendingInlineFileDownload;
+    if (item.pendingFile === true && pendingFile?.itemKey === getInlineMediaItemKey(item)) {
+        const filePath = await pendingFile.promise;
+        return {
+            type: item.type,
+            src: await inlineMediaServer.getUrl(filePath),
+            name: item.name,
+            pending: false
+        };
+    }
     const existingPath = getExistingFilePath([item.filePath]);
     if (existingPath) {
         return {
@@ -1582,10 +2040,21 @@ async function openInlineMediaFromRenderer(browserWindow, payload) {
     if (!item) {
         return false;
     }
+    const state = getWindowState(browserWindow);
+    if (item.pendingFile === true) {
+        state.pendingInlineFileDownload?.reject(new Error('Pending file preview was replaced.'));
+        state.pendingInlineFileDownload = {
+            ...createPendingInlineFileDownload(),
+            itemKey: getInlineMediaItemKey(item)
+        };
+        closeExistingMediaViewers(browserWindow.webContents);
+        return await showInlineMediaPreview(browserWindow, { items: [item], index: 0 });
+    }
+    state.pendingInlineFileDownload?.reject(new Error('Pending file preview was replaced.'));
+    state.pendingInlineFileDownload = null;
     const hasLocalFile = Boolean(getExistingFilePath([item.filePath]));
     const hasResourceSource = Boolean(normalizeInlineMediaSourceUrl(item.sourceUrl));
-    const nativeDownloadStarted = payload?.recordSource === 'forward-detail' &&
-        payload?.nativeDownloadStarted === true;
+    const nativeDownloadStarted = item.type === 'video' && payload?.nativeDownloadStarted === true;
     const downloadRequested = hasLocalFile
         ? false
         : nativeDownloadStarted
@@ -1714,6 +2183,7 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
     if (!command) {
         return false;
     }
+    bindPendingInlineFileDownload(browserWindow, command);
     applyCustomImageSummary(command, getMessageTweaksConfig());
     if (isDebugEnabled() && getWindowRoute(browserWindow?.webContents?.getURL()) === 'forward' &&
         /(?:RichMedia|VideoPlay)/i.test(command.cmdName)) {
@@ -3487,18 +3957,11 @@ function createRecordRepairPlan(record) {
     if (!elements.length) {
         return null;
     }
-    const descriptors = elements.map(getRepairDescriptor);
-    if (descriptors.some(descriptor => !descriptor || isGeneratedRepairPath(descriptor.sourcePath))) {
-        return null;
-    }
     const config = getFileRetryConfig();
-    if (config.enabled === false || descriptors.some(descriptor => config[descriptor.kind] === false)) {
+    if (config.enabled === false) {
         return null;
     }
-    if (descriptors.some(descriptor => descriptor.kind === 'otherFiles') && !String(config.archivePassword || '')) {
-        return null;
-    }
-    return descriptors;
+    return createFileRetryPlan(elements, getRepairDescriptor, isGeneratedRepairPath, config);
 }
 
 function queueFileRetry(browserWindow, record, plan) {
@@ -3517,7 +3980,7 @@ function queueFileRetry(browserWindow, record, plan) {
         count: (existing?.count || 0) + 1
     });
     state.inFlightRecords.add(key);
-    const kinds = plan.map(descriptor => descriptor.kind);
+    const kinds = getRepairKinds(plan);
     recordDiagnostic('info', 'file-retry.queued', {
         sendStatus: Number(record?.sendStatus),
         kinds,
@@ -3757,14 +4220,22 @@ async function createEncryptedArchiveVariant(sourcePath, password) {
     }
 }
 
-async function getFileMd5(filePath) {
-    const hash = crypto.createHash('md5');
+async function getFileHash(filePath, algorithm) {
+    const hash = crypto.createHash(algorithm);
     const stream = fsSync.createReadStream(filePath);
     return await new Promise((resolve, reject) => {
         stream.on('data', chunk => hash.update(chunk));
         stream.on('error', reject);
         stream.on('end', () => resolve(hash.digest('hex')));
     });
+}
+
+async function getFileMd5(filePath) {
+    return await getFileHash(filePath, 'md5');
+}
+
+async function getFileSha1(filePath) {
+    return await getFileHash(filePath, 'sha1');
 }
 
 function findFirstByKey(value, keys, depth = 0, seen = new WeakSet()) {
@@ -4664,6 +5135,13 @@ const repeatMessageFromRenderer = createRepeatMessageHandler({
 
 async function createRepairedElement(browserWindow, descriptor, archivePassword) {
     const { element, kind, sourcePath } = descriptor;
+    if (kind === PRESERVE_KIND) {
+        const preserved = deepCloneForSend(element);
+        if (preserved && typeof preserved === 'object') {
+            preserved.elementId = '';
+        }
+        return preserved;
+    }
     if (kind === 'image') {
         const originalPic = element.picElement || element;
         const repairedPath = await createPixelPreservingImageVariant(sourcePath);
@@ -4702,7 +5180,9 @@ async function retryFileRecord(browserWindow, record, plan, key) {
         throw new Error(`Cannot resolve original peer for ${key}.`);
     }
     const config = getFileRetryConfig();
-    if (config.enabled === false || plan.some(descriptor => config[descriptor.kind] === false)) {
+    if (config.enabled === false || plan.some(descriptor =>
+        descriptor.kind !== PRESERVE_KIND && config[descriptor.kind] === false
+    )) {
         return;
     }
     const repairedElements = [];
@@ -4720,7 +5200,7 @@ async function retryFileRecord(browserWindow, record, plan, key) {
     }
     recordDiagnostic('info', 'file-retry.completed', {
         chatType: Number(peer.chatType) || 0,
-        kinds: plan.map(descriptor => descriptor.kind),
+        kinds: getRepairKinds(plan),
         deletedFailedMessage: getFileRetryConfig().deleteFailedMessage === true
     });
 }

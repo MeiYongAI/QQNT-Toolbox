@@ -168,7 +168,8 @@ function normalizeInlineMediaOpenItem(value) {
     };
     const explicitType = value?.type === 'video' || value?.type === 'image' ? value.type : '';
     const type = explicitType || classifyMediaFilePath(value?.name, filePath, sourceUrl);
-    if (!type || (!filePath && !sourceUrl)) {
+    const pendingFile = value?.pendingFile === true && normalizedIdentity.msgId && normalizedIdentity.elementId;
+    if (!type || (!filePath && !sourceUrl && !pendingFile)) {
         return null;
     }
     const previewValue = value?.previewSource || value?.previewFilePath;
@@ -184,7 +185,8 @@ function normalizeInlineMediaOpenItem(value) {
         name: String(value?.name || '').trim() || path.basename(filePath) ||
             (type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex: Number.isInteger(Number(value?.sourceIndex)) ? Number(value.sourceIndex) : 0,
-        identity: normalizedIdentity
+        identity: normalizedIdentity,
+        ...(pendingFile ? { pendingFile: true } : {})
     };
 }
 

@@ -14,11 +14,32 @@ function applyCustomImageSummary(command, config) {
     const elements = Array.isArray(request?.msgElements) ? request.msgElements : [];
     let changed = 0;
     for (const element of elements) {
-        if (!element?.picElement || typeof element.picElement !== 'object') {
+        if (!element || typeof element !== 'object') {
             continue;
         }
-        element.picElement.summary = summary;
-        changed += 1;
+        let elementChanged = false;
+        if (element.picElement && typeof element.picElement === 'object') {
+            element.picElement.summary = summary;
+            elementChanged = true;
+        }
+        const marketFace = element.marketFaceElement && typeof element.marketFaceElement === 'object'
+            ? element.marketFaceElement
+            : Number(element.elementType) === 11 ? element : null;
+        if (marketFace) {
+            marketFace.faceName = summary;
+            elementChanged = true;
+        }
+        if (element.faceBubbleElement && typeof element.faceBubbleElement === 'object') {
+            element.faceBubbleElement.content = summary;
+            elementChanged = true;
+        }
+        if (element.faceElement && typeof element.faceElement === 'object') {
+            element.faceElement.faceText = summary;
+            elementChanged = true;
+        }
+        if (elementChanged) {
+            changed += 1;
+        }
     }
     return changed;
 }

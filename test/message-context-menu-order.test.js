@@ -11,6 +11,25 @@ const moduleSource = fs.readFileSync(
 );
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(moduleSource).toString('base64')}`);
 
+test('calculates stable insertion positions and drag auto-scroll speed', async () => {
+    const { getDragAutoScrollDelta, getDragInsertionIndex } = await modulePromise;
+
+    assert.equal(getDragInsertionIndex([100, 150, 200], 80), 0);
+    assert.equal(getDragInsertionIndex([100, 150, 200], 125), 1);
+    assert.equal(getDragInsertionIndex([100, 150, 200], 220), 3);
+    assert.equal(getDragAutoScrollDelta(100, 100, 500), -18);
+    assert.equal(getDragAutoScrollDelta(124, 100, 500), -9);
+    assert.equal(getDragAutoScrollDelta(300, 100, 500), 0);
+    assert.equal(getDragAutoScrollDelta(500, 100, 500), 18);
+});
+
+test('uses pointer sorting instead of native HTML drag and drop', () => {
+    assert.match(moduleSource, /addEventListener\('pointerdown'[\s\S]*setPointerCapture/);
+    assert.match(moduleSource, /requestAnimationFrame\(runAutoScroll\)/);
+    assert.doesNotMatch(moduleSource, /addEventListener\('dragstart'/);
+    assert.doesNotMatch(moduleSource, /\.draggable\s*=\s*true/);
+});
+
 test('normalizes persisted message menu order without duplicates', async () => {
     const { normalizeContextMenuOrder } = await modulePromise;
     assert.deepEqual(

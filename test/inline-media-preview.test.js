@@ -184,6 +184,30 @@ test('normalizes a video selected directly from its message record', () => {
     assert.equal(normalizeInlineMediaOpenItem({ type: 'video', filePath: 'relative.mp4' }), null);
 });
 
+test('accepts a source-less file media item only while QQ is downloading it', () => {
+    const identity = {
+        chatType: 2,
+        peerUid: 'group-uid',
+        msgId: 'message-id',
+        msgSeq: '100',
+        elementId: 'element-id'
+    };
+    assert.deepEqual(normalizeInlineMediaOpenItem({
+        type: 'video',
+        name: 'pending.mp4',
+        pendingFile: true,
+        identity
+    }), {
+        type: 'video',
+        fingerprint: '',
+        name: 'pending.mp4',
+        sourceIndex: 0,
+        identity,
+        pendingFile: true
+    });
+    assert.equal(normalizeInlineMediaOpenItem({ type: 'video', pendingFile: true }), null);
+});
+
 test('builds the QQ rich-media request used by one-click video download', () => {
     const item = {
         filePath: 'D:\\cache\\pending.mp4',
@@ -212,16 +236,37 @@ test('builds the QQ rich-media request used by one-click video download', () => 
     assert.equal(createInlineMediaDownloadPayload({ identity: item.identity }), null);
 });
 
-test('activates the QQ forward-detail video control before opening the inline preview', () => {
+test('activates the QQ video control before opening the inline preview', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
     const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
 
     assert.match(rendererSource, /item\.recordSource\s*=\s*'forward-detail'/);
-    assert.match(rendererSource, /payload\.recordSource\s*===\s*'forward-detail'[\s\S]*dispatchNativeMediaOpen\(target, sourceEvent\)/);
+    assert.match(rendererSource, /if \(target\.isVideo && !target\.isFileMedia\) \{[\s\S]*dispatchNativeMediaOpen\(target, sourceEvent\)/);
+    assert.doesNotMatch(rendererSource, /target\.isVideo\s*&&\s*payload\.recordSource/);
     assert.match(rendererSource, /payload\.nativeDownloadStarted\s*=\s*true/);
+    assert.match(mainSource, /item\.type === 'video'\s*&&\s*payload\?\.nativeDownloadStarted === true/);
     assert.match(mainSource, /nativeDownloadStarted[\s\S]*getAbsoluteFilePathCandidate\(\[item\.filePath\]\)/);
     assert.doesNotMatch(mainSource, /requestForwardDetailInlineMediaDownload/);
     assert.match(mainSource, /nodeIKernelRichMediaService\/downloadRichMediaInVisit'[\s\S]*?\}\],\s*false\s*\)/);
+});
+
+test('opens file media first and resolves it from QQ file-assistant status', () => {
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(rendererSource, /target\.isFileMedia && payload\.pendingFile === true[\s\S]*openInlineMedia\?\.\(payload\)[\s\S]*dispatchNativeMediaOpen\(target, sourceEvent\)/);
+    assert.match(rendererSource, /inlineMedia: resolvedIsVideo \|\| isFileImage/);
+    assert.match(mainSource, /nodeIKernelFileAssistantService\\\/downloadFile/);
+    assert.match(mainSource, /nodeIKernelFileAssistantListener\\\/onFileStatusChanged/);
+    assert.match(mainSource, /state\.pendingInlineFileDownload/);
+    assert.doesNotMatch(mainSource, /onRichMediaDownloadComplete[\s\S]*pendingInlineMediaDownloads/);
+});
+
+test('shows a loading state for every media load', () => {
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(rendererSource, /stage\.classList\.add\('is-loading'\)/);
+    assert.match(rendererSource, /stage\.classList\.remove\('is-loading'\)/);
 });
 
 test('resolves an unopened gallery item through QQ when navigation first reaches it', () => {
@@ -262,6 +307,17 @@ test('uses an inline swatch group for media background selection', () => {
     assert.match(settingsCss, /qqnt-toolbox-swatch\[data-value="transparent"\]/);
     assert.doesNotMatch(rendererSource, /createSelectItem|qqnt-toolbox-select|HTMLSelectElement/);
     assert.doesNotMatch(settingsCss, /qqnt-toolbox-select/);
+});
+
+test('keeps native video playback while removing redundant viewer controls', () => {
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+
+    assert.match(rendererSource, /media\.controls = true/);
+    assert.match(rendererSource, /controlsList', 'nodownload nofullscreen noremoteplayback'/);
+    assert.match(rendererSource, /media\.disablePictureInPicture = true/);
+    assert.match(rendererSource, /webkit-media-controls-fullscreen-button/);
+    assert.match(rendererSource, /webkit-media-controls-overflow-button/);
+    assert.doesNotMatch(rendererSource, /qqnt-toolbox-video-controls/);
 });
 
 test('keeps an undownloaded native media item only with a download destination', () => {

@@ -12,14 +12,16 @@ const {
     mapWithConcurrency
 } = require('../src/repeat-message');
 
-test('mounts side repeat controls lazily without a body-wide repeat observer', () => {
+test('mounts stable side repeat controls lazily without a body-wide repeat observer', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
 
     assert.doesNotMatch(source, /repeatObserver\s*=\s*new MutationObserver/);
     assert.doesNotMatch(source, /addEventListener\('scroll',\s*scheduleRepeatEntrypointRefresh/);
     assert.match(source, /repeatResizeObserver\s*=\s*new ResizeObserver/);
     assert.match(source, /addEventListener\('pointerover',\s*handleRepeatMessagePointerOver/);
-    assert.match(source, /addEventListener\('pointerout',\s*handleRepeatMessagePointerOut/);
+    assert.doesNotMatch(source, /handleRepeatMessagePointerOut|addEventListener\('pointerout'/);
+    assert.match(source, /qqnt-toolbox-repeat-slot[\s\S]*overflow-anchor:\s*none/);
+    assert.match(source, /qqnt-toolbox-status-badge[\s\S]*overflow-anchor:\s*none/);
     assert.match(source, /getMessageContextTargetFromEvent\(sourceEvent\)/);
     assert.match(source, /!isSearchChatRecordWindow\(\)[\s\S]*repeatMessage\.showInContextMenu/);
     assert.match(source, /isForwardRecordWindow\(\)[\s\S]*elementType\) === 16[\s\S]*showFallbackRepeatMenu/);

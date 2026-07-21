@@ -228,6 +228,34 @@ export function composeContextMenuConfigs(nativeItems, toolboxItems, order = [],
     ).map(entry => entry.config);
 }
 
+export function getDragInsertionIndex(rowMidpoints, pointerY) {
+    const y = Number(pointerY);
+    if (!Number.isFinite(y)) {
+        return 0;
+    }
+    const midpoints = Array.isArray(rowMidpoints) ? rowMidpoints : [];
+    const index = midpoints.findIndex(value => y < Number(value));
+    return index < 0 ? midpoints.length : index;
+}
+
+export function getDragAutoScrollDelta(pointerY, top, bottom, edgeSize = 48, maxSpeed = 18) {
+    const y = Number(pointerY);
+    const start = Number(top);
+    const end = Number(bottom);
+    const edge = Math.max(1, Number(edgeSize) || 48);
+    const speed = Math.max(1, Number(maxSpeed) || 18);
+    if (![y, start, end].every(Number.isFinite) || end <= start) {
+        return 0;
+    }
+    if (y < start + edge) {
+        return -Math.ceil(speed * Math.min(1, Math.max(0, (start + edge - y) / edge)));
+    }
+    if (y > end - edge) {
+        return Math.ceil(speed * Math.min(1, Math.max(0, (y - (end - edge)) / edge)));
+    }
+    return 0;
+}
+
 function injectStyle() {
     if (document.getElementById(STYLE_ID)) {
         return;
@@ -311,6 +339,7 @@ function injectStyle() {
     padding: 6px 12px;
     overflow-y: auto;
     overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: var(--fill_standard_secondary, rgba(127, 127, 127, .30)) transparent;
 }
@@ -323,25 +352,64 @@ function injectStyle() {
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-row {
     display: grid;
-    grid-template-columns: 28px minmax(0, 1fr) 30px 30px;
+    grid-template-columns: 34px minmax(0, 1fr) 30px 30px;
     align-items: center;
     min-height: 42px;
+    box-sizing: border-box;
     border-bottom: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .10)));
+    background: transparent;
+    transition: background-color 120ms ease, border-color 120ms ease;
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-row:last-child {
     border-bottom: 0;
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-row[data-dragging="true"] {
-    opacity: .45;
+    border: 1px dashed var(--brand_standard, var(--brand-primary, #2f6bff));
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--brand_standard, var(--brand-primary, #2f6bff)) 9%, transparent);
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-row[data-dragging="true"] > * {
+    visibility: hidden;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-list[data-dragging="true"],
+#${EDITOR_ID} .qqnt-toolbox-menu-order-list[data-dragging="true"] * {
+    cursor: grabbing !important;
+    user-select: none;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-drag-ghost {
+    position: fixed;
+    z-index: 2;
+    margin: 0;
+    overflow: hidden;
+    box-sizing: border-box;
+    pointer-events: none;
+    border: 1px solid var(--brand_standard, var(--brand-primary, #2f6bff));
+    border-radius: 6px;
+    color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    background: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .26);
+    opacity: .96;
+    will-change: transform;
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-handle {
-    width: 28px;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
     color: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    background: transparent;
     font-size: 16px;
     line-height: 24px;
     text-align: center;
     cursor: grab;
+    touch-action: none;
     user-select: none;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-handle:hover,
+#${EDITOR_ID} .qqnt-toolbox-menu-order-handle:focus-visible {
+    color: inherit;
+    background: var(--overlay_hover, rgba(127, 127, 127, .12));
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-handle:active {
     cursor: grabbing;
@@ -405,6 +473,7 @@ export function createMessageContextMenuOrderController(options) {
     const extensions = new Map();
     const patchedMenus = new WeakMap();
     let previousFocus = null;
+    let editorCleanup = null;
     let catalogSaveTimer = 0;
     let lastObservedOrder = [];
 
@@ -685,6 +754,9 @@ export function createMessageContextMenuOrderController(options) {
     }
 
     function closeEditor() {
+        const cleanup = editorCleanup;
+        editorCleanup = null;
+        cleanup?.();
         document.getElementById(EDITOR_ID)?.remove();
         if (previousFocus?.isConnected) {
             previousFocus.focus({ preventScroll: true });
@@ -717,9 +789,10 @@ export function createMessageContextMenuOrderController(options) {
             const row = createElement('div', 'qqnt-toolbox-menu-order-row');
             row.dataset.itemId = item.id;
             row.setAttribute('role', 'listitem');
-            const handle = createElement('span', 'qqnt-toolbox-menu-order-handle', '⋮⋮');
-            handle.draggable = true;
+            const handle = createElement('button', 'qqnt-toolbox-menu-order-handle', '⋮⋮');
+            handle.type = 'button';
             handle.title = '拖动';
+            handle.setAttribute('aria-label', `${item.label} 拖动排序`);
             const name = createElement('div', 'qqnt-toolbox-menu-order-name');
             name.append(createElement('span', '', item.label));
             if (item.toolbox) {
@@ -754,64 +827,186 @@ export function createMessageContextMenuOrderController(options) {
         layer.append(dialog);
         document.body.append(layer);
 
-        let draggingRow = null;
-        list.addEventListener('dragstart', event => {
-            const row = event.target.closest?.('.qqnt-toolbox-menu-order-handle')
-                ?.closest?.('.qqnt-toolbox-menu-order-row');
-            if (!row) {
-                event.preventDefault();
+        let pointerDrag = null;
+        let autoScrollFrame = 0;
+
+        const updatePointerDrag = clientY => {
+            if (!pointerDrag?.started) {
                 return;
             }
-            draggingRow = row;
-            row.dataset.dragging = 'true';
-            event.dataTransfer.effectAllowed = 'move';
-            event.dataTransfer.setData('text/plain', row.dataset.itemId || '');
-        });
-        list.addEventListener('dragover', event => {
-            if (!draggingRow) {
+            pointerDrag.clientY = clientY;
+            pointerDrag.ghost.style.transform = `translate3d(0, ${clientY - pointerDrag.startY}px, 0)`;
+            const rows = Array.from(list.querySelectorAll('.qqnt-toolbox-menu-order-row'))
+                .filter(row => row !== pointerDrag.row);
+            const insertionIndex = getDragInsertionIndex(
+                rows.map(row => {
+                    const rect = row.getBoundingClientRect();
+                    return rect.top + rect.height / 2;
+                }),
+                clientY
+            );
+            const target = rows[insertionIndex] || null;
+            if (target && pointerDrag.row.nextElementSibling !== target) {
+                list.insertBefore(pointerDrag.row, target);
+                updateMoveButtons(list);
+            } else if (!target && pointerDrag.row !== list.lastElementChild) {
+                list.append(pointerDrag.row);
+                updateMoveButtons(list);
+            }
+        };
+
+        const runAutoScroll = () => {
+            if (!pointerDrag?.started) {
+                autoScrollFrame = 0;
                 return;
             }
-            event.preventDefault();
-            event.dataTransfer.dropEffect = 'move';
-            const target = event.target.closest?.('.qqnt-toolbox-menu-order-row');
-            if (!target || target === draggingRow) {
+            const rect = list.getBoundingClientRect();
+            const delta = getDragAutoScrollDelta(pointerDrag.clientY, rect.top, rect.bottom);
+            if (delta) {
+                const previousScrollTop = list.scrollTop;
+                list.scrollTop += delta;
+                if (list.scrollTop !== previousScrollTop) {
+                    updatePointerDrag(pointerDrag.clientY);
+                }
+            }
+            autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
+        };
+
+        const startPointerDrag = () => {
+            if (!pointerDrag || pointerDrag.started) {
                 return;
             }
-            const rect = target.getBoundingClientRect();
-            list.insertBefore(draggingRow, event.clientY < rect.top + rect.height / 2 ? target : target.nextSibling);
-            updateMoveButtons(list);
-        });
-        const finishDrag = () => {
-            draggingRow?.removeAttribute('data-dragging');
-            draggingRow = null;
+            const rect = pointerDrag.row.getBoundingClientRect();
+            const ghost = pointerDrag.row.cloneNode(true);
+            ghost.classList.add('qqnt-toolbox-menu-order-drag-ghost');
+            ghost.removeAttribute('data-dragging');
+            ghost.setAttribute('aria-hidden', 'true');
+            ghost.querySelectorAll('button').forEach(button => {
+                button.tabIndex = -1;
+            });
+            Object.assign(ghost.style, {
+                left: `${rect.left}px`,
+                top: `${rect.top}px`,
+                width: `${rect.width}px`,
+                height: `${rect.height}px`
+            });
+            layer.append(ghost);
+            pointerDrag.started = true;
+            pointerDrag.ghost = ghost;
+            pointerDrag.row.dataset.dragging = 'true';
+            list.dataset.dragging = 'true';
+            autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
+        };
+
+        const finishPointerDrag = () => {
+            const drag = pointerDrag;
+            pointerDrag = null;
+            if (!drag) {
+                return;
+            }
+            if (drag.handle.hasPointerCapture?.(drag.pointerId)) {
+                drag.handle.releasePointerCapture(drag.pointerId);
+            }
+            if (autoScrollFrame) {
+                window.cancelAnimationFrame(autoScrollFrame);
+                autoScrollFrame = 0;
+            }
+            drag.ghost?.remove();
+            drag.row.removeAttribute('data-dragging');
+            list.removeAttribute('data-dragging');
             updateMoveButtons(list);
         };
-        list.addEventListener('drop', event => {
+        editorCleanup = finishPointerDrag;
+
+        list.addEventListener('pointerdown', event => {
+            const handle = event.target.closest?.('.qqnt-toolbox-menu-order-handle');
+            const row = handle?.closest?.('.qqnt-toolbox-menu-order-row');
+            if (pointerDrag || !handle || !row || event.button !== 0) {
+                return;
+            }
+            pointerDrag = {
+                pointerId: event.pointerId,
+                handle,
+                row,
+                startX: event.clientX,
+                startY: event.clientY,
+                clientY: event.clientY,
+                started: false,
+                ghost: null
+            };
+            handle.setPointerCapture?.(event.pointerId);
             event.preventDefault();
-            finishDrag();
         });
-        list.addEventListener('dragend', finishDrag);
+        list.addEventListener('pointermove', event => {
+            if (!pointerDrag || pointerDrag.pointerId !== event.pointerId) {
+                return;
+            }
+            if (!pointerDrag.started && Math.hypot(
+                event.clientX - pointerDrag.startX,
+                event.clientY - pointerDrag.startY
+            ) >= 4) {
+                startPointerDrag();
+            }
+            if (pointerDrag.started) {
+                updatePointerDrag(event.clientY);
+                event.preventDefault();
+            }
+        });
+        list.addEventListener('pointerup', event => {
+            if (pointerDrag?.pointerId === event.pointerId) {
+                const started = pointerDrag.started;
+                finishPointerDrag();
+                if (started) {
+                    event.preventDefault();
+                }
+            }
+        });
+        list.addEventListener('pointercancel', event => {
+            if (pointerDrag?.pointerId === event.pointerId) {
+                finishPointerDrag();
+            }
+        });
+
+        const moveRow = (row, direction) => {
+            if (direction === 'up') {
+                row.previousElementSibling?.before(row);
+            } else {
+                row.nextElementSibling?.after(row);
+            }
+            updateMoveButtons(list);
+            row.scrollIntoView?.({ block: 'nearest' });
+        };
         list.addEventListener('click', event => {
             const button = event.target.closest?.('.qqnt-toolbox-menu-order-move[data-direction]');
             const row = button?.closest?.('.qqnt-toolbox-menu-order-row');
             if (!button || !row || button.disabled) {
                 return;
             }
-            if (button.dataset.direction === 'up') {
-                row.previousElementSibling?.before(row);
-            } else {
-                row.nextElementSibling?.after(row);
-            }
-            updateMoveButtons(list);
+            moveRow(row, button.dataset.direction);
         });
-        close.addEventListener('click', closeEditor);
-        cancel.addEventListener('click', closeEditor);
+        list.addEventListener('keydown', event => {
+            const handle = event.target.closest?.('.qqnt-toolbox-menu-order-handle');
+            const row = handle?.closest?.('.qqnt-toolbox-menu-order-row');
+            if (!handle || !row || !['ArrowUp', 'ArrowDown'].includes(event.key)) {
+                return;
+            }
+            event.preventDefault();
+            moveRow(row, event.key === 'ArrowUp' ? 'up' : 'down');
+            handle.focus({ preventScroll: true });
+        });
+        const closeEditorWithCleanup = () => {
+            closeEditor();
+        };
+        close.addEventListener('click', closeEditorWithCleanup);
+        cancel.addEventListener('click', closeEditorWithCleanup);
         restore.addEventListener('click', async () => {
+            finishPointerDrag();
             restore.disabled = true;
             await options.saveOrder?.([]);
             closeEditor();
         });
         save.addEventListener('click', async () => {
+            finishPointerDrag();
             save.disabled = true;
             const order = Array.from(list.querySelectorAll('.qqnt-toolbox-menu-order-row'))
                 .map(row => row.dataset.itemId)
@@ -821,13 +1016,13 @@ export function createMessageContextMenuOrderController(options) {
         });
         layer.addEventListener('click', event => {
             if (event.target === layer) {
-                closeEditor();
+                closeEditorWithCleanup();
             }
         });
         layer.addEventListener('keydown', event => {
             if (event.key === 'Escape') {
                 event.preventDefault();
-                closeEditor();
+                closeEditorWithCleanup();
             }
         });
         layer.focus({ preventScroll: true });

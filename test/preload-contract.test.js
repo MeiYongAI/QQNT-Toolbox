@@ -69,6 +69,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.openInlineMedia({ type: 'video' });
     await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
     await api.repeatMessage({ id: 'repeat' });
+    await api.stageFakeForwardImage({ name: 'image.png', data: new ArrayBuffer(1) });
+    await api.sendFakeForward({ messages: [] });
     await api.getReactionEmojiCatalog();
     await api.setMessageReaction({ emojiId: '14' });
     await api.sendPoke({ id: 'poke' });
@@ -94,6 +96,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:open-inline-media',
         'qqnt-toolbox:prepare-inline-media',
         'qqnt-toolbox:repeat-message',
+        'qqnt-toolbox:stage-fake-forward-image',
+        'qqnt-toolbox:send-fake-forward',
         'qqnt-toolbox:get-reaction-catalog',
         'qqnt-toolbox:set-message-reaction',
         'qqnt-toolbox:send-poke',
