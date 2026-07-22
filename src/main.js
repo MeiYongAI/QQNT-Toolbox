@@ -14,6 +14,12 @@ const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const {
+    normalizePreventRecallConfig,
+    normalizeRecallBuddyContacts,
+    normalizeRecallGroupContacts,
+    shouldHandlePreventRecallRecord
+} = require('./prevent-recall');
+const {
     createRepeatMessageHandler,
     mapWithConcurrency
 } = require('./repeat-message');
@@ -72,6 +78,7 @@ const {
     CHANNEL_OPEN_RECALL_DIR,
     CHANNEL_OPEN_RECALL_IMAGE_DIR,
     CHANNEL_VIEW_RECALL_MESSAGES,
+    CHANNEL_GET_RECALL_CONTACTS,
     CHANNEL_GET_RECALL_VIEWER_DATA,
     CHANNEL_GET_RECALL_AUDIO_PREVIEW,
     CHANNEL_JUMP_RECALL_MESSAGE,
@@ -196,6 +203,9 @@ const DEFAULT_CONFIG = {
         preventSelfMsg: false,
         persistedFiles: false,
         redirectPicPath: false,
+        markerStyle: 'badge',
+        filterMode: 'all',
+        filterPeers: [],
         customColor: false,
         customTextColor: {
             light: '#ff6666',
@@ -483,7 +493,10 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             enabled: config.preventRecall?.enabled === true,
             preventSelf: config.preventRecall?.preventSelfMsg === true,
             persistedFiles: config.preventRecall?.persistedFiles === true,
-            redirectImages: config.preventRecall?.redirectPicPath === true
+            redirectImages: config.preventRecall?.redirectPicPath === true,
+            markerStyle: config.preventRecall?.markerStyle,
+            filterMode: config.preventRecall?.filterMode,
+            filterPeers: config.preventRecall?.filterPeers?.length || 0
         },
         poke: {
             autoReply: config.entertainment?.autoPokeBack === true,
@@ -619,6 +632,7 @@ function normalizeSimplifyConfig(config) {
     config.sideBar.bottom = normalizeSimplifyItemList(config.sideBar.bottom, 'sidebar-bottom');
     config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
     config.chatFuncBar = normalizeSimplifyItemList(config.chatFuncBar, 'chat-func');
+    config.preventRecall = normalizePreventRecallConfig(config.preventRecall);
     return config;
 }
 
@@ -712,10 +726,6 @@ function getEntertainmentConfig() {
 function getAutoPokeBackLimit() {
     const value = Math.trunc(Number(getEntertainmentConfig().autoPokeBackLimit));
     return Number.isFinite(value) ? Math.min(Math.max(value, 0), 9999) : 1;
-}
-
-function isPreventRecallEnabled() {
-    return getPreventRecallConfig().enabled === true;
 }
 
 function applyVoiceMessageConfig() {
@@ -866,6 +876,106 @@ function getQqWrapperSession() {
     }
     pokeState.wrapperSession = session;
     return session;
+}
+
+async function getRecallBuddyContacts(browserWindow) {
+    const payloads = isQqVersionAtLeast(9, 9, 30)
+        ? [['QQNT-Toolbox', false, 0], ['QQNT-Toolbox', 0], [false, 0]]
+        : [[false, 0], ['QQNT-Toolbox', false, 0], ['QQNT-Toolbox', 0]];
+    let buddyResult = null;
+    let lastError = null;
+    for (const payload of payloads) {
+        try {
+            buddyResult = await qqNativeInvoke(
+                browserWindow,
+                'ntApi',
+                'nodeIKernelBuddyService/getBuddyListV2',
+                payload,
+                true,
+                8000
+            );
+            if (!isNativeFailure(buddyResult)) {
+                break;
+            }
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    if (!buddyResult || isNativeFailure(buddyResult)) {
+        if (lastError) {
+            throw lastError;
+        }
+        return [];
+    }
+    const basicContacts = normalizeRecallBuddyContacts(buddyResult);
+    const buddyUids = basicContacts.map(contact => contact.peerUid);
+    if (!buddyUids.length) {
+        return [];
+    }
+    try {
+        const profileService = getQqWrapperSession()?.getProfileService?.();
+        if (typeof profileService?.getCoreAndBaseInfo !== 'function') {
+            throw new Error('QQ profile service is unavailable.');
+        }
+        const profiles = await Promise.resolve(
+            profileService.getCoreAndBaseInfo('nodeStore', buddyUids)
+        );
+        return normalizeRecallBuddyContacts(buddyResult, profiles);
+    } catch (error) {
+        recordDiagnostic('warn', 'recall.buddy-profile-load-failed', {
+            errorName: error?.name || 'Error',
+            errorMessage: String(error?.message || error || '')
+        });
+        return basicContacts;
+    }
+}
+
+async function getRecallGroupContacts(browserWindow) {
+    const waiter = createNativeEventWaiter(browserWindow, (response, result) => {
+        const command = normalizeText(response?.cmdName || result?.cmdName);
+        return command.endsWith('KernelGroupListener/onGroupListUpdate');
+    }, 10000);
+    try {
+        const response = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelGroupService/getGroupList',
+            [false],
+            true,
+            8000
+        );
+        const immediate = normalizeRecallGroupContacts(response);
+        if (immediate.length) {
+            waiter.cancel();
+            return immediate;
+        }
+        return normalizeRecallGroupContacts(await waiter.promise);
+    } catch (error) {
+        waiter.cancel();
+        throw error;
+    }
+}
+
+async function getRecallContactCandidates(browserWindow) {
+    if (!browserWindow) {
+        return [];
+    }
+    const results = await Promise.allSettled([
+        getRecallGroupContacts(browserWindow),
+        getRecallBuddyContacts(browserWindow)
+    ]);
+    const contacts = [];
+    for (const [index, result] of results.entries()) {
+        if (result.status === 'fulfilled') {
+            contacts.push(...result.value);
+            continue;
+        }
+        recordDiagnostic('warn', index === 0 ? 'recall.group-list-load-failed' : 'recall.buddy-list-load-failed', {
+            errorName: result.reason?.name || 'Error',
+            errorMessage: String(result.reason?.message || result.reason || '')
+        });
+    }
+    return contacts;
 }
 
 function installPokeBridge() {
@@ -1440,6 +1550,9 @@ function installConfigIpc() {
     globalThis.__qqntToolboxConfigIpcInstalled = true;
     ipcMain.handle(CHANNEL_GET_CONFIG, () => getConfig());
     ipcMain.handle(CHANNEL_SET_CONFIG, (_event, nextConfig) => saveConfig(nextConfig));
+    ipcMain.handle(CHANNEL_GET_RECALL_CONTACTS, event =>
+        getRecallContactCandidates(BrowserWindow.fromWebContents(event.sender))
+    );
     ipcMain.handle(CHANNEL_DIAGNOSTIC_EVENT, (event, payload) => {
         if (!isDebugEnabled()) {
             return { ok: false, reason: 'disabled' };
@@ -2897,16 +3010,17 @@ function getRecoveredRecallRecord(recallState, record) {
     if (!recallState) {
         return null;
     }
+    const msgId = getRecallKey(record);
+    const stored = recallState.recalledMessages.get(msgId);
     const recallInfo = getRecallInfo(record);
-    if (!recallInfo) {
+    if (!stored && !recallInfo) {
         return null;
     }
     const config = getPreventRecallConfig();
-    if (recallInfo.isSelfOperate && !config.preventSelfMsg) {
+    if (!stored && recallInfo.isSelfOperate && !config.preventSelfMsg) {
         return null;
     }
-    const msgId = getRecallKey(record);
-    const cached = recallState.liveMessages.get(msgId) || recallState.recalledMessages.get(msgId);
+    const cached = stored || recallState.liveMessages.get(msgId);
     if (!cached) {
         return null;
     }
@@ -2914,7 +3028,7 @@ function getRecoveredRecallRecord(recallState, record) {
     if (getConfig().interfaceTweaks.deleteBubbleSkin) {
         deleteBubbleSkinFromRecord(recovered);
     }
-    recovered.qqnt_toolbox_recall = createRecallMark(record);
+    recovered.qqnt_toolbox_recall ||= createRecallMark(record);
     recovered.qqnt_toolbox_account_uin = recallState.accountUin;
     scheduleRecallImageLocalization(recallState, recovered);
     localizeRecallImages(recallState, recovered);
@@ -2926,15 +3040,21 @@ function getRecoveredRecallRecord(recallState, record) {
 }
 
 function processPreventRecall(browserWindow, context) {
-    if (!isPreventRecallEnabled()) {
-        return;
-    }
     rememberPokeAccountFromRecords(browserWindow, context.records);
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
     if (!recallState) {
         return;
     }
+    const config = getPreventRecallConfig();
     for (const record of context.records) {
+        const msgId = getRecallKey(record);
+        const hasRecoveredRecord = recallState.recalledMessages.has(msgId);
+        if (!shouldHandlePreventRecallRecord(config, record, hasRecoveredRecord)) {
+            if (getRecallInfo(record)) {
+                recallState.liveMessages.delete(msgId);
+            }
+            continue;
+        }
         const recovered = getRecoveredRecallRecord(recallState, record);
         if (!recovered) {
             cacheRecallCandidate(recallState, record);

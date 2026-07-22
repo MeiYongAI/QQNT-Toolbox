@@ -1,6 +1,6 @@
 {
   "name": "qqnt-toolbox",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "description": "适用于 LiteLoaderQQNT 的 QQNT 工具箱插件。",
   "private": true,
   "license": "AGPL-3.0-only",
@@ -12,7 +12,7 @@
     "build:native": "cmd /d /c native\\build.cmd",
     "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools\\build-release.ps1",
     "check": "node tools/check-syntax.js",
-    "test": "node --test test/control-label-match.test.js test/diagnostics.test.js test/emoji-image-preview.test.js test/fake-forward.test.js test/file-retry.test.js test/image-summary.test.js test/inline-media-preview.test.js test/local-media-server.test.js test/message-context-menu-order.test.js test/native-event-context.test.js test/native-ipc.test.js test/plugin-updater.test.js test/preload-contract.test.js test/ptt-source.test.js test/qq-data-root.test.js test/reaction-limit.test.js test/recall-image-url.test.js test/repeat-message.test.js test/voice-media.test.js"
+    "test": "node --test test/control-label-match.test.js test/diagnostics.test.js test/emoji-image-preview.test.js test/fake-forward.test.js test/file-retry.test.js test/image-summary.test.js test/inline-media-preview.test.js test/local-media-server.test.js test/message-context-menu-order.test.js test/native-event-context.test.js test/native-ipc.test.js test/plugin-updater.test.js test/preload-contract.test.js test/prevent-recall.test.js test/ptt-source.test.js test/qq-data-root.test.js test/reaction-limit.test.js test/recall-filter-editor.test.js test/recall-image-url.test.js test/repeat-message.test.js test/voice-media.test.js"
   },
   "dependencies": {
     "@saltify/typeproto": "0.4.1",

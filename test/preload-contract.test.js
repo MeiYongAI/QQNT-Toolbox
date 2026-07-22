@@ -76,6 +76,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.sendPoke({ id: 'poke' });
     await api.recallPoke({ id: 'recall-poke' });
     await api.viewRecallMessages();
+    await api.getRecallContacts();
     await api.getUpdateState();
     await api.checkForUpdates({ force: true });
     await api.prepareUpdate();
@@ -103,6 +104,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:send-poke',
         'qqnt-toolbox:recall-poke',
         'qqnt-toolbox:view-recall-messages',
+        'qqnt-toolbox:get-recall-contacts',
         'qqnt-toolbox:get-update-state',
         'qqnt-toolbox:check-update',
         'qqnt-toolbox:prepare-update',

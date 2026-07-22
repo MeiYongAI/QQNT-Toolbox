@@ -21,6 +21,7 @@ const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
 const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
 const CHANNEL_OPEN_RECALL_IMAGE_DIR = 'qqnt-toolbox:open-recall-image-dir';
 const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
+const CHANNEL_GET_RECALL_CONTACTS = 'qqnt-toolbox:get-recall-contacts';
 const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
 const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
 const CHANNEL_PREPARE_UPDATE = 'qqnt-toolbox:prepare-update';
@@ -44,6 +45,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     openRecallDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_DIR),
     openRecallImageDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_IMAGE_DIR),
     viewRecallMessages: () => ipcRenderer.invoke(CHANNEL_VIEW_RECALL_MESSAGES),
+    getRecallContacts: () => ipcRenderer.invoke(CHANNEL_GET_RECALL_CONTACTS),
     getUpdateState: () => ipcRenderer.invoke(CHANNEL_GET_UPDATE_STATE),
     checkForUpdates: options => ipcRenderer.invoke(CHANNEL_CHECK_UPDATE, options),
     prepareUpdate: () => ipcRenderer.invoke(CHANNEL_PREPARE_UPDATE),

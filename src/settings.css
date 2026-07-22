@@ -256,6 +256,53 @@
     background: #000;
 }
 
+#qqnt-toolbox-settings .qqnt-toolbox-choices {
+    display: flex;
+    flex: none;
+    gap: 3px;
+    padding: 2px;
+    border-radius: 6px;
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, 0.1)));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-choice {
+    min-width: 48px;
+    height: 27px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    outline: 0;
+    color: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-choice:hover:not(:disabled) {
+    color: inherit;
+    background: var(--overlay_hover, rgba(127, 127, 127, 0.16));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-choice[data-checked="true"] {
+    color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    background: var(--overlay_hover, rgba(127, 127, 127, 0.14));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-choice[data-checked="true"]:hover:not(:disabled) {
+    color: var(--brand_standard, var(--brand-primary, #2f6bff));
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-choice:focus-visible {
+    box-shadow: 0 0 0 2px rgba(47, 107, 255, 0.3);
+}
+
+#qqnt-toolbox-settings .qqnt-toolbox-choice:disabled {
+    cursor: default;
+}
+
 #qqnt-toolbox-settings .qqnt-toolbox-action,
 #qqnt-toolbox-settings .qqnt-toolbox-shortcut-button {
     flex: none;

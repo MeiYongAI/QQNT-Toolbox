@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "repository": "MeiYongAI/QQNT-Toolbox",
-  "version": "0.7.8",
-  "releaseUrl": "https://github.com/MeiYongAI/QQNT-Toolbox/releases/tag/v0.7.8",
+  "version": "0.7.9",
+  "releaseUrl": "https://github.com/MeiYongAI/QQNT-Toolbox/releases/tag/v0.7.9",
   "asset": {
-    "name": "QQNT-Toolbox-v0.7.8.zip",
-    "url": "https://github.com/MeiYongAI/QQNT-Toolbox/releases/download/v0.7.8/QQNT-Toolbox-v0.7.8.zip",
-    "size": 473085,
-    "sha256": "89c0d9ffb90449ecee305da735cd7a8eaa87348c123f933cf4137e92503e29cf"
+    "name": "QQNT-Toolbox-v0.7.9.zip",
+    "url": "https://github.com/MeiYongAI/QQNT-Toolbox/releases/download/v0.7.9/QQNT-Toolbox-v0.7.9.zip",
+    "size": 483020,
+    "sha256": "9275d7a00ade9c948b33a48df094d25c1b668834e6874040d81e9305771a45fb"
   }
 }

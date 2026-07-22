@@ -98,6 +98,8 @@ try {
         'QQNT-Toolbox/src/file-retry.js',
         'QQNT-Toolbox/src/native-ipc.js',
         'QQNT-Toolbox/src/plugin-updater.js',
+        'QQNT-Toolbox/src/prevent-recall.js',
+        'QQNT-Toolbox/src/recall-filter-editor.js',
         'QQNT-Toolbox/src/qq-data-root.js',
         'QQNT-Toolbox/src/recall-image-url.js',
         'QQNT-Toolbox/src/recall-viewer.html',
