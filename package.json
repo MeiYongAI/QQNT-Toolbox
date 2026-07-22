@@ -1,6 +1,6 @@
 {
   "name": "qqnt-toolbox",
-  "version": "0.7.9",
+  "version": "0.7.10",
   "description": "适用于 LiteLoaderQQNT 的 QQNT 工具箱插件。",
   "private": true,
   "license": "AGPL-3.0-only",

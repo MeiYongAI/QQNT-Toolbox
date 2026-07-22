@@ -7154,6 +7154,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }
             return stageFakeForwardImage(payload);
         },
+        resolveSenderName: senderUin => {
+            const resolveSenderName = getBridge()?.resolveFakeForwardSenderName;
+            if (typeof resolveSenderName !== 'function') {
+                throw new Error('昵称查询接口不可用');
+            }
+            return resolveSenderName(senderUin);
+        },
         send: payload => {
             const sendFakeForward = getBridge()?.sendFakeForward;
             if (typeof sendFakeForward !== 'function') {

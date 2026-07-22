@@ -68,6 +68,7 @@ const {
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
+    CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,
@@ -1041,6 +1042,35 @@ async function resolveFakeForwardSenderUid(browserWindow, senderUin) {
     return '';
 }
 
+function getFakeForwardProfileNickname(value) {
+    return normalizeText(
+        value?.detail?.simpleInfo?.coreInfo?.nick ||
+        value?.simpleInfo?.coreInfo?.nick ||
+        value?.detail?.coreInfo?.nick ||
+        value?.coreInfo?.nick ||
+        value?.detail?.nick ||
+        value?.nick
+    );
+}
+
+async function resolveFakeForwardSenderName(senderUin) {
+    senderUin = normalizeUin(senderUin);
+    if (!senderUin) {
+        return '';
+    }
+    const profileService = getQqWrapperSession()?.getProfileService?.();
+    if (typeof profileService?.getUserDetailInfoByUin !== 'function') {
+        return '';
+    }
+    try {
+        return getFakeForwardProfileNickname(await Promise.resolve(
+            profileService.getUserDetailInfoByUin(senderUin)
+        ));
+    } catch {
+        return '';
+    }
+}
+
 async function resolveFakeForwardPeerUin(browserWindow, peer) {
     if (Number(peer?.chatType) === 2) {
         return normalizeUin(peer?.peerUid);
@@ -1646,6 +1676,9 @@ function installConfigIpc() {
         }
     });
     ipcMain.handle(CHANNEL_STAGE_FAKE_FORWARD_IMAGE, (_event, payload) => stageFakeForwardImage(payload));
+    ipcMain.handle(CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME, (_event, senderUin) =>
+        resolveFakeForwardSenderName(senderUin)
+    );
     ipcMain.handle(CHANNEL_SEND_FAKE_FORWARD, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         if (!browserWindow) {

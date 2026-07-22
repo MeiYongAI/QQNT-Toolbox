@@ -183,6 +183,9 @@ test('closes intercepted reactions by default and keeps them open when configure
             if (selector === '.menu-stickers-panel') {
                 return this.panel;
             }
+            if (this.more) {
+                return selector.includes('.more-reaction-item') ? this : null;
+            }
             return selector.includes('.menu-stickers-item') ? this : null;
         }
 

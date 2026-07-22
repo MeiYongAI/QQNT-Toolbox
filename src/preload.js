@@ -11,6 +11,7 @@ const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
+const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -35,6 +36,8 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     runDiagnosticAction: action => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_ACTION, action),
     repeatMessage: payload => ipcRenderer.invoke(CHANNEL_REPEAT_MESSAGE, payload),
     stageFakeForwardImage: payload => ipcRenderer.invoke(CHANNEL_STAGE_FAKE_FORWARD_IMAGE, payload),
+    resolveFakeForwardSenderName: senderUin =>
+        ipcRenderer.invoke(CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME, senderUin),
     sendFakeForward: payload => ipcRenderer.invoke(CHANNEL_SEND_FAKE_FORWARD, payload),
     getReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_REACTION_CATALOG),
     setMessageReaction: payload => ipcRenderer.invoke(CHANNEL_SET_MESSAGE_REACTION, payload),

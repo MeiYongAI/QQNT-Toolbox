@@ -11,6 +11,7 @@ const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
+const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -43,6 +44,7 @@ module.exports = Object.freeze({
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
+    CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,

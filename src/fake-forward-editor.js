@@ -7,6 +7,7 @@ const MAX_IMAGES_PER_MESSAGE = 20;
 const NATIVE_TOOLTIP_DELAY = 500;
 const IMAGE_FILE_PATTERN = /\.(?:apng|bmp|gif|jfif|jpe?g|png|webp)$/i;
 const IMAGE_TOKEN_CLASS = 'qff-composer-image';
+const COMPOSER_BLOCK_TAGS = new Set(['DIV', 'P', 'LI']);
 const TOOLBAR_SELECTORS = [
     '.chat-func-bar .func-bar-native',
     '.chat-func-bar__left .func-bar-native',
@@ -132,6 +133,64 @@ function normalizeDraftSegments(source) {
     return segments;
 }
 
+export function readFakeForwardComposerSegments(root) {
+    const segments = [];
+    const appendText = text => {
+        if (!text) {
+            return;
+        }
+        const previous = segments.at(-1);
+        if (previous?.type === 'text') {
+            previous.text += text;
+        } else {
+            segments.push({ type: 'text', text });
+        }
+    };
+    const appendBlockBoundary = () => {
+        const previous = segments.at(-1);
+        if (segments.length && !(previous?.type === 'text' && previous.text.endsWith('\n'))) {
+            appendText('\n');
+        }
+    };
+    const visitChildren = parent => {
+        let hasPreviousNode = false;
+        for (const child of Array.from(parent?.childNodes || [])) {
+            const tagName = String(child?.tagName || '').toUpperCase();
+            if (hasPreviousNode && COMPOSER_BLOCK_TAGS.has(tagName)) {
+                appendBlockBoundary();
+            }
+            visit(child);
+            hasPreviousNode ||= child?.nodeType === 1 ||
+                (child?.nodeType === 3 && Boolean(child.nodeValue));
+        }
+    };
+    const visit = node => {
+        if (node?.nodeType === 3) {
+            appendText(node.nodeValue || '');
+            return;
+        }
+        if (node?.nodeType !== 1) {
+            return;
+        }
+        if (node.classList?.contains(IMAGE_TOKEN_CLASS)) {
+            segments.push({
+                type: 'image',
+                path: String(node.dataset?.path || ''),
+                name: String(node.dataset?.name || ''),
+                pending: node.dataset?.pending === 'true'
+            });
+            return;
+        }
+        if (String(node.tagName || '').toUpperCase() === 'BR') {
+            appendText('\n');
+            return;
+        }
+        visitChildren(node);
+    };
+    visitChildren(root);
+    return segments;
+}
+
 function messagePreview(message) {
     return normalizeDraftSegments(message).map(segment => segment.type === 'image'
         ? '[图片]'
@@ -153,6 +212,7 @@ export function createFakeForwardEditor(options = {}) {
         messages: [],
         selectedId: '',
         sending: false,
+        resolvingSenderName: false,
         observer: null,
         refreshFrame: 0,
         installed: false,
@@ -243,55 +303,11 @@ export function createFakeForwardEditor(options = {}) {
         state.fields.moveUp.disabled = state.sending || index <= 0;
         state.fields.moveDown.disabled = state.sending || index < 0 || index >= state.messages.length - 1;
         state.fields.remove.disabled = state.sending || index < 0;
-        state.sendButton.disabled = state.sending || state.messages.length === 0;
-    }
-
-    function appendTextSegment(segments, text) {
-        if (!text) {
-            return;
-        }
-        const previous = segments.at(-1);
-        if (previous?.type === 'text') {
-            previous.text += text;
-        } else {
-            segments.push({ type: 'text', text });
-        }
+        state.sendButton.disabled = state.sending || state.resolvingSenderName || state.messages.length === 0;
     }
 
     function readComposerSegments() {
-        const segments = [];
-        function visit(node) {
-            if (node.nodeType === Node.TEXT_NODE) {
-                appendTextSegment(segments, node.nodeValue || '');
-                return;
-            }
-            if (!(node instanceof HTMLElement)) {
-                return;
-            }
-            if (node.classList.contains(IMAGE_TOKEN_CLASS)) {
-                segments.push({
-                    type: 'image',
-                    path: String(node.dataset.path || ''),
-                    name: String(node.dataset.name || ''),
-                    pending: node.dataset.pending === 'true'
-                });
-                return;
-            }
-            if (node.tagName === 'BR') {
-                appendTextSegment(segments, '\n');
-                return;
-            }
-            for (const child of node.childNodes) {
-                visit(child);
-            }
-            if (/^(?:DIV|P|LI)$/.test(node.tagName) && node.nextSibling) {
-                appendTextSegment(segments, '\n');
-            }
-        }
-        for (const child of state.fields.composer.childNodes) {
-            visit(child);
-        }
-        return segments;
+        return readFakeForwardComposerSegments(state.fields.composer);
     }
 
     function releaseImagePreview(token) {
@@ -558,9 +574,12 @@ export function createFakeForwardEditor(options = {}) {
         renderList();
     }
 
-    function commitForm() {
+    async function commitForm() {
+        if (state.resolvingSenderName) {
+            return;
+        }
         const senderUin = state.fields.senderUin.value.trim();
-        const senderName = state.fields.senderName.value.trim() || senderUin;
+        let senderName = state.fields.senderName.value.trim();
         const segments = readComposerSegments();
         const textLength = segments.filter(segment => segment.type === 'text')
             .reduce((length, segment) => length + segment.text.length, 0);
@@ -583,6 +602,27 @@ export function createFakeForwardEditor(options = {}) {
         if (textLength > MAX_TEXT_LENGTH) {
             setStatus('消息内容不能超过 ' + MAX_TEXT_LENGTH + ' 个字符', 'error');
             return;
+        }
+        if (!senderName) {
+            state.resolvingSenderName = true;
+            state.fields.commit.disabled = true;
+            state.sendButton.disabled = true;
+            setStatus('正在获取昵称');
+            try {
+                senderName = String(await options.resolveSenderName?.(senderUin) || '').trim();
+            } catch {
+                senderName = '';
+            } finally {
+                state.resolvingSenderName = false;
+                state.fields.commit.disabled = state.sending || state.resolvingSenderName;
+                renderList();
+            }
+            if (!senderName) {
+                setStatus('未能获取该 QQ 号的昵称，请手动填写', 'error');
+                state.fields.senderName.focus();
+                return;
+            }
+            state.fields.senderName.value = senderName;
         }
         const next = {
             id: state.selectedId || makeEntryId(),
@@ -634,7 +674,7 @@ export function createFakeForwardEditor(options = {}) {
         state.fields.composer.querySelectorAll('.qff-composer-image-remove').forEach(control => {
             control.disabled = sending;
         });
-        state.fields.commit.disabled = sending;
+        state.fields.commit.disabled = sending || state.resolvingSenderName;
         state.fields.cancelEdit.disabled = sending;
         state.sendButton.textContent = sending ? '发送中' : '发送';
         renderList();
@@ -789,15 +829,9 @@ export function createFakeForwardEditor(options = {}) {
         });
         form.addEventListener('submit', event => {
             event.preventDefault();
-            commitForm();
+            commitForm().catch(error => setStatus(error?.message || '保存失败', 'error'));
         });
         state.fields.cancelEdit.addEventListener('click', clearForm);
-        state.fields.composer.addEventListener('beforeinput', event => {
-            if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
-                event.preventDefault();
-                insertText('\n');
-            }
-        });
         state.fields.composer.addEventListener('paste', handleComposerPaste);
         state.fields.composer.addEventListener('dragover', event => {
             if (state.draggedImage || Array.from(event.dataTransfer?.types || []).includes('Files')) {

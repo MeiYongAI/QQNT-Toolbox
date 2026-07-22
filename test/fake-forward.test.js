@@ -22,6 +22,22 @@ const {
     parseFakeForwardUploadResponse
 } = require('../src/fake-forward');
 
+function composerText(value) {
+    return { nodeType: 3, nodeValue: value };
+}
+
+function composerElement(tagName, childNodes = [], options = {}) {
+    return {
+        nodeType: 1,
+        tagName,
+        childNodes,
+        dataset: options.dataset || {},
+        classList: {
+            contains: className => (options.classNames || []).includes(className)
+        }
+    };
+}
+
 test('builds the QQ native image upload parameters without an unsupported transfer id', () => {
     assert.deepEqual(buildFakeForwardImageUploadParams({
         chatType: 2,
@@ -58,6 +74,24 @@ test('normalizes fake forward entries without changing multiline text', () => {
         segments: [{ type: 'text', text: 'first line\nsecond line' }],
         timestamp: 1784630000
     });
+});
+
+test('reads native contenteditable block lines without joining the first two lines', async () => {
+    const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'fake-forward-editor.js'), 'utf8');
+    const editor = await import(`data:text/javascript;base64,${Buffer.from(editorSource).toString('base64')}`);
+    const root = composerElement('DIV', [
+        composerText('今'),
+        composerElement('DIV', [composerText('天')]),
+        composerElement('DIV', [composerText('我')]),
+        composerElement('DIV', [composerText('是')]),
+        composerElement('DIV', [composerText('妈')]),
+        composerElement('DIV', [composerText('妈')])
+    ]);
+
+    assert.deepEqual(editor.readFakeForwardComposerSegments(root), [{
+        type: 'text',
+        text: '今\n天\n我\n是\n妈\n妈'
+    }]);
 });
 
 test('rejects invalid senders, empty content, unsupported peers, and oversized lists', async () => {
@@ -269,6 +303,8 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(mainSource, /sendFakeForwardFromRenderer/);
     assert.match(mainSource, /getRichMediaService\?\.\(\)/);
     assert.match(mainSource, /createFakeForwardImageUploadWaiters/);
+    assert.match(mainSource, /getUserDetailInfoByUin\(senderUin\)/);
+    assert.match(mainSource, /CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME/);
     assert.match(mainSource, /BrowserWindow\.getAllWindows\(\)/);
     assert.match(mainSource, /CHANNEL_STAGE_FAKE_FORWARD_IMAGE/);
     assert.match(mainSource, /sendSsoThroughWrapperSession\(request\.command, request\.packet\)/);
@@ -279,7 +315,10 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(rendererSource, /createFakeForwardEditor/);
     assert.match(editorSource, /qqnt-toolbox-fake-forward-draft/);
     assert.match(editorSource, /normalizeDraftSegments/);
+    assert.match(editorSource, /let senderName = state\.fields\.senderName\.value\.trim\(\);/);
+    assert.match(editorSource, /await options\.resolveSenderName\?\.\(senderUin\)/);
     assert.match(editorSource, /contentEditable\s*=\s*['"]true['"]/);
+    assert.doesNotMatch(editorSource, /composer\.addEventListener\(['"]beforeinput['"]/);
     assert.match(editorSource, /addEventListener\(['"]paste['"]/);
     assert.match(editorSource, /addEventListener\(['"]drop['"]/);
     assert.match(editorSource, /template\.cloneNode\(true\)/);

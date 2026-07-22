@@ -2,6 +2,7 @@ const REACTION_PANEL_SELECTOR = '.menu-stickers-panel';
 const REACTION_ITEM_SELECTOR = '.menu-stickers-item, .reaction-express-item, .stickers-list-item';
 const REACTION_GRID_SELECTOR = '.stickers-list';
 const REACTION_MORE_SELECTOR = '.more-reaction-express-tag, .more-reaction-item';
+const REACTION_TRIGGER_SELECTOR = `${REACTION_ITEM_SELECTOR}, ${REACTION_MORE_SELECTOR}`;
 const TOOLBOX_ITEM_CLASS = 'qqnt-toolbox-reaction-item';
 const REACTION_ITEM_SIZE_PX = 24;
 const CONTEXT_TTL_MS = 60_000;
@@ -362,11 +363,15 @@ export function createReactionLimitController(options) {
             return;
         }
         const target = event.target instanceof Element ? event.target : null;
-        const item = target?.closest(REACTION_ITEM_SELECTOR);
+        const item = target?.closest(REACTION_TRIGGER_SELECTOR);
         if (!item) {
             return;
         }
         if (isMoreReactionItem(item)) {
+            const record = options.resolveRecord?.(item);
+            if (record) {
+                rememberContext(record);
+            }
             watchForReactionPanel();
             return;
         }
