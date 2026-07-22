@@ -7147,6 +7147,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         getEnabled: () => isConfigEnabled('fakeForward.enabled'),
         getPeer: () => getPeerFromRecord({}),
         getStorageScope: () => registeredPokeAccountUin || 'default',
+        getFilePath: file => getBridge()?.getPathForFile?.(file) || file?.path || '',
         stageImage: payload => {
             const stageFakeForwardImage = getBridge()?.stageFakeForwardImage;
             if (typeof stageFakeForwardImage !== 'function') {

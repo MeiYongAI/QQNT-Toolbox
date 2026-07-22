@@ -6,7 +6,9 @@ const MAX_TEXT_LENGTH = 10000;
 const MAX_IMAGES_PER_MESSAGE = 20;
 const NATIVE_TOOLTIP_DELAY = 500;
 const IMAGE_FILE_PATTERN = /\.(?:apng|bmp|gif|jfif|jpe?g|png|webp)$/i;
+const VIDEO_FILE_PATTERN = /\.(?:3g2|3gp|asf|avi|flv|m2ts|m4v|mkv|mov|mp4|mpeg|mpg|mts|ogv|ts|vob|webm|wmv)$/i;
 const IMAGE_TOKEN_CLASS = 'qff-composer-image';
+const ATTACHMENT_TOKEN_CLASS = 'qff-composer-attachment';
 const COMPOSER_BLOCK_TAGS = new Set(['DIV', 'P', 'LI']);
 const TOOLBAR_SELECTORS = [
     '.chat-func-bar .func-bar-native',
@@ -59,14 +61,18 @@ function applyEntryGlyph(svg) {
     return svg;
 }
 
-function formatDateTimeLocal(timestamp = Date.now()) {
+function formatDateTimeParts(timestamp = Date.now()) {
     const date = new Date(Number(timestamp) || Date.now());
     const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-    return local.toISOString().slice(0, 16);
+    const value = local.toISOString();
+    return {
+        date: value.slice(0, 10),
+        time: value.slice(11, 16)
+    };
 }
 
-function parseDateTimeLocal(value) {
-    const timestamp = new Date(value).getTime();
+function parseDateTimeParts(date, time) {
+    const timestamp = new Date(String(date || '') + 'T' + String(time || '')).getTime();
     return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
 
@@ -90,6 +96,30 @@ function localImageUrl(filePath) {
         encodeURIComponent(part).replace(/%3A/gi, ':')
     ).join('/');
     return 'local:///' + encoded;
+}
+
+function inferColorScheme(color) {
+    const match = String(color || '').match(/^rgba?\(\s*(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)\D+(\d+(?:\.\d+)?)/i);
+    if (!match) {
+        return globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    const brightness = Number(match[1]) * 0.299 + Number(match[2]) * 0.587 + Number(match[3]) * 0.114;
+    return brightness >= 160 ? 'dark' : 'light';
+}
+
+function removeTrailingMediaPlaceholderBreaks(segments) {
+    if (!segments.some(segment => ['image', 'video', 'file'].includes(segment?.type))) {
+        return segments;
+    }
+    const trailing = segments.at(-1);
+    if (trailing?.type !== 'text' || !/[\r\n]/.test(trailing.text)) {
+        return segments;
+    }
+    trailing.text = trailing.text.replace(/(?:\r?\n)+[ \t]*$/, '');
+    if (!trailing.text.trim()) {
+        segments.pop();
+    }
+    return segments;
 }
 
 function normalizeDraftSegments(source) {
@@ -128,7 +158,22 @@ function normalizeDraftSegments(source) {
                 segments.push(image);
                 imageCount += 1;
             }
+        } else if (segment?.type === 'video' || segment?.type === 'file') {
+            const media = {
+                type: segment.type,
+                path: String(segment.path || ''),
+                name: String(segment.name || ''),
+                size: Math.max(0, Number(segment.size) || 0)
+            };
+            if (media.path) {
+                segments.push(media);
+            }
         }
+    }
+    removeTrailingMediaPlaceholderBreaks(segments);
+    const standalone = segments.filter(segment => segment.type === 'video' || segment.type === 'file');
+    if (standalone.length && (standalone.length !== 1 || segments.length !== 1)) {
+        return [];
     }
     return segments;
 }
@@ -181,6 +226,16 @@ export function readFakeForwardComposerSegments(root) {
             });
             return;
         }
+        if (node.classList?.contains(ATTACHMENT_TOKEN_CLASS)) {
+            segments.push({
+                type: node.dataset?.type === 'video' ? 'video' : 'file',
+                path: String(node.dataset?.path || ''),
+                name: String(node.dataset?.name || ''),
+                size: Math.max(0, Number(node.dataset?.size) || 0),
+                pending: node.dataset?.pending === 'true'
+            });
+            return;
+        }
         if (String(node.tagName || '').toUpperCase() === 'BR') {
             appendText('\n');
             return;
@@ -188,14 +243,22 @@ export function readFakeForwardComposerSegments(root) {
         visitChildren(node);
     };
     visitChildren(root);
-    return segments;
+    return removeTrailingMediaPlaceholderBreaks(segments);
 }
 
 function messagePreview(message) {
-    return normalizeDraftSegments(message).map(segment => segment.type === 'image'
-        ? '[图片]'
-        : segment.text
-    ).join('').trim();
+    return normalizeDraftSegments(message).map(segment => {
+        if (segment.type === 'image') {
+            return '[图片]';
+        }
+        if (segment.type === 'video') {
+            return `[视频] ${segment.name}`;
+        }
+        if (segment.type === 'file') {
+            return `[文件] ${segment.name}`;
+        }
+        return segment.text;
+    }).join('').trim();
 }
 
 function isSupportedPeer(peer) {
@@ -320,7 +383,7 @@ export function createFakeForwardEditor(options = {}) {
         delete token.dataset.objectUrl;
     }
 
-    function removeComposerImage(token) {
+    function removeComposerToken(token) {
         if (!token || state.sending) {
             return;
         }
@@ -343,7 +406,7 @@ export function createFakeForwardEditor(options = {}) {
         preview.src = previewUrl || localImageUrl(image.path);
         const remove = createButton('qff-composer-image-remove', '×', '移除图片');
         remove.addEventListener('pointerdown', event => event.preventDefault());
-        remove.addEventListener('click', () => removeComposerImage(token));
+        remove.addEventListener('click', () => removeComposerToken(token));
         token.addEventListener('dragstart', event => {
             if (state.sending) {
                 event.preventDefault();
@@ -366,16 +429,65 @@ export function createFakeForwardEditor(options = {}) {
         return token;
     }
 
+    function formatFileSize(value) {
+        const size = Math.max(0, Number(value) || 0);
+        if (size < 1024) {
+            return size + ' B';
+        }
+        if (size < 1024 * 1024) {
+            return (size / 1024).toFixed(size < 10 * 1024 ? 1 : 0) + ' KB';
+        }
+        if (size < 1024 * 1024 * 1024) {
+            return (size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0) + ' MB';
+        }
+        return (size / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+    }
+
+    function createComposerAttachment(media) {
+        const type = media.type === 'video' ? 'video' : 'file';
+        const extension = /\.([^.]+)$/.exec(String(media.name || ''))?.[1] || '';
+        const token = createElement('span', ATTACHMENT_TOKEN_CLASS);
+        token.contentEditable = 'false';
+        token.dataset.type = type;
+        token.dataset.path = String(media.path || '');
+        token.dataset.name = String(media.name || '');
+        token.dataset.size = String(Math.max(0, Number(media.size) || 0));
+        token.dataset.pending = String(!media.path);
+        token.title = media.name || media.path || (type === 'video' ? '视频' : '文件');
+        const icon = createElement(
+            'span',
+            'qff-composer-attachment-icon',
+            type === 'video' ? '▶' : (extension.slice(0, 4).toUpperCase() || 'FILE')
+        );
+        const details = createElement('span', 'qff-composer-attachment-details');
+        details.append(
+            createElement('span', 'qff-composer-attachment-name', media.name || (type === 'video' ? '视频' : '文件')),
+            createElement('span', 'qff-composer-attachment-meta', formatFileSize(media.size))
+        );
+        const remove = createButton(
+            'qff-composer-image-remove qff-composer-attachment-remove',
+            '×',
+            type === 'video' ? '移除视频' : '移除文件'
+        );
+        remove.addEventListener('pointerdown', event => event.preventDefault());
+        remove.addEventListener('click', () => removeComposerToken(token));
+        token.append(icon, details, remove);
+        return token;
+    }
+
     function renderComposer(segments = []) {
         for (const token of state.fields.composer.querySelectorAll('.' + IMAGE_TOKEN_CLASS)) {
             releaseImagePreview(token);
         }
         const nodes = [];
         for (const segment of normalizeDraftSegments({ segments })) {
-            nodes.push(segment.type === 'image'
-                ? createComposerImage(segment)
-                : document.createTextNode(segment.text)
-            );
+            if (segment.type === 'image') {
+                nodes.push(createComposerImage(segment));
+            } else if (segment.type === 'video' || segment.type === 'file') {
+                nodes.push(createComposerAttachment(segment));
+            } else {
+                nodes.push(document.createTextNode(segment.text));
+            }
         }
         state.fields.composer.replaceChildren(...nodes);
     }
@@ -444,21 +556,34 @@ export function createFakeForwardEditor(options = {}) {
             (String(file.type || '').startsWith('image/') || IMAGE_FILE_PATTERN.test(file.name || ''));
     }
 
-    function getImageFiles(dataTransfer) {
-        const files = Array.from(dataTransfer?.files || []).filter(isImageFile);
+    function isVideoFile(file) {
+        return file instanceof File &&
+            (String(file.type || '').startsWith('video/') || VIDEO_FILE_PATTERN.test(file.name || ''));
+    }
+
+    function getTransferFiles(dataTransfer) {
+        const files = Array.from(dataTransfer?.files || []).filter(file => file instanceof File);
         if (files.length) {
             return files;
         }
         return Array.from(dataTransfer?.items || [])
             .filter(item => item.kind === 'file')
             .map(item => item.getAsFile())
-            .filter(isImageFile);
+            .filter(file => file instanceof File);
+    }
+
+    async function getLocalFilePath(file) {
+        const directPath = String(file?.path || '');
+        if (directPath) {
+            return directPath;
+        }
+        return String(await options.getFilePath?.(file) || '');
     }
 
     async function resolveComposerImage(file, token) {
         try {
             let image = {
-                path: String(file.path || ''),
+                path: await getLocalFilePath(file),
                 name: String(file.name || '')
             };
             if (!image.path) {
@@ -482,8 +607,25 @@ export function createFakeForwardEditor(options = {}) {
             preview.src = localImageUrl(token.dataset.path);
             releaseImagePreview(token);
         } catch (error) {
-            removeComposerImage(token);
+            removeComposerToken(token);
             setStatus(error?.message || '图片处理失败', 'error');
+        }
+    }
+
+    async function resolveComposerAttachment(file, token) {
+        try {
+            const filePath = await getLocalFilePath(file);
+            if (!filePath) {
+                throw new Error('无法读取本地文件路径');
+            }
+            if (!token.isConnected) {
+                return;
+            }
+            token.dataset.path = filePath;
+            token.dataset.pending = 'false';
+        } catch (error) {
+            removeComposerToken(token);
+            setStatus(error?.message || '文件处理失败', 'error');
         }
     }
 
@@ -510,16 +652,58 @@ export function createFakeForwardEditor(options = {}) {
         }
     }
 
+    function insertAttachmentFile(file) {
+        const hasContent = readComposerSegments().some(segment =>
+            segment.type !== 'text' || segment.text.trim()
+        );
+        if (hasContent) {
+            setStatus('视频或文件必须单独作为一条消息', 'error');
+            return;
+        }
+        const type = isVideoFile(file) ? 'video' : 'file';
+        const token = createComposerAttachment({
+            type,
+            name: file.name,
+            size: file.size
+        });
+        state.fields.composer.replaceChildren(token);
+        selectAfter(token);
+        resolveComposerAttachment(file, token);
+    }
+
+    function insertComposerFiles(files, range = getComposerRange()) {
+        if (!files.length) {
+            return;
+        }
+        if (state.fields.composer.querySelector('.' + ATTACHMENT_TOKEN_CLASS)) {
+            setStatus('视频或文件必须单独作为一条消息', 'error');
+            return;
+        }
+        if (files.every(isImageFile)) {
+            insertImageFiles(files, range);
+            return;
+        }
+        if (files.length !== 1) {
+            setStatus('视频或文件每条消息只能添加一个', 'error');
+            return;
+        }
+        insertAttachmentFile(files[0]);
+    }
+
     function handleComposerPaste(event) {
-        const files = getImageFiles(event.clipboardData);
+        const files = getTransferFiles(event.clipboardData);
         if (files.length) {
             event.preventDefault();
-            insertImageFiles(files);
+            insertComposerFiles(files);
             return;
         }
         const text = event.clipboardData?.getData('text/plain');
         if (text !== undefined) {
             event.preventDefault();
+            if (state.fields.composer.querySelector('.' + ATTACHMENT_TOKEN_CLASS)) {
+                setStatus('视频或文件必须单独作为一条消息', 'error');
+                return;
+            }
             insertText(text);
         }
     }
@@ -537,19 +721,41 @@ export function createFakeForwardEditor(options = {}) {
             selectAfter(token);
             return;
         }
-        const files = getImageFiles(event.dataTransfer);
+        const files = getTransferFiles(event.dataTransfer);
         if (files.length) {
             event.preventDefault();
             event.stopPropagation();
-            insertImageFiles(files, range);
+            insertComposerFiles(files, range);
         }
+    }
+
+    function handleComposerKeydown(event) {
+        const attachment = state.fields.composer.querySelector('.' + ATTACHMENT_TOKEN_CLASS);
+        if (!attachment || event.ctrlKey || event.metaKey || event.altKey) {
+            return;
+        }
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+            event.preventDefault();
+            removeComposerToken(attachment);
+            return;
+        }
+        if (event.key === 'Enter' || event.key.length === 1) {
+            event.preventDefault();
+            setStatus('视频或文件必须单独作为一条消息', 'error');
+        }
+    }
+
+    function setTimestampFields(timestamp = Date.now()) {
+        const value = formatDateTimeParts(timestamp);
+        state.fields.timestampDate.value = value.date;
+        state.fields.timestampTime.value = value.time;
     }
 
     function clearForm() {
         state.selectedId = '';
         state.fields.senderUin.value = '';
         state.fields.senderName.value = '';
-        state.fields.timestamp.value = formatDateTimeLocal();
+        setTimestampFields();
         renderComposer();
         state.fields.commit.textContent = '添加';
         state.fields.cancelEdit.hidden = true;
@@ -566,7 +772,7 @@ export function createFakeForwardEditor(options = {}) {
         state.selectedId = id;
         state.fields.senderUin.value = message.senderUin;
         state.fields.senderName.value = message.senderName;
-        state.fields.timestamp.value = formatDateTimeLocal(message.timestamp);
+        setTimestampFields(message.timestamp);
         renderComposer(message.segments);
         state.fields.commit.textContent = '保存修改';
         state.fields.cancelEdit.hidden = false;
@@ -584,17 +790,22 @@ export function createFakeForwardEditor(options = {}) {
         const textLength = segments.filter(segment => segment.type === 'text')
             .reduce((length, segment) => length + segment.text.length, 0);
         const images = segments.filter(segment => segment.type === 'image');
+        const standalone = segments.filter(segment => segment.type === 'video' || segment.type === 'file');
         if (!/^\d{5,20}$/.test(senderUin)) {
             setStatus('请输入有效的发送者 QQ 号', 'error');
             state.fields.senderUin.focus();
             return;
         }
-        if (images.some(image => image.pending || !image.path)) {
-            setStatus('图片正在处理，请稍候', 'error');
+        if (segments.some(segment => segment.pending || (segment.type !== 'text' && !segment.path))) {
+            setStatus('文件正在处理，请稍候', 'error');
+            return;
+        }
+        if (standalone.length && (standalone.length !== 1 || segments.length !== 1)) {
+            setStatus('视频或文件必须单独作为一条消息', 'error');
             return;
         }
         const hasText = segments.some(segment => segment.type === 'text' && segment.text.trim());
-        if (!hasText && !images.length) {
+        if (!hasText && !images.length && !standalone.length) {
             setStatus('请输入消息内容', 'error');
             state.fields.composer.focus();
             return;
@@ -629,7 +840,10 @@ export function createFakeForwardEditor(options = {}) {
             senderUin,
             senderName,
             segments: normalizeDraftSegments({ segments }),
-            timestamp: parseDateTimeLocal(state.fields.timestamp.value)
+            timestamp: parseDateTimeParts(
+                state.fields.timestampDate.value,
+                state.fields.timestampTime.value
+            )
         };
         const index = state.messages.findIndex(item => item.id === state.selectedId);
         if (index >= 0) {
@@ -674,6 +888,7 @@ export function createFakeForwardEditor(options = {}) {
         state.fields.composer.querySelectorAll('.qff-composer-image-remove').forEach(control => {
             control.disabled = sending;
         });
+        state.fields.addFile.disabled = sending;
         state.fields.commit.disabled = sending || state.resolvingSenderName;
         state.fields.cancelEdit.disabled = sending;
         state.sendButton.textContent = sending ? '发送中' : '发送';
@@ -741,6 +956,17 @@ export function createFakeForwardEditor(options = {}) {
         document.head.append(link);
     }
 
+    function syncColorScheme() {
+        const themeSource = state.root?.querySelector('.qff-dialog') || state.root;
+        if (!themeSource || !state.fields.timestampDate || !state.fields.timestampTime) {
+            return;
+        }
+        const scheme = inferColorScheme(getComputedStyle(themeSource).color);
+        state.root.style.colorScheme = scheme;
+        state.fields.timestampDate.style.colorScheme = scheme;
+        state.fields.timestampTime.style.colorScheme = scheme;
+    }
+
     function ensureEditor() {
         if (state.root?.isConnected) {
             return;
@@ -755,21 +981,25 @@ export function createFakeForwardEditor(options = {}) {
 
         const header = createElement('header', 'qff-header');
         const title = createElement('h2', 'qff-title', '伪造合并转发');
+        title.id = 'qqnt-toolbox-fake-forward-title';
+        dialog.setAttribute('aria-labelledby', title.id);
         const closeButton = createButton('qff-close', '×', '关闭');
         header.append(title, closeButton);
 
         const body = createElement('div', 'qff-body');
         const listPane = createElement('section', 'qff-list-pane');
         const listHeader = createElement('div', 'qff-list-header');
+        const listHeading = createElement('div', 'qff-list-heading');
         state.count = createElement('span', 'qff-count');
-        listHeader.append(createElement('span', 'qff-list-title', '消息'), state.count);
+        listHeading.append(createElement('span', 'qff-list-title', '消息'), state.count);
         state.list = createElement('ol', 'qff-list');
         const listActions = createElement('div', 'qff-list-actions');
-        state.fields.moveUp = createButton('qff-icon-button', '↑', '上移');
-        state.fields.moveDown = createButton('qff-icon-button', '↓', '下移');
-        state.fields.remove = createButton('qff-icon-button', '×', '删除');
+        state.fields.moveUp = createButton('qff-list-action', '上移');
+        state.fields.moveDown = createButton('qff-list-action', '下移');
+        state.fields.remove = createButton('qff-list-action qff-list-delete', '删除');
         listActions.append(state.fields.moveUp, state.fields.moveDown, state.fields.remove);
-        listPane.append(listHeader, state.list, listActions);
+        listHeader.append(listHeading, listActions);
+        listPane.append(listHeader, state.list);
 
         const form = createElement('form', 'qff-form');
         const fieldRow = createElement('div', 'qff-field-row');
@@ -782,28 +1012,53 @@ export function createFakeForwardEditor(options = {}) {
         state.fields.senderName.type = 'text';
         state.fields.senderName.maxLength = 80;
         state.fields.senderName.autocomplete = 'off';
-        fieldRow.append(
-            createField('发送者 QQ', state.fields.senderUin),
-            createField('显示昵称', state.fields.senderName)
-        );
-        state.fields.timestamp = createElement('input', 'qff-input');
-        state.fields.timestamp.type = 'datetime-local';
+        const senderUinField = createField('发送者 QQ', state.fields.senderUin);
+        const senderNameField = createField('显示昵称', state.fields.senderName);
+        fieldRow.append(senderUinField, senderNameField);
+        const timeRow = createElement('div', 'qff-time-row');
+        state.fields.timestampDate = createElement('input', 'qff-input');
+        state.fields.timestampDate.type = 'date';
+        state.fields.timestampDate.required = true;
+        state.fields.timestampTime = createElement('input', 'qff-input');
+        state.fields.timestampTime.type = 'time';
+        state.fields.timestampTime.required = true;
+        const dateField = createField('日期', state.fields.timestampDate);
+        const clockField = createField('时间', state.fields.timestampTime);
+        dateField.classList.add('qff-date-field');
+        clockField.classList.add('qff-clock-field');
+        timeRow.append(dateField, clockField);
         state.fields.composer = createElement('div', 'qff-composer');
         state.fields.composer.contentEditable = 'true';
         state.fields.composer.spellcheck = false;
         state.fields.composer.setAttribute('role', 'textbox');
         state.fields.composer.setAttribute('aria-label', '消息内容');
         state.fields.composer.setAttribute('aria-multiline', 'true');
+        state.fields.filePicker = createElement('input');
+        state.fields.filePicker.type = 'file';
+        state.fields.filePicker.multiple = true;
+        state.fields.filePicker.hidden = true;
+        const composerField = createElement('div', 'qff-field qff-composer-field');
+        const composerShell = createElement('div', 'qff-composer-shell');
+        const composerToolbar = createElement('div', 'qff-composer-toolbar');
+        const addFile = createButton('qff-button qff-file-button', '选择文件', '添加媒体或文件');
+        state.fields.addFile = addFile;
         const formActions = createElement('div', 'qff-form-actions');
         state.fields.cancelEdit = createButton('qff-button', '取消编辑');
-        state.fields.commit = createButton('qff-button qff-primary', '添加');
+        state.fields.commit = createButton('qff-button qff-commit', '添加');
         state.fields.commit.type = 'submit';
         formActions.append(state.fields.cancelEdit, state.fields.commit);
+        composerToolbar.append(addFile, formActions);
+        composerShell.append(state.fields.composer);
+        composerField.append(
+            createElement('span', 'qff-label', '消息内容'),
+            composerShell,
+            composerToolbar,
+            state.fields.filePicker
+        );
         form.append(
             fieldRow,
-            createField('时间', state.fields.timestamp),
-            createField('消息内容', state.fields.composer),
-            formActions
+            timeRow,
+            composerField
         );
         body.append(listPane, form);
 
@@ -833,6 +1088,7 @@ export function createFakeForwardEditor(options = {}) {
         });
         state.fields.cancelEdit.addEventListener('click', clearForm);
         state.fields.composer.addEventListener('paste', handleComposerPaste);
+        state.fields.composer.addEventListener('keydown', handleComposerKeydown);
         state.fields.composer.addEventListener('dragover', event => {
             if (state.draggedImage || Array.from(event.dataTransfer?.types || []).includes('Files')) {
                 event.preventDefault();
@@ -840,6 +1096,11 @@ export function createFakeForwardEditor(options = {}) {
             }
         });
         state.fields.composer.addEventListener('drop', handleComposerDrop);
+        addFile.addEventListener('click', () => state.fields.filePicker.click());
+        state.fields.filePicker.addEventListener('change', () => {
+            insertComposerFiles(Array.from(state.fields.filePicker.files || []));
+            state.fields.filePicker.value = '';
+        });
         state.fields.moveUp.addEventListener('click', () => moveSelected(-1));
         state.fields.moveDown.addEventListener('click', () => moveSelected(1));
         state.fields.remove.addEventListener('click', removeSelected);
@@ -856,6 +1117,12 @@ export function createFakeForwardEditor(options = {}) {
         clearForm();
         state.previousOverflow = document.body.style.overflow;
         state.root.hidden = false;
+        syncColorScheme();
+        requestAnimationFrame(() => {
+            if (state.root && !state.root.hidden) {
+                syncColorScheme();
+            }
+        });
         document.body.style.overflow = 'hidden';
         state.fields.senderUin.focus();
     }

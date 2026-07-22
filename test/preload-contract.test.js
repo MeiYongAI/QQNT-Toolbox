@@ -30,6 +30,11 @@ function loadPreload(relativePath) {
                     listeners.splice(index, 1);
                 }
             }
+        },
+        webUtils: {
+            getPathForFile(file) {
+                return file?.mockPath || '';
+            }
         }
     };
     const originalLoad = Module._load;
@@ -69,6 +74,7 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.openInlineMedia({ type: 'video' });
     await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
     await api.repeatMessage({ id: 'repeat' });
+    assert.equal(api.getPathForFile({ mockPath: 'D:\\video.mp4' }), 'D:\\video.mp4');
     await api.stageFakeForwardImage({ name: 'image.png', data: new ArrayBuffer(1) });
     await api.resolveFakeForwardSenderName('12345678');
     await api.sendFakeForward({ messages: [] });

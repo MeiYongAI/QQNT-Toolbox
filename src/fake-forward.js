@@ -46,16 +46,52 @@ function normalizePeer(value) {
 }
 
 function buildFakeForwardImageUploadParams(peer, filePath) {
+    return buildFakeForwardRichMediaUploadParams(peer, filePath, 'image');
+}
+
+function buildFakeForwardVideoUploadParams(peer, filePath) {
+    return buildFakeForwardRichMediaUploadParams(peer, filePath, 'video');
+}
+
+function buildFakeForwardRichMediaUploadParams(peer, filePath, type) {
     const normalizedPeer = normalizePeer(peer);
     const normalizedPath = normalizeText(filePath);
     if (!normalizedPath) {
-        throw new TypeError('Image path is required.');
+        throw new TypeError('Media path is required.');
     }
+    if (type !== 'image' && type !== 'video') {
+        throw new TypeError('Unsupported rich-media type.');
+    }
+    const group = normalizedPeer.chatType === 2;
     return {
         filePath: normalizedPath,
-        bizType: normalizedPeer.chatType === 2 ? 4 : 3,
+        bizType: type === 'video'
+            ? (group ? 7 : 6)
+            : (group ? 4 : 3),
         peerUid: normalizedPeer.peerUid,
         useNTV2: true
+    };
+}
+
+function buildFakeForwardFileUploadParams(peer, filePath, fileName, fileModelId) {
+    const normalizedPeer = normalizePeer(peer);
+    const normalizedPath = normalizeText(filePath);
+    const normalizedName = normalizeText(fileName);
+    const normalizedModelId = normalizeText(fileModelId);
+    if (!normalizedPath || !normalizedName || !/^\d+$/.test(normalizedModelId)) {
+        throw new TypeError('File upload parameters are invalid.');
+    }
+    return {
+        peer: {
+            chatType: normalizedPeer.chatType,
+            peerUid: normalizedPeer.peerUid,
+            guildId: normalizedPeer.guildId
+        },
+        files: [{
+            fileName: normalizedName,
+            filePath: normalizedPath,
+            fileModelId: normalizedModelId
+        }]
     };
 }
 
@@ -74,6 +110,41 @@ function normalizeFakeForwardImage(image, messageIndex, imageIndex) {
         type: 'image',
         name: normalizeText(image.name) || `图片 ${imageIndex + 1}`,
         msgInfo: image.msgInfo
+    };
+}
+
+function normalizeFakeForwardVideo(video, messageIndex) {
+    if (!video?.msgInfo || typeof video.msgInfo !== 'object') {
+        throw new TypeError(`第 ${messageIndex + 1} 条消息的视频尚未上传。`);
+    }
+    return {
+        type: 'video',
+        name: normalizeText(video.name) || '视频',
+        msgInfo: video.msgInfo
+    };
+}
+
+function normalizeFakeForwardFile(file, messageIndex) {
+    const fileId = normalizeText(file?.fileId);
+    const fileSize = Number(file?.fileSize);
+    if (!fileId) {
+        throw new TypeError(`第 ${messageIndex + 1} 条消息的文件尚未上传。`);
+    }
+    if (!Number.isSafeInteger(fileSize) || fileSize <= 0) {
+        throw new TypeError(`第 ${messageIndex + 1} 条消息的文件大小无效。`);
+    }
+    const md5 = normalizeHexDigest(file?.md5, 32, '文件 MD5');
+    const md510m = normalizeText(file?.md510m)
+        ? normalizeHexDigest(file.md510m, 32, '文件前 10 MB MD5')
+        : md5;
+    return {
+        type: 'file',
+        name: normalizeText(file.name) || '文件',
+        fileId,
+        fileSize,
+        md5,
+        md510m,
+        fileHash: normalizeText(file.fileHash)
     };
 }
 
@@ -114,10 +185,22 @@ function normalizeFakeForwardSegments(source, messageIndex) {
             segments.push(normalizeFakeForwardImage(segment, messageIndex, imageCount - 1));
             continue;
         }
+        if (segment?.type === 'video') {
+            segments.push(normalizeFakeForwardVideo(segment, messageIndex));
+            continue;
+        }
+        if (segment?.type === 'file') {
+            segments.push(normalizeFakeForwardFile(segment, messageIndex));
+            continue;
+        }
         throw new TypeError(`第 ${messageIndex + 1} 条消息包含不支持的内容。`);
     }
     if (textLength > MAX_FAKE_FORWARD_TEXT_LENGTH) {
         throw new RangeError(`第 ${messageIndex + 1} 条消息超过 ${MAX_FAKE_FORWARD_TEXT_LENGTH} 个字符。`);
+    }
+    const standalone = segments.filter(segment => segment.type === 'video' || segment.type === 'file');
+    if (standalone.length && (standalone.length !== 1 || segments.length !== 1)) {
+        throw new TypeError(`第 ${messageIndex + 1} 条消息中的视频或文件必须单独发送。`);
     }
     return segments;
 }
@@ -141,7 +224,9 @@ function normalizeFakeForwardMessages(messages, options = {}) {
         if (!senderUin) {
             throw new TypeError(`第 ${index + 1} 条消息的发送者 QQ 号无效。`);
         }
-        if (!content.trim() && !images.length) {
+        if (!content.trim() && !images.length && !segments.some(segment =>
+            segment.type === 'video' || segment.type === 'file'
+        )) {
             throw new TypeError(`第 ${index + 1} 条消息没有内容。`);
         }
         return {
@@ -167,7 +252,8 @@ async function getProtocol() {
             fileName: ProtoField(4, 'string'),
             fileType: ProtoField(5, {
                 type: ProtoField(1, 'uint32'),
-                picFormat: ProtoField(2, 'uint32')
+                picFormat: ProtoField(2, 'uint32'),
+                videoFormat: ProtoField(3, 'uint32')
             }),
             width: ProtoField(6, 'uint32'),
             height: ProtoField(7, 'uint32'),
@@ -190,7 +276,10 @@ async function getProtocol() {
                 fromScene: ProtoField(1001, 'uint32'),
                 toScene: ProtoField(1002, 'uint32'),
                 oldFileId: ProtoField(1003, 'uint32')
-            }),
+            }, 'optional'),
+            video: ProtoField(2, {
+                pbReserve: ProtoField(3, 'bytes')
+            }, 'optional'),
             busiType: ProtoField(10, 'uint32')
         });
         const MediaMsgInfo = ProtoMessage.of({
@@ -219,11 +308,55 @@ async function getProtocol() {
         });
         const Element = ProtoMessage.of({
             text: ProtoField(1, TextElement, 'optional'),
+            transElemInfo: ProtoField(5, {
+                elemType: ProtoField(1, 'uint32'),
+                elemValue: ProtoField(2, 'bytes')
+            }, 'optional'),
             commonElem: ProtoField(53, {
                 serviceType: ProtoField(1, 'uint32'),
                 pbElem: ProtoField(2, 'bytes'),
                 businessType: ProtoField(3, 'uint32')
             }, 'optional')
+        });
+        const GroupFileExtra = ProtoMessage.of({
+            field1: ProtoField(1, 'uint32'),
+            fileName: ProtoField(2, 'string'),
+            display: ProtoField(3, 'string', 'optional'),
+            inner: ProtoField(7, {
+                info: ProtoField(2, {
+                    busId: ProtoField(1, 'uint32'),
+                    fileId: ProtoField(2, 'string'),
+                    fileSize: ProtoField(3, 'uint64'),
+                    fileName: ProtoField(4, 'string'),
+                    fileSha: ProtoField(6, 'bytes', 'optional'),
+                    extInfoString: ProtoField(7, 'string', 'optional'),
+                    fileMd5: ProtoField(8, 'bytes')
+                })
+            })
+        });
+        const FileExtra = ProtoMessage.of({
+            file: ProtoField(1, {
+                fileType: ProtoField(1, 'uint32'),
+                sig: ProtoField(2, 'bytes', 'optional'),
+                fileUuid: ProtoField(3, 'string'),
+                fileMd5: ProtoField(4, 'bytes', 'optional'),
+                fileName: ProtoField(5, 'string'),
+                fileSize: ProtoField(6, 'uint64'),
+                note: ProtoField(7, 'bytes', 'optional'),
+                reserved: ProtoField(8, 'uint32', 'optional'),
+                subCmd: ProtoField(9, 'uint32'),
+                microCloud: ProtoField(10, 'uint32', 'optional'),
+                fileUrls: ProtoField(11, 'bytes', 'repeated'),
+                downloadFlag: ProtoField(12, 'uint32', 'optional'),
+                dangerLevel: ProtoField(50, 'uint32'),
+                lifeTime: ProtoField(51, 'uint32', 'optional'),
+                uploadTime: ProtoField(52, 'uint32', 'optional'),
+                absFileType: ProtoField(53, 'uint32', 'optional'),
+                clientType: ProtoField(54, 'uint32', 'optional'),
+                expireTime: ProtoField(55, 'uint32'),
+                pbReserve: ProtoField(56, 'bytes', 'optional'),
+                fileIdCrcMedia: ProtoField(57, 'string', 'optional')
+            })
         });
         const Message = ProtoMessage.of({
             responseHead: ProtoField(1, {
@@ -260,7 +393,8 @@ async function getProtocol() {
             body: ProtoField(3, {
                 richText: ProtoField(1, {
                     elems: ProtoField(2, Element, 'repeated')
-                })
+                }),
+                msgContent: ProtoField(2, 'bytes', 'optional')
             })
         });
         const MultiMsgItem = ProtoMessage.of({
@@ -329,6 +463,8 @@ async function getProtocol() {
             errMsg: ProtoField(2, 'string', 'optional')
         });
         return {
+            FileExtra,
+            GroupFileExtra,
             MediaMsgInfo,
             MultiMsgTransmit,
             SendMessageRequest,
@@ -348,10 +484,18 @@ function createSequenceStart(value) {
 }
 
 function makePreviewText(message) {
-    const content = message.segments.map(segment => segment.type === 'image'
-        ? '[图片]'
-        : segment.text
-    ).join('').replace(/\s+/g, ' ').trim();
+    const content = message.segments.map(segment => {
+        if (segment.type === 'image') {
+            return '[图片]';
+        }
+        if (segment.type === 'video') {
+            return '[视频]';
+        }
+        if (segment.type === 'file') {
+            return `[文件] ${segment.name}`;
+        }
+        return segment.text;
+    }).join('').replace(/\s+/g, ' ').trim();
     return `${message.senderName}: ${content.slice(0, 70)}`;
 }
 
@@ -359,15 +503,57 @@ function createProtocolMessage(peer, message, index, options = {}) {
     const group = peer.chatType === 2;
     const avatar = `https://q.qlogo.cn/headimg_dl?dst_uin=${message.senderUin}&spec=0&img_type=jpg`;
     const elems = [];
+    let msgContent;
     for (const segment of message.segments) {
         if (segment.type === 'text') {
             elems.push({ text: { str: segment.text } });
-        } else {
+        } else if (segment.type === 'image' || segment.type === 'video') {
             elems.push({
                 commonElem: {
                     serviceType: 48,
                     pbElem: options.MediaMsgInfo.encode(segment.msgInfo),
-                    businessType: group ? 20 : 10
+                    businessType: segment.type === 'video'
+                        ? (group ? 21 : 11)
+                        : (group ? 20 : 10)
+                }
+            });
+        } else if (group) {
+            const extra = options.GroupFileExtra.encode({
+                field1: 6,
+                fileName: segment.name,
+                inner: {
+                    info: {
+                        busId: 102,
+                        fileId: segment.fileId,
+                        fileSize: BigInt(segment.fileSize),
+                        fileName: segment.name,
+                        fileMd5: Buffer.from(segment.md5, 'hex')
+                    }
+                }
+            });
+            if (extra.length > 0xffff) {
+                throw new RangeError('群文件消息数据过大。');
+            }
+            const length = Buffer.alloc(2);
+            length.writeUInt16BE(extra.length);
+            elems.push({
+                transElemInfo: {
+                    elemType: 24,
+                    elemValue: Buffer.concat([Buffer.from([0x01]), length, extra])
+                }
+            });
+        } else {
+            msgContent = options.FileExtra.encode({
+                file: {
+                    fileType: 0,
+                    fileUuid: segment.fileId,
+                    fileMd5: Buffer.from(segment.md510m, 'hex'),
+                    fileName: segment.name,
+                    fileSize: BigInt(segment.fileSize),
+                    subCmd: 1,
+                    dangerLevel: 0,
+                    expireTime: Math.max(Math.trunc(Date.now() / 1000), message.timestamp) + 7 * 24 * 60 * 60,
+                    fileIdCrcMedia: segment.fileHash || undefined
                 }
             });
         }
@@ -405,7 +591,8 @@ function createProtocolMessage(peer, message, index, options = {}) {
         body: {
             richText: {
                 elems
-            }
+            },
+            msgContent
         }
     };
 }
@@ -418,12 +605,18 @@ async function buildFakeForwardUploadRequest(payload, options = {}) {
         throw new Error('无法获取当前账号 UID。');
     }
     const sequenceStart = createSequenceStart(options.sequenceStart);
-    const { MediaMsgInfo, MultiMsgTransmit, SendLongMsgRequest } = await getProtocol();
+    const {
+        FileExtra,
+        GroupFileExtra,
+        MediaMsgInfo,
+        MultiMsgTransmit,
+        SendLongMsgRequest
+    } = await getProtocol();
     const protocolMessages = messages.map((message, index) => createProtocolMessage(
         peer,
         message,
         index,
-        { ...options, selfUid, sequenceStart, MediaMsgInfo }
+        { ...options, selfUid, sequenceStart, FileExtra, GroupFileExtra, MediaMsgInfo }
     ));
     const transmit = MultiMsgTransmit.encode({
         pbItemList: [{
@@ -533,9 +726,91 @@ function createFakeForwardImageMsgInfo(input) {
     };
 }
 
+function createFakeForwardVideoMsgInfo(input) {
+    const peer = normalizePeer(input?.peer);
+    const fileUuid = normalizeText(input?.fileUuid);
+    const fileSize = Number(input?.fileSize);
+    const width = Number(input?.width);
+    const height = Number(input?.height);
+    const duration = Math.max(0, Math.trunc(Number(input?.duration) || 0));
+    const thumbBody = input?.thumbMsgInfo?.msgInfoBody?.[0];
+    if (!fileUuid) {
+        throw new TypeError('视频资源 ID 无效。');
+    }
+    if (!Number.isSafeInteger(fileSize) || fileSize <= 0 || fileSize > 0xffffffff) {
+        throw new TypeError('视频文件大小无效。');
+    }
+    if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+        throw new TypeError('视频尺寸无效。');
+    }
+    if (!thumbBody?.index?.fileUuid) {
+        throw new TypeError('视频封面尚未上传。');
+    }
+    const md5 = normalizeHexDigest(input?.md5, 32, '视频 MD5');
+    const sha1 = normalizeHexDigest(input?.sha1, 40, '视频 SHA1');
+    const extension = normalizeText(input?.extension).replace(/^\./, '').toLowerCase() || 'mp4';
+    const fileName = normalizeText(input?.fileName) || `${md5}.${extension}`;
+    const group = peer.chatType === 2;
+    const hashSum = group
+        ? { troopSource: { groupCode: Number(peer.peerUid) } }
+        : { bytesPbReserveC2c: { friendUid: peer.peerUid } };
+    return {
+        msgInfoBody: [{
+            index: {
+                info: {
+                    fileSize,
+                    md5HexStr: md5,
+                    sha1HexStr: sha1,
+                    fileName,
+                    fileType: { type: 2, videoFormat: 0 },
+                    width,
+                    height,
+                    time: duration,
+                    original: 1
+                },
+                fileUuid,
+                storeID: 1,
+                uploadTime: 0,
+                expire: 0,
+                type: 0
+            },
+            fileExist: true,
+            hashSum
+        }, {
+            index: thumbBody.index,
+            fileExist: true,
+            hashSum: thumbBody.hashSum || hashSum
+        }],
+        extBizInfo: {
+            video: {
+                pbReserve: Buffer.from([0x80, 0x01, 0x00])
+            },
+            busiType: 0
+        }
+    };
+}
+
 async function decodeFakeForwardImageMsgInfo(packet) {
     const { MediaMsgInfo } = await getProtocol();
     return MediaMsgInfo.decode(packet);
+}
+
+async function decodeFakeForwardGroupFileElement(packet) {
+    const bytes = Buffer.from(packet || []);
+    if (bytes.length < 3 || bytes[0] !== 0x01) {
+        throw new TypeError('群文件元素无效。');
+    }
+    const length = bytes.readUInt16BE(1);
+    if (length !== bytes.length - 3) {
+        throw new TypeError('群文件元素长度无效。');
+    }
+    const { GroupFileExtra } = await getProtocol();
+    return GroupFileExtra.decode(bytes.subarray(3));
+}
+
+async function decodeFakeForwardPrivateFileContent(packet) {
+    const { FileExtra } = await getProtocol();
+    return FileExtra.decode(packet);
 }
 
 function asBuffer(value) {
@@ -694,11 +969,16 @@ module.exports = {
     MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE,
     MAX_FAKE_FORWARD_MESSAGES,
     MAX_FAKE_FORWARD_TEXT_LENGTH,
+    buildFakeForwardFileUploadParams,
     buildFakeForwardImageUploadParams,
+    buildFakeForwardVideoUploadParams,
     buildFakeForwardSendRequest,
     buildFakeForwardUploadRequest,
     createFakeForwardImageMsgInfo,
+    createFakeForwardVideoMsgInfo,
+    decodeFakeForwardGroupFileElement,
     decodeFakeForwardImageMsgInfo,
+    decodeFakeForwardPrivateFileContent,
     decodeFakeForwardSendRequest,
     decodeFakeForwardUploadRequest,
     normalizeFakeForwardMessages,

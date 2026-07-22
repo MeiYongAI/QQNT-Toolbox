@@ -1,11 +1,14 @@
 #qqnt-toolbox-fake-forward-editor {
     --qff-bg: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
     --qff-layer: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, 0.08)));
+    --qff-pane: color-mix(in srgb, var(--qff-layer) 42%, var(--qff-bg));
+    --qff-control: color-mix(in srgb, var(--qff-layer) 78%, var(--qff-bg));
     --qff-hover: var(--overlay_hover, var(--background-02, rgba(127, 127, 127, 0.12)));
     --qff-border: var(--border-level-1-color, var(--divider, rgba(127, 127, 127, 0.18)));
     --qff-text: var(--text-primary, var(--text-01, #1f2329));
     --qff-muted: var(--text-secondary, var(--text-02, #6b7280));
     --qff-accent: var(--brand_standard, var(--theme-color, #0099ff));
+    --qff-accent-soft: color-mix(in srgb, var(--qff-accent) 12%, transparent);
     --qff-danger: var(--text_error, #e5484d);
     position: fixed;
     inset: 0;
@@ -33,7 +36,7 @@
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
     width: min(780px, calc(100vw - 32px));
-    max-height: min(720px, calc(100vh - 48px));
+    max-height: min(640px, calc(100vh - 48px));
     overflow: hidden;
     border: 1px solid var(--qff-border);
     border-radius: 8px;
@@ -46,8 +49,8 @@
 .qff-footer {
     display: flex;
     align-items: center;
-    min-height: 56px;
-    padding: 0 18px;
+    min-height: 52px;
+    padding: 0 20px;
 }
 
 .qff-header {
@@ -61,8 +64,7 @@
     font-weight: 600;
 }
 
-.qff-close,
-.qff-icon-button {
+.qff-close {
     display: inline-grid;
     place-items: center;
     flex: none;
@@ -83,19 +85,21 @@
     font-weight: 300;
 }
 
-.qff-close:hover,
-.qff-icon-button:hover:not(:disabled) {
+.qff-close:hover {
     background: var(--qff-hover);
 }
 
-.qff-icon-button:disabled {
-    opacity: 0.35;
-    cursor: default;
+.qff-close:focus-visible,
+.qff-list-action:focus-visible,
+.qff-button:focus-visible,
+.qff-message:focus-visible {
+    outline: 2px solid var(--qff-accent);
+    outline-offset: 1px;
 }
 
 .qff-body {
     display: grid;
-    grid-template-columns: minmax(260px, 0.9fr) minmax(300px, 1.1fr);
+    grid-template-columns: minmax(240px, 0.75fr) minmax(400px, 1.25fr);
     min-height: 0;
 }
 
@@ -104,12 +108,20 @@
     display: grid;
     min-width: 0;
     min-height: 0;
-    padding: 16px 18px;
+    padding: 14px 16px 16px;
 }
 
 .qff-list-pane {
-    grid-template-rows: auto minmax(160px, 1fr) auto;
+    grid-template-rows: auto minmax(160px, 1fr);
+    overflow: hidden;
     border-right: 1px solid var(--qff-border);
+    background: var(--qff-pane);
+    contain: size;
+}
+
+.qff-form {
+    padding-right: 18px;
+    padding-left: 18px;
 }
 
 .qff-list-header,
@@ -122,11 +134,19 @@
 
 .qff-list-header {
     justify-content: space-between;
-    min-height: 32px;
-    margin-bottom: 10px;
+    min-height: 30px;
+    margin-bottom: 8px;
+}
+
+.qff-list-heading {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    gap: 7px;
 }
 
 .qff-list-title {
+    font-size: 14px;
     font-weight: 600;
 }
 
@@ -139,7 +159,7 @@
 .qff-list {
     min-height: 0;
     margin: 0;
-    padding: 0;
+    padding: 0 2px 0 0;
     overflow: auto;
     list-style: none;
     scrollbar-gutter: stable;
@@ -164,15 +184,16 @@
     height: 100%;
     min-height: 160px;
     color: var(--qff-muted);
+    font-size: 13px;
 }
 
 .qff-message {
     display: grid;
-    grid-template-columns: 36px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 9px;
     width: 100%;
     margin: 0 0 4px;
-    padding: 9px;
+    padding: 8px;
     border: 1px solid transparent;
     border-radius: 6px;
     color: inherit;
@@ -187,13 +208,14 @@
 }
 
 .qff-message[aria-selected="true"] {
-    border-color: var(--qff-accent);
-    background: rgba(0, 153, 255, 0.08);
+    border-color: transparent;
+    background: var(--qff-accent-soft);
+    box-shadow: inset 3px 0 var(--qff-accent);
 }
 
 .qff-avatar {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     border-radius: 50%;
     object-fit: cover;
     background: var(--qff-layer);
@@ -238,14 +260,46 @@
 }
 
 .qff-list-actions {
-    justify-content: flex-end;
+    display: flex;
+    align-items: center;
+    flex: none;
     gap: 2px;
-    padding-top: 8px;
+    margin-left: 10px;
+}
+
+.qff-list-action {
+    min-width: 0;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: var(--qff-muted);
+    background: transparent;
+    font: 12px/1 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    cursor: pointer;
+}
+
+.qff-list-action:not(:disabled) {
+    color: var(--qff-text);
+}
+
+.qff-list-action:hover:not(:disabled) {
+    background: var(--qff-hover);
+}
+
+.qff-list-delete:hover:not(:disabled) {
+    color: var(--qff-danger);
+    background: color-mix(in srgb, var(--qff-danger) 10%, transparent);
+}
+
+.qff-list-action:disabled {
+    opacity: 0.32;
+    cursor: default;
 }
 
 .qff-form {
     align-content: start;
-    gap: 12px;
+    gap: 10px;
     overflow: auto;
 }
 
@@ -256,45 +310,83 @@
 }
 
 .qff-field {
-    gap: 6px;
+    gap: 5px;
 }
 
 .qff-field-row {
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    gap: 10px;
 }
 
 .qff-label {
     color: var(--qff-muted);
     font-size: 12px;
+    line-height: 18px;
+}
+
+.qff-time-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-width: 0;
+    gap: 10px;
+}
+
+.qff-date-field,
+.qff-clock-field {
+    width: 100%;
 }
 
 .qff-input,
 .qff-composer {
     width: 100%;
-    border: 1px solid var(--qff-border);
-    border-radius: 6px;
     outline: 0;
     color: var(--qff-text) !important;
     -webkit-text-fill-color: var(--qff-text) !important;
     caret-color: var(--qff-text);
-    background: var(--qff-layer) !important;
     font: inherit;
 }
 
 .qff-input {
-    height: 36px;
+    height: 34px;
     padding: 0 10px;
+    border: 1px solid var(--qff-border);
+    border-radius: 6px;
+    background: var(--qff-control) !important;
+}
+
+.qff-input[type="date"],
+.qff-input[type="time"] {
+    color-scheme: inherit;
+}
+
+.qff-composer-shell {
+    overflow: hidden;
+    border: 1px solid var(--qff-border);
+    border-radius: 6px;
+    background: var(--qff-control);
 }
 
 .qff-composer {
-    min-height: 158px;
-    max-height: 300px;
-    padding: 9px 10px;
-    overflow: auto;
+    height: 210px;
+    min-height: 210px;
+    max-height: 210px;
+    padding: 10px 11px;
+    border: 0;
+    background: transparent !important;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     cursor: text;
+}
+
+.qff-composer-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 32px;
+    padding-top: 1px;
 }
 
 .qff-composer-image {
@@ -322,6 +414,62 @@
 
 .qff-composer-image-dragging {
     opacity: 0.35;
+}
+
+.qff-composer-attachment {
+    position: relative;
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    width: min(100%, 360px);
+    min-height: 60px;
+    margin: 3px 0;
+    padding: 9px 38px 9px 10px;
+    border: 1px solid var(--qff-border);
+    border-radius: 6px;
+    background: var(--qff-layer);
+    vertical-align: middle;
+    user-select: none;
+}
+
+.qff-composer-attachment[data-pending="true"] {
+    opacity: 0.62;
+}
+
+.qff-composer-attachment-icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 5px;
+    color: var(--qff-muted);
+    background: var(--qff-hover);
+    font-size: 9px;
+    font-weight: 600;
+}
+
+.qff-composer-attachment[data-type="video"] .qff-composer-attachment-icon {
+    font-size: 16px;
+}
+
+.qff-composer-attachment-details,
+.qff-composer-attachment-name,
+.qff-composer-attachment-meta {
+    display: block;
+    min-width: 0;
+}
+
+.qff-composer-attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.qff-composer-attachment-meta {
+    margin-top: 3px;
+    color: var(--qff-muted);
+    font-size: 11px;
 }
 
 .qff-composer-image-preview {
@@ -360,9 +508,23 @@
     cursor: default;
 }
 
+.qff-composer-attachment .qff-composer-attachment-remove {
+    top: 18px;
+    right: 8px;
+    color: var(--qff-muted);
+    background: transparent;
+    opacity: 1;
+}
+
+.qff-composer-attachment .qff-composer-attachment-remove:hover {
+    color: var(--qff-text);
+    background: var(--qff-hover);
+}
+
 .qff-input:focus,
-.qff-composer:focus {
+.qff-composer-shell:focus-within {
     border-color: var(--qff-accent);
+    box-shadow: 0 0 0 1px var(--qff-accent-soft);
 }
 
 .qff-composer[contenteditable="false"] {
@@ -371,19 +533,20 @@
 }
 
 .qff-form-actions {
+    flex: none;
     justify-content: flex-end;
-    gap: 8px;
+    gap: 6px;
 }
 
 .qff-button {
-    min-width: 72px;
-    height: 34px;
-    padding: 0 15px;
-    border: 1px solid var(--qff-border);
+    min-width: 68px;
+    height: 32px;
+    padding: 0 14px;
+    border: 1px solid transparent;
     border-radius: 6px;
     color: inherit;
     -webkit-text-fill-color: currentColor;
-    background: transparent;
+    background: var(--qff-layer);
     font: inherit;
     cursor: pointer;
 }
@@ -397,6 +560,14 @@
     color: #fff;
     -webkit-text-fill-color: #fff;
     background: var(--qff-accent);
+}
+
+.qff-button.qff-commit {
+    min-width: 64px;
+}
+
+.qff-button.qff-file-button {
+    min-width: 76px;
 }
 
 .qff-button:disabled {
@@ -426,7 +597,15 @@
 
 .qff-footer-actions {
     flex: none;
-    gap: 8px;
+    gap: 6px;
+}
+
+@media (max-height: 620px) {
+    .qff-composer {
+        height: 182px;
+        min-height: 182px;
+        max-height: 182px;
+    }
 }
 
 @media (max-width: 700px) {
@@ -445,7 +624,7 @@
     }
 
     .qff-list-pane {
-        min-height: 260px;
+        min-height: 220px;
         border-right: 0;
         border-bottom: 1px solid var(--qff-border);
     }

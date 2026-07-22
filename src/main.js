@@ -27,10 +27,13 @@ const { applyCustomImageSummary } = require('./image-summary');
 const { PRESERVE_KIND, createFileRetryPlan, getRepairKinds } = require('./file-retry');
 const {
     MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE,
+    buildFakeForwardFileUploadParams,
     buildFakeForwardImageUploadParams,
+    buildFakeForwardVideoUploadParams,
     buildFakeForwardSendRequest,
     buildFakeForwardUploadRequest,
     createFakeForwardImageMsgInfo,
+    createFakeForwardVideoMsgInfo,
     parseFakeForwardSendResponse,
     parseFakeForwardUploadResponse
 } = require('./fake-forward');
@@ -1114,20 +1117,25 @@ async function invokeFakeForwardSso(browserWindow, request) {
         );
 }
 
-function findRichMediaUploadInfo(value, filePath, depth = 0, seen = new WeakSet()) {
+function findRichMediaUploadInfo(value, criteria = {}, depth = 0, seen = new WeakSet()) {
     if (!value || typeof value !== 'object' || value instanceof Uint8Array || depth > 7 || seen.has(value)) {
         return null;
     }
     seen.add(value);
     const candidatePath = normalizePathText(value.filePath || value.commonFileInfo?.filePath);
-    const matchesPath = !filePath ||
-        normalizeComparablePath(candidatePath) === normalizeComparablePath(filePath);
-    if (matchesPath && (value.commonFileInfo || value.fileErrCode !== undefined) && candidatePath) {
+    const candidateModelId = normalizeText(value.fileModelId || value.commonFileInfo?.fileModelId);
+    const matchesPath = criteria.filePath && candidatePath &&
+        normalizeComparablePath(candidatePath) === normalizeComparablePath(criteria.filePath);
+    const matchesModelId = criteria.fileModelId && candidateModelId === normalizeText(criteria.fileModelId);
+    const matches = criteria.filePath || criteria.fileModelId
+        ? matchesPath || matchesModelId
+        : true;
+    if (matches && (value.commonFileInfo || value.fileErrCode !== undefined)) {
         return value;
     }
     const children = value instanceof Map ? value.values() : Object.values(value);
     for (const child of children) {
-        const found = findRichMediaUploadInfo(child, filePath, depth + 1, seen);
+        const found = findRichMediaUploadInfo(child, criteria, depth + 1, seen);
         if (found) {
             return found;
         }
@@ -1135,7 +1143,7 @@ function findRichMediaUploadInfo(value, filePath, depth = 0, seen = new WeakSet(
     return null;
 }
 
-function createFakeForwardImageUploadWaiters(filePath, timeoutMs = 60 * 1000) {
+function createFakeForwardUploadWaiters(criteria, timeoutMs = 60 * 1000) {
     const waiters = BrowserWindow.getAllWindows()
         .filter(window => window && !window.isDestroyed() && !window.webContents?.isDestroyed())
         .map(window => createNativeEventWaiter(window, (response, result) => {
@@ -1143,10 +1151,13 @@ function createFakeForwardImageUploadWaiters(filePath, timeoutMs = 60 * 1000) {
             if (!/nodeIKernelMsgListener\/onRichMediaUploadComplete$/i.test(cmdName)) {
                 return false;
             }
-            return Boolean(findRichMediaUploadInfo(result, filePath) || findRichMediaUploadInfo(response, filePath));
+            return Boolean(
+                findRichMediaUploadInfo(result, criteria) ||
+                findRichMediaUploadInfo(response, criteria)
+            );
         }, timeoutMs));
     if (!waiters.length) {
-        throw new Error('No QQ window is available for image upload events.');
+        throw new Error('No QQ window is available for upload events.');
     }
     return {
         cancel: () => waiters.forEach(waiter => waiter.cancel()),
@@ -1157,12 +1168,33 @@ function createFakeForwardImageUploadWaiters(filePath, timeoutMs = 60 * 1000) {
     };
 }
 
+function createFakeForwardImageUploadWaiters(filePath, timeoutMs = 60 * 1000) {
+    return createFakeForwardUploadWaiters({ filePath }, timeoutMs);
+}
+
 function startFakeForwardImageUpload(peer, filePath) {
     const service = getQqWrapperSession()?.getRichMediaService?.();
     if (typeof service?.uploadRMFileWithoutMsg !== 'function') {
         throw new Error('QQ rich-media upload service is unavailable.');
     }
     return service.uploadRMFileWithoutMsg(buildFakeForwardImageUploadParams(peer, filePath));
+}
+
+function startFakeForwardVideoUpload(peer, filePath) {
+    const service = getQqWrapperSession()?.getRichMediaService?.();
+    if (typeof service?.uploadRMFileWithoutMsg !== 'function') {
+        throw new Error('QQ rich-media upload service is unavailable.');
+    }
+    return service.uploadRMFileWithoutMsg(buildFakeForwardVideoUploadParams(peer, filePath));
+}
+
+function getCompletedFakeForwardUpload(eventResult, criteria, label) {
+    const uploadInfo = findRichMediaUploadInfo(eventResult, criteria) || eventResult;
+    const errorCode = Number(uploadInfo?.fileErrCode);
+    if (Number.isFinite(errorCode) && errorCode !== 0) {
+        throw new Error(`${label}上传失败：${uploadInfo?.fileErrMsg || errorCode}`);
+    }
+    return uploadInfo;
 }
 
 async function uploadFakeForwardImage(browserWindow, peer, filePath) {
@@ -1179,11 +1211,7 @@ async function uploadFakeForwardImage(browserWindow, peer, filePath) {
         const invocation = startFakeForwardImageUpload(peer, filePath);
         const invocationFailure = Promise.resolve(invocation).then(() => new Promise(() => {}));
         const eventResult = await Promise.race([waiter.promise, invocationFailure]);
-        const uploadInfo = findRichMediaUploadInfo(eventResult, filePath) || eventResult;
-        const errorCode = Number(uploadInfo?.fileErrCode);
-        if (Number.isFinite(errorCode) && errorCode !== 0) {
-            throw new Error(`图片上传失败：${uploadInfo?.fileErrMsg || errorCode}`);
-        }
+        const uploadInfo = getCompletedFakeForwardUpload(eventResult, { filePath }, '图片');
         const commonFileInfo = uploadInfo?.commonFileInfo || {};
         const fileUuid = normalizeText(commonFileInfo.uuid || uploadInfo?.fileId);
         if (!fileUuid) {
@@ -1211,46 +1239,175 @@ async function uploadFakeForwardImage(browserWindow, peer, filePath) {
     }
 }
 
-async function prepareFakeForwardImages(browserWindow, payload) {
+async function uploadFakeForwardVideo(browserWindow, peer, filePath) {
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat?.isFile() || !stat.size) {
+        throw new Error(`视频文件不存在或为空：${path.basename(filePath)}`);
+    }
+    const mediaInfo = await probeMediaInfo(filePath);
+    if (!mediaInfo.width || !mediaInfo.height) {
+        throw new Error(`无法读取视频画面：${path.basename(filePath)}`);
+    }
+    const thumbPath = await createVideoThumbnail(filePath, '', {
+        blur: false,
+        extension: '.jpg',
+        maxWidth: 640
+    });
+    const waiter = createFakeForwardUploadWaiters({ filePath }, 5 * 60 * 1000);
+    try {
+        const invocation = startFakeForwardVideoUpload(peer, filePath);
+        const invocationFailure = Promise.resolve(invocation).then(() => new Promise(() => {}));
+        const eventResult = await Promise.race([waiter.promise, invocationFailure]);
+        const uploadInfo = getCompletedFakeForwardUpload(eventResult, { filePath }, '视频');
+        const commonFileInfo = uploadInfo?.commonFileInfo || {};
+        const fileUuid = normalizeText(commonFileInfo.uuid || uploadInfo?.fileId);
+        if (!fileUuid) {
+            throw new Error(`QQ 未返回视频资源 ID：${path.basename(filePath)}`);
+        }
+        const [thumbMsgInfo, md5, sha1] = await Promise.all([
+            uploadFakeForwardImage(browserWindow, peer, thumbPath),
+            getFileMd5(filePath),
+            getFileSha1(filePath)
+        ]);
+        const extension = path.extname(filePath).replace(/^\./, '').toLowerCase() || 'mp4';
+        return createFakeForwardVideoMsgInfo({
+            peer,
+            fileUuid,
+            fileSize: stat.size,
+            width: mediaInfo.width,
+            height: mediaInfo.height,
+            duration: mediaInfo.duration,
+            extension,
+            fileName: `${md5}.${extension}`,
+            md5,
+            sha1,
+            thumbMsgInfo
+        });
+    } finally {
+        waiter.cancel();
+        await fs.unlink(thumbPath).catch(() => {});
+    }
+}
+
+function getFilePrefixMd5(filePath, byteLimit = 10002432) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('md5');
+        const stream = fsSync.createReadStream(filePath, { start: 0, end: byteLimit - 1 });
+        stream.on('data', chunk => hash.update(chunk));
+        stream.on('error', reject);
+        stream.on('end', () => resolve(hash.digest('hex')));
+    });
+}
+
+function createFakeForwardFileModelId() {
+    return String(crypto.randomBytes(6).readUIntBE(0, 6));
+}
+
+async function uploadFakeForwardFile(peer, filePath, requestedName) {
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat?.isFile() || !stat.size) {
+        throw new Error(`文件不存在或为空：${path.basename(filePath)}`);
+    }
+    const fileName = path.basename(normalizeText(requestedName)) || path.basename(filePath);
+    const fileModelId = createFakeForwardFileModelId();
+    const request = buildFakeForwardFileUploadParams(peer, filePath, fileName, fileModelId);
+    const service = getQqWrapperSession()?.getRichMediaService?.();
+    if (typeof service?.onlyUploadFile !== 'function') {
+        throw new Error('QQ file upload service is unavailable.');
+    }
+    const criteria = { filePath, fileModelId };
+    const waiter = createFakeForwardUploadWaiters(criteria, 10 * 60 * 1000);
+    try {
+        const invocation = service.onlyUploadFile(request.peer, request.files);
+        const invocationFailure = Promise.resolve(invocation).then(() => new Promise(() => {}));
+        const eventResult = await Promise.race([waiter.promise, invocationFailure]);
+        const uploadInfo = getCompletedFakeForwardUpload(eventResult, criteria, '文件');
+        const commonFileInfo = uploadInfo?.commonFileInfo || {};
+        const fileId = normalizeText(commonFileInfo.uuid || uploadInfo?.fileId);
+        if (!fileId) {
+            throw new Error(`QQ 未返回文件资源 ID：${fileName}`);
+        }
+        const [localMd5, localMd510m] = await Promise.all([
+            getFileMd5(filePath),
+            getFilePrefixMd5(filePath)
+        ]);
+        const md5 = /^[0-9a-f]{32}$/i.test(commonFileInfo.md5 || '')
+            ? String(commonFileInfo.md5).toLowerCase()
+            : localMd5;
+        const md510m = /^[0-9a-f]{32}$/i.test(commonFileInfo.md510m || '')
+            ? String(commonFileInfo.md510m).toLowerCase()
+            : localMd510m;
+        const fileHash = normalizeText(findFirstByKey(uploadInfo, [
+            'fileIdCrcMedia', 'fileIdCrc', 'crcMedia', 'fileHash', 'fileAddon'
+        ]));
+        return { type: 'file', name: fileName, fileId, fileSize: stat.size, md5, md510m, fileHash };
+    } finally {
+        waiter.cancel();
+    }
+}
+
+function getFakeForwardUploadKey(type, filePath, fileName = '') {
+    return `${type}\0${normalizeComparablePath(filePath)}\0${type === 'file' ? fileName : ''}`;
+}
+
+async function prepareFakeForwardMedia(browserWindow, payload) {
     const peer = payload?.peer || {};
     const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-    const selected = [];
-    const paths = new Map();
+    const selected = new Map();
     for (const [messageIndex, message] of messages.entries()) {
         const segments = getFakeForwardSourceSegments(message);
         const images = segments.filter(segment => segment?.type === 'image');
         if (images.length > MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE) {
             throw new Error(`第 ${messageIndex + 1} 条消息的图片数量过多。`);
         }
-        for (const image of images) {
-            const filePath = normalizePathText(image?.path);
-            if (!filePath || !path.isAbsolute(filePath)) {
-                throw new Error(`第 ${messageIndex + 1} 条消息包含无效的图片路径。`);
+        const standalone = segments.filter(segment => segment?.type === 'video' || segment?.type === 'file');
+        const meaningful = segments.filter(segment => segment?.type !== 'text' || String(segment.text ?? '').length);
+        if (standalone.length && (standalone.length !== 1 || meaningful.length !== 1)) {
+            throw new Error(`第 ${messageIndex + 1} 条消息中的视频或文件必须单独发送。`);
+        }
+        for (const segment of segments) {
+            if (segment?.type === 'text') {
+                continue;
             }
-            const key = normalizeComparablePath(filePath);
-            if (!paths.has(key)) {
-                paths.set(key, filePath);
-                selected.push(filePath);
+            if (!['image', 'video', 'file'].includes(segment?.type)) {
+                throw new Error(`第 ${messageIndex + 1} 条消息包含不支持的内容。`);
+            }
+            const filePath = normalizePathText(segment?.path);
+            if (!filePath || !path.isAbsolute(filePath)) {
+                throw new Error(`第 ${messageIndex + 1} 条消息包含无效的文件路径。`);
+            }
+            const fileName = path.basename(normalizeText(segment.name)) || path.basename(filePath);
+            const key = getFakeForwardUploadKey(segment.type, filePath, fileName);
+            if (!selected.has(key)) {
+                selected.set(key, { key, type: segment.type, filePath, fileName });
             }
         }
     }
-    const uploaded = await mapWithConcurrency(selected, 2, async filePath => ({
-        key: normalizeComparablePath(filePath),
-        msgInfo: await uploadFakeForwardImage(browserWindow, peer, filePath)
-    }));
-    const byPath = new Map(uploaded.map(item => [item.key, item.msgInfo]));
+    const uploaded = await mapWithConcurrency(Array.from(selected.values()), 2, async item => {
+        if (item.type === 'file') {
+            return { key: item.key, segment: await uploadFakeForwardFile(peer, item.filePath, item.fileName) };
+        }
+        const msgInfo = item.type === 'video'
+            ? await uploadFakeForwardVideo(browserWindow, peer, item.filePath)
+            : await uploadFakeForwardImage(browserWindow, peer, item.filePath);
+        return {
+            key: item.key,
+            segment: { type: item.type, name: item.fileName, msgInfo }
+        };
+    });
+    const byPath = new Map(uploaded.map(item => [item.key, item.segment]));
     return {
         ...payload,
         messages: messages.map(message => ({
             ...message,
-            segments: getFakeForwardSourceSegments(message).map(segment => segment?.type === 'image'
-                ? {
-                    type: 'image',
-                    name: normalizeText(segment.name) || path.basename(normalizePathText(segment.path)),
-                    msgInfo: byPath.get(normalizeComparablePath(normalizePathText(segment.path)))
+            segments: getFakeForwardSourceSegments(message).map(segment => {
+                if (segment?.type === 'text') {
+                    return { type: 'text', text: String(segment.text ?? '') };
                 }
-                : { type: 'text', text: String(segment?.text ?? '') }
-            )
+                const filePath = normalizePathText(segment?.path);
+                const fileName = path.basename(normalizeText(segment?.name)) || path.basename(filePath);
+                return byPath.get(getFakeForwardUploadKey(segment?.type, filePath, fileName));
+            })
         }))
     };
 }
@@ -1335,7 +1492,7 @@ async function sendFakeForwardFromRenderer(browserWindow, payload) {
         }
         selfUid = await resolveFakeForwardSenderUid(browserWindow, selfUin);
     }
-    const preparedPayload = await prepareFakeForwardImages(browserWindow, payload);
+    const preparedPayload = await prepareFakeForwardMedia(browserWindow, payload);
     const upload = await buildFakeForwardUploadRequest(preparedPayload, { selfUid });
     const response = await invokeFakeForwardSso(browserWindow, upload);
     if (isNativeFailure(response)) {
@@ -1687,10 +1844,11 @@ function installConfigIpc() {
         const summary = {
             chatType: Number(payload?.peer?.chatType) || 0,
             messageCount: Array.isArray(payload?.messages) ? payload.messages.length : 0,
-            imageCount: Array.isArray(payload?.messages)
-                ? payload.messages.reduce((count, message) => count + getFakeForwardSourceSegments(message)
-                    .filter(segment => segment?.type === 'image').length, 0)
-                : 0
+            mediaTypes: Array.isArray(payload?.messages)
+                ? payload.messages.flatMap(message => getFakeForwardSourceSegments(message))
+                    .map(segment => segment?.type)
+                    .filter(type => ['image', 'video', 'file'].includes(type))
+                : []
         };
         recordDiagnostic('info', 'fake-forward.requested', summary);
         try {

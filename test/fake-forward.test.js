@@ -10,11 +10,16 @@ const {
     FAKE_FORWARD_UPLOAD_COMMAND,
     MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE,
     MAX_FAKE_FORWARD_MESSAGES,
+    buildFakeForwardFileUploadParams,
     buildFakeForwardImageUploadParams,
+    buildFakeForwardVideoUploadParams,
     buildFakeForwardSendRequest,
     buildFakeForwardUploadRequest,
     createFakeForwardImageMsgInfo,
+    createFakeForwardVideoMsgInfo,
+    decodeFakeForwardGroupFileElement,
     decodeFakeForwardImageMsgInfo,
+    decodeFakeForwardPrivateFileContent,
     decodeFakeForwardSendRequest,
     decodeFakeForwardUploadRequest,
     normalizeFakeForwardMessages,
@@ -59,6 +64,39 @@ test('builds the QQ native image upload parameters without an unsupported transf
     });
 });
 
+test('builds native video and file upload parameters for each chat type', () => {
+    assert.deepEqual(buildFakeForwardVideoUploadParams({
+        chatType: 2,
+        peerUid: '998877'
+    }, 'D:\\Videos\\sample.mp4'), {
+        filePath: 'D:\\Videos\\sample.mp4',
+        bizType: 7,
+        peerUid: '998877',
+        useNTV2: true
+    });
+    assert.deepEqual(buildFakeForwardVideoUploadParams({
+        chatType: 1,
+        peerUid: 'u_private_peer'
+    }, 'D:\\Videos\\sample.mp4'), {
+        filePath: 'D:\\Videos\\sample.mp4',
+        bizType: 6,
+        peerUid: 'u_private_peer',
+        useNTV2: true
+    });
+    assert.deepEqual(buildFakeForwardFileUploadParams({
+        chatType: 2,
+        peerUid: '998877',
+        guildId: ''
+    }, 'D:\\Files\\archive.zip', 'archive.zip', '123456'), {
+        peer: { chatType: 2, peerUid: '998877', guildId: '' },
+        files: [{
+            fileName: 'archive.zip',
+            filePath: 'D:\\Files\\archive.zip',
+            fileModelId: '123456'
+        }]
+    });
+});
+
 test('normalizes fake forward entries without changing multiline text', () => {
     const [message] = normalizeFakeForwardMessages([{
         senderUin: '12345678',
@@ -94,6 +132,50 @@ test('reads native contenteditable block lines without joining the first two lin
     }]);
 });
 
+test('drops only the browser placeholder break after a compound image', async () => {
+    const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'fake-forward-editor.js'), 'utf8');
+    const editor = await import(`data:text/javascript;base64,${Buffer.from(editorSource).toString('base64')}`);
+    const root = composerElement('DIV', [
+        composerText('我喜欢这个'),
+        composerElement('SPAN', [], {
+            classNames: ['qff-composer-image'],
+            dataset: { path: 'D:\\Pictures\\sample.png', name: 'sample.png', pending: 'false' }
+        }),
+        composerElement('DIV', [composerElement('BR')])
+    ]);
+
+    assert.deepEqual(editor.readFakeForwardComposerSegments(root), [
+        { type: 'text', text: '我喜欢这个' },
+        { type: 'image', path: 'D:\\Pictures\\sample.png', name: 'sample.png', pending: false }
+    ]);
+});
+
+test('reads a standalone video card without keeping the contenteditable placeholder', async () => {
+    const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'fake-forward-editor.js'), 'utf8');
+    const editor = await import(`data:text/javascript;base64,${Buffer.from(editorSource).toString('base64')}`);
+    const root = composerElement('DIV', [
+        composerElement('SPAN', [], {
+            classNames: ['qff-composer-attachment'],
+            dataset: {
+                type: 'video',
+                path: 'D:\\Videos\\sample.mp4',
+                name: 'sample.mp4',
+                size: '1024',
+                pending: 'false'
+            }
+        }),
+        composerElement('DIV', [composerElement('BR')])
+    ]);
+
+    assert.deepEqual(editor.readFakeForwardComposerSegments(root), [{
+        type: 'video',
+        path: 'D:\\Videos\\sample.mp4',
+        name: 'sample.mp4',
+        size: 1024,
+        pending: false
+    }]);
+});
+
 test('rejects invalid senders, empty content, unsupported peers, and oversized lists', async () => {
     assert.throws(() => normalizeFakeForwardMessages([{ senderUin: 'abc', content: 'x' }]), /QQ/);
     assert.throws(() => normalizeFakeForwardMessages([{ senderUin: '12345', content: ' ' }]), /内容/);
@@ -109,6 +191,32 @@ test('rejects invalid senders, empty content, unsupported peers, and oversized l
         senderUin: '12345',
         images: Array.from({ length: MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE + 1 }, () => ({ msgInfo: {} }))
     }]), /图片/);
+    assert.throws(() => normalizeFakeForwardMessages([{
+        senderUin: '12345',
+        segments: [
+            { type: 'text', text: 'caption' },
+            { type: 'video', name: 'sample.mp4', msgInfo: {} }
+        ]
+    }]), /单独发送/);
+    assert.throws(() => normalizeFakeForwardMessages([{
+        senderUin: '12345',
+        segments: [
+            {
+                type: 'file',
+                name: 'one.zip',
+                fileId: '/one',
+                fileSize: 1,
+                md5: '0123456789abcdef0123456789abcdef'
+            },
+            {
+                type: 'file',
+                name: 'two.zip',
+                fileId: '/two',
+                fileSize: 1,
+                md5: '0123456789abcdef0123456789abcdef'
+            }
+        ]
+    }]), /单独发送/);
 });
 
 test('encodes fake text nodes into QQ long-message upload protobuf', async () => {
@@ -257,6 +365,89 @@ test('uses the private image business type and peer UID metadata', async () => {
     assert.match(decodedImage.msgInfoBody[0].pic.urlPath, /appid=1406/);
 });
 
+test('encodes a standalone video as the native service-48 video element', async () => {
+    const peer = { chatType: 2, peerUid: '998877', guildId: '' };
+    const thumbMsgInfo = createFakeForwardImageMsgInfo({
+        peer,
+        fileUuid: '/thumb-1111-2222-3333-444444444444',
+        fileSize: 4096,
+        width: 640,
+        height: 360,
+        extension: 'jpg',
+        md5: '11111111111111111111111111111111',
+        sha1: '2222222222222222222222222222222222222222'
+    });
+    const videoMsgInfo = createFakeForwardVideoMsgInfo({
+        peer,
+        fileUuid: '/video-1111-2222-3333-444444444444',
+        fileSize: 1234567,
+        width: 1920,
+        height: 1080,
+        duration: 42.9,
+        extension: 'mp4',
+        md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        sha1: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        thumbMsgInfo
+    });
+    const built = await buildFakeForwardUploadRequest({
+        peer,
+        messages: [{
+            senderUin: '12345678',
+            senderName: 'Alice',
+            segments: [{ type: 'video', name: 'sample.mp4', msgInfo: videoMsgInfo }]
+        }]
+    }, { sequenceStart: 4000 });
+    const decoded = await decodeFakeForwardUploadRequest(built.packet);
+    const common = decoded.transmit.pbItemList[0].buffer.msg[0].body.richText.elems[0].commonElem;
+    assert.equal(common.businessType, 21);
+    const video = await decodeFakeForwardImageMsgInfo(common.pbElem);
+    assert.equal(video.msgInfoBody.length, 2);
+    assert.equal(video.msgInfoBody[0].index.info.fileType.type, 2);
+    assert.equal(video.msgInfoBody[0].index.info.time, 42);
+    assert.equal(video.msgInfoBody[0].index.fileUuid, '/video-1111-2222-3333-444444444444');
+    assert.equal(video.msgInfoBody[1].index.fileUuid, '/thumb-1111-2222-3333-444444444444');
+    assert.deepEqual(Buffer.from(video.extBizInfo.video.pbReserve), Buffer.from([0x80, 0x01, 0x00]));
+    assert.equal(built.news[0].text, 'Alice: [视频]');
+});
+
+test('encodes group and private files using their native long-message fields', async () => {
+    const file = {
+        type: 'file',
+        name: 'archive.zip',
+        fileId: '/file-1111-2222-3333-444444444444',
+        fileSize: 987654,
+        md5: '0123456789abcdef0123456789abcdef',
+        md510m: 'fedcba9876543210fedcba9876543210',
+        fileHash: 'file-crc'
+    };
+    const groupBuilt = await buildFakeForwardUploadRequest({
+        peer: { chatType: 2, peerUid: '998877', guildId: '' },
+        messages: [{ senderUin: '12345678', senderName: 'Alice', segments: [file] }]
+    }, { sequenceStart: 5000 });
+    const groupDecoded = await decodeFakeForwardUploadRequest(groupBuilt.packet);
+    const trans = groupDecoded.transmit.pbItemList[0].buffer.msg[0].body.richText.elems[0].transElemInfo;
+    assert.equal(trans.elemType, 24);
+    const groupFile = await decodeFakeForwardGroupFileElement(trans.elemValue);
+    assert.equal(groupFile.inner.info.busId, 102);
+    assert.equal(groupFile.inner.info.fileId, file.fileId);
+    assert.equal(String(groupFile.inner.info.fileSize), String(file.fileSize));
+    assert.deepEqual(Buffer.from(groupFile.inner.info.fileMd5), Buffer.from(file.md5, 'hex'));
+    assert.equal(groupBuilt.news[0].text, 'Alice: [文件] archive.zip');
+
+    const privateBuilt = await buildFakeForwardUploadRequest({
+        peer: { chatType: 1, peerUid: 'u_private_peer', peerUin: '87654321' },
+        messages: [{ senderUin: '12345678', senderName: 'Alice', segments: [file] }]
+    }, { selfUid: 'u_self', sequenceStart: 5001 });
+    const privateDecoded = await decodeFakeForwardUploadRequest(privateBuilt.packet);
+    const privateRecord = privateDecoded.transmit.pbItemList[0].buffer.msg[0];
+    assert.equal(privateRecord.body.richText.elems.length, 0);
+    const privateFile = await decodeFakeForwardPrivateFileContent(privateRecord.body.msgContent);
+    assert.equal(privateFile.file.fileUuid, file.fileId);
+    assert.equal(privateFile.file.fileName, file.name);
+    assert.deepEqual(Buffer.from(privateFile.file.fileMd5), Buffer.from(file.md510m, 'hex'));
+    assert.equal(privateFile.file.fileIdCrcMedia, file.fileHash);
+});
+
 test('parses the resource id and builds the desktop service-35 send packet', async () => {
     const response = Buffer.concat([
         Buffer.from([0x12, 0x09, 0x1a, 0x07]),
@@ -303,6 +494,9 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(mainSource, /sendFakeForwardFromRenderer/);
     assert.match(mainSource, /getRichMediaService\?\.\(\)/);
     assert.match(mainSource, /createFakeForwardImageUploadWaiters/);
+    assert.match(mainSource, /onlyUploadFile\(request\.peer, request\.files\)/);
+    assert.match(mainSource, /uploadFakeForwardVideo/);
+    assert.match(mainSource, /prepareFakeForwardMedia/);
     assert.match(mainSource, /getUserDetailInfoByUin\(senderUin\)/);
     assert.match(mainSource, /CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME/);
     assert.match(mainSource, /BrowserWindow\.getAllWindows\(\)/);
@@ -315,12 +509,18 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(rendererSource, /createFakeForwardEditor/);
     assert.match(editorSource, /qqnt-toolbox-fake-forward-draft/);
     assert.match(editorSource, /normalizeDraftSegments/);
+    assert.match(editorSource, /createButton\('qff-list-action', '上移'\)/);
+    assert.match(editorSource, /createButton\('qff-list-action', '下移'\)/);
+    assert.match(editorSource, /createButton\('qff-list-action qff-list-delete', '删除'\)/);
+    assert.doesNotMatch(editorSource, /qff-message-drag/);
     assert.match(editorSource, /let senderName = state\.fields\.senderName\.value\.trim\(\);/);
     assert.match(editorSource, /await options\.resolveSenderName\?\.\(senderUin\)/);
     assert.match(editorSource, /contentEditable\s*=\s*['"]true['"]/);
     assert.doesNotMatch(editorSource, /composer\.addEventListener\(['"]beforeinput['"]/);
     assert.match(editorSource, /addEventListener\(['"]paste['"]/);
     assert.match(editorSource, /addEventListener\(['"]drop['"]/);
+    assert.match(editorSource, /VIDEO_FILE_PATTERN/);
+    assert.match(editorSource, /视频或文件必须单独作为一条消息/);
     assert.match(editorSource, /template\.cloneNode\(true\)/);
     assert.match(editorSource, /applyEntryGlyph\(glyph\)/);
     assert.match(editorSource, /entries\.find\(element => element\.querySelector\(['"]svg['"]\)\)/);

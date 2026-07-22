@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const CHANNEL_GET_CONFIG = 'qqnt-toolbox:get-config';
 const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     recordDiagnosticEvent: payload => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_EVENT, payload),
     runDiagnosticAction: action => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_ACTION, action),
     repeatMessage: payload => ipcRenderer.invoke(CHANNEL_REPEAT_MESSAGE, payload),
+    getPathForFile: file => webUtils?.getPathForFile?.(file) || file?.path || '',
     stageFakeForwardImage: payload => ipcRenderer.invoke(CHANNEL_STAGE_FAKE_FORWARD_IMAGE, payload),
     resolveFakeForwardSenderName: senderUin =>
         ipcRenderer.invoke(CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME, senderUin),
