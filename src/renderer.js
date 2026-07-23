@@ -171,6 +171,8 @@ let handleToolboxVueComponentMount = () => {};
             imageViewerOptimization: false,
             activeQrScan: false,
             singleMediaViewer: false,
+            singleForwardViewer: false,
+            singleForwardGroupIsolation: false,
             goBackMainList: false,
             preventMessageDrag: false,
             preventRecentContactDrag: false,
@@ -1756,6 +1758,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('图片查看器优化'), text('仅优化 QQ 原生查看器：点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
                 createSwitchItem(text('二维码主动识别'), text('在消息与媒体查看器中按需点击识别，不影响 QQ 自带识别'), 'interfaceTweaks.activeQrScan'),
                 createSwitchItem(text('单窗口媒体预览'), text('打开新媒体时关闭旧预览窗口'), 'interfaceTweaks.singleMediaViewer'),
+                createSwitchItem(text('单窗口预览合并转发'), text('根记录相互替换，内层记录关闭时返回上一级'), 'interfaceTweaks.singleForwardViewer'),
+                createSwitchItem(text('群聊隔离'), text('不同群分别保留窗口，同群新记录替换旧记录'), 'interfaceTweaks.singleForwardGroupIsolation', {
+                    requires: 'interfaceTweaks.singleForwardViewer',
+                    child: true
+                }),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
                 createSwitchItem(text('阻止消息列表拖拽'), text('防止拖出独立聊天窗口'), 'interfaceTweaks.preventRecentContactDrag'),
@@ -4052,16 +4059,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const matchesRecord = isFileMessage
                 ? hasVideoFile || hasImageFile
                 : isVideo ? hasVideo : hasImage;
+            let element;
+            if (isFileMessage) {
+                element = mediaElement.closest('.file-element') ||
+                    mediaElement.closest('[class*="file-message"]') || mediaElement;
+            } else if (isVideo) {
+                element = mediaElement.closest('.video-element, .msg-preview--video') || mediaElement;
+            } else {
+                element = mediaElement.closest('.pic-element, .mix-message__container--pic') || mediaElement;
+            }
             if (matchesRecord) {
-                let element;
-                if (isFileMessage) {
-                    element = mediaElement.closest('.file-element') ||
-                        mediaElement.closest('[class*="file-message"]') || mediaElement;
-                } else if (isVideo) {
-                    element = mediaElement.closest('.video-element, .msg-preview--video') || mediaElement;
-                } else {
-                    element = mediaElement.closest('.pic-element, .mix-message__container--pic') || mediaElement;
-                }
                 const mediaKind = isFileMessage ? 'file' : isVideo ? 'video' : 'image';
                 const inlineElement = getClickedRecordMediaElement(record, mediaElement, element, mediaKind, event.target) ||
                     (isFileMessage
@@ -4078,7 +4085,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     isVideo: resolvedIsVideo,
                     isFileMedia: isFileVideo || isFileImage,
                     source: isFileMessage ? 'file-message' : 'message',
-                    openControl: resolvedIsVideo || isFileMessage ? getVideoOpenControl(element) : element,
+                    openControl: resolvedIsVideo || isFileMessage
+                        ? getVideoOpenControl(element)
+                        : element,
                     inlineMedia: createInlineMediaOpenItem(
                         record,
                         inlineElement,
@@ -4086,6 +4095,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     )
                 };
             }
+            return {
+                element,
+                isVideo: elementLooksLikeVideo,
+                isFileMedia: isFileMessage,
+                source: 'message-native',
+                openControl: elementLooksLikeVideo
+                    ? getVideoOpenControl(element)
+                    : element,
+                inlineMedia: null
+            };
         }
         return getMarkdownMediaTarget(event);
     }
@@ -4781,6 +4800,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     function isForwardRecordWindow() {
         return location.hash.startsWith('#/forward/');
+    }
+
+    function handleForwardOpenIntent(event) {
+        if (event.button !== 0 || !isFeatureEnabled('interfaceTweaks.singleForwardViewer')) {
+            return;
+        }
+        const target = event.target instanceof Element ? event.target : null;
+        const messageElement = getMessageElementFromElement(target);
+        if (!messageElement || target.closest('.plus-one-btn')) {
+            return;
+        }
+        const record = findMessageRecordFromElement(messageElement);
+        if (!record?.elements?.some(element => Boolean(element?.multiForwardMsgElement))) {
+            return;
+        }
+        getBridge()?.markForwardOpenIntent?.();
     }
 
     function getForwardRouteContext() {
@@ -6405,6 +6440,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     document.addEventListener('click', handleEmojiImageClick, true);
     document.addEventListener('click', handleSingleClickMedia, true);
+    document.addEventListener('pointerdown', handleForwardOpenIntent, true);
 
     document.addEventListener('keydown', event => {
         if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {

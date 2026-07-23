@@ -452,6 +452,14 @@
         });
     }
 
+    function revealSelectedMedia(galleryId, index) {
+        if (!activeMedia || activeGalleryId !== galleryId || activeIndex !== index) {
+            return false;
+        }
+        viewer.classList.remove('is-concealed');
+        return true;
+    }
+
     function cachePreviousMedia(media, index, galleryId) {
         if (!media || index < 0 || galleryId !== state.galleryId) {
             releaseMedia(media);
@@ -495,6 +503,7 @@
             applyVideoPlaybackState(activeMedia, playbackState);
             setLoading(false);
             setLoadError(false);
+            revealSelectedMedia(galleryId, index);
             scheduleAdjacentPreload();
             return;
         }
@@ -551,6 +560,7 @@
         }
         fitMediaToStage();
         applyMediaTransform();
+        revealSelectedMedia(galleryId, index);
         setLoading(false);
         setLoadError(false);
         scheduleAdjacentPreload();
@@ -1134,10 +1144,12 @@
 
     function applyState(payload) {
         if (payload?.hidden === true) {
+            const presentationId = normalizeText(payload?.presentationId);
             resetMediaLifecycle({ clearStatus: true, conceal: true });
             state = createEmptyViewerState(state.background);
             globalThis.qqntToolboxQrDialog?.close?.();
             updateChrome();
+            acknowledgePresentation(presentationId);
             return;
         }
         const presentationId = normalizeText(payload?.presentationId);
@@ -1166,13 +1178,7 @@
         viewer.dataset.background = state.background;
         updateChrome();
         acknowledgePresentation(presentationId);
-        renderSelected(false, nextState.playback).then(() => {
-            if (activeMedia &&
-                activeGalleryId === nextState.galleryId &&
-                activeIndex === nextState.index) {
-                viewer.classList.remove('is-concealed');
-            }
-        }).catch(() => {});
+        renderSelected(false, nextState.playback).catch(() => {});
         showControls();
         viewer.focus({ preventScroll: true });
     }

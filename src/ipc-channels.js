@@ -17,6 +17,7 @@ const CHANNEL_MEDIA_PIP_ACTION = 'qqnt-toolbox:media-pip-action';
 const CHANNEL_MEDIA_PIP_DRAG = 'qqnt-toolbox:media-pip-drag';
 const CHANNEL_MEDIA_PIP_STATE_CHANGED = 'qqnt-toolbox:media-pip-state-changed';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
+const CHANNEL_FORWARD_OPEN_INTENT = 'qqnt-toolbox:forward-open-intent';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
@@ -58,6 +59,7 @@ module.exports = Object.freeze({
     CHANNEL_MEDIA_PIP_DRAG,
     CHANNEL_MEDIA_PIP_STATE_CHANGED,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
+    CHANNEL_FORWARD_OPEN_INTENT,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,

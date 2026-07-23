@@ -326,6 +326,7 @@ test('keeps the single-click gesture independent from the selected media viewer'
     );
 
     assert.match(rendererSource, /inlineMedia: createInlineMediaOpenItem\(/);
+    assert.match(rendererSource, /source: 'message-native',[\s\S]*inlineMedia: null/);
     assert.match(handlerSource, /if \(!singleClickEnabled \|\| event\.button !== 0 \|\|/);
     assert.match(handlerSource, /const openToolboxViewer = inlineViewerEnabled && Boolean\(target\.inlineMedia\);/);
     assert.doesNotMatch(handlerSource, /!inlineViewerEnabled|clickedOpenControl|target\.isFileMedia/);
@@ -390,10 +391,15 @@ test('opens file media first and resolves it from QQ file-assistant status', () 
 
     assert.match(rendererSource, /decision = await getBridge\(\)\?\.openMediaViewer\?\.\(payload\)[\s\S]*decision\?\.activateNative === true[\s\S]*dispatchNativeMediaOpen\(target, sourceEvent\)/);
     assert.match(rendererSource, /inlineMedia: createInlineMediaOpenItem\(/);
+    assert.match(rendererSource, /openControl: resolvedIsVideo \|\| isFileMessage[\s\S]*getVideoOpenControl\(element\)/);
+    assert.match(rendererSource, /if \(\(target\.isVideo \|\| target\.isFileMedia\) && target\.openControl\)[\s\S]*new MouseEvent\('click'/);
     assert.match(mainSource, /nodeIKernelFileAssistantService\\\/downloadFile/);
     assert.match(mainSource, /nodeIKernelFileAssistantListener\\\/onFileStatusChanged/);
     assert.match(mainSource, /mediaDownloadTasks\.replaceKind\([\s\S]*'file'/);
     assert.match(mainSource, /mediaDownloadTasks\.get\(browserWindow, 'file', itemKey\)/);
+    assert.match(mainSource, /item\.pendingFile === true[\s\S]*deferPresentation: true[\s\S]*activateNative: true/);
+    assert.match(mainSource, /function bindPendingInlineFileDownload[\s\S]*presentMediaViewer\(browserWindow\)/);
+    assert.match(mainSource, /if \(options\.deferPresentation !== true\) \{\s*await presentMediaViewer\(browserWindow\);/);
     assert.match(mainSource, /function resolveInlineMediaDownload[\s\S]*mediaDownloadTasks\.get\(browserWindow, 'rich', key\)[\s\S]*onRichMediaDownloadComplete/);
 });
 
@@ -413,9 +419,11 @@ test('conceals stale media until the reopened viewer has rendered its requested 
     assert.match(viewerHtml, /class="media-viewer is-concealed"/);
     assert.match(viewerCss, /\.media-viewer\.is-concealed \.media-slot \{\s*visibility: hidden;/);
     assert.match(viewerSource, /function resetMediaLifecycle[\s\S]*clearPreparedMedia\(\);[\s\S]*clearActiveMedia\(\);[\s\S]*concealMedia\(\);/);
-    assert.match(viewerSource, /if \(payload\?\.hidden === true\) \{\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);\s*state = createEmptyViewerState\(state\.background\);/);
+    assert.match(viewerSource, /if \(payload\?\.hidden === true\) \{\s*const presentationId = normalizeText\(payload\?\.presentationId\);\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);\s*state = createEmptyViewerState\(state\.background\);/);
     assert.match(viewerSource, /const freshPresentation = Boolean\(presentationId\);\s*if \(freshPresentation\) \{\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);\s*state = createEmptyViewerState\(state\.background\);/);
-    assert.match(viewerSource, /renderSelected\(false, nextState\.playback\)\.then\(\(\) => \{[\s\S]*activeGalleryId === nextState\.galleryId[\s\S]*activeIndex === nextState\.index[\s\S]*classList\.remove\('is-concealed'\)/);
+    assert.match(viewerSource, /function revealSelectedMedia[\s\S]*activeGalleryId !== galleryId[\s\S]*activeIndex !== index[\s\S]*classList\.remove\('is-concealed'\)/);
+    assert.match(viewerSource, /async function renderSelected[\s\S]*slot\.replaceChildren\(media\)[\s\S]*revealSelectedMedia\(galleryId, index\)/);
+    assert.doesNotMatch(viewerSource, /renderSelected\(false, nextState\.playback\)\.then/);
 });
 
 test('presents a reused media window only after the renderer commits a cleared frame', () => {
@@ -424,9 +432,11 @@ test('presents a reused media window only after the renderer commits a cleared f
 
     assert.match(mainSource, /const presented = waitForMediaViewerPresentation\(presentationId\)/);
     assert.match(mainSource, /setOpacity\(0\)[\s\S]*showInactive\(\)[\s\S]*const didPresent = await presented[\s\S]*if \(!didPresent\)[\s\S]*setOpacity\(WINDOWS_MEDIA_VIEWER_OPACITY\)/);
-    assert.match(mainSource, /function hideMediaViewer\(\) \{[\s\S]*setOpacity\(0\);[\s\S]*sendMediaViewerState\(\{ hidden: true \}\);\s*mediaViewerWindow\.hide\(\);/);
+    assert.match(mainSource, /async function hideMediaViewer\(\) \{[\s\S]*const cleared = waitForMediaViewerPresentation\(presentationId\)[\s\S]*setOpacity\(0\);[\s\S]*sendMediaViewerState\(\{ hidden: true, presentationId \}\)[\s\S]*const didClear = await cleared[\s\S]*viewerWindow\.hide\(\);/);
+    assert.match(mainSource, /mediaViewerVisibilityRevision \+= 1;[\s\S]*const presented = waitForMediaViewerPresentation\(presentationId\)/);
     assert.match(mainSource, /if \(type === 'presented'\) \{\s*return \{ ok: completeMediaViewerPresentation\(payload\.presentationId\) \};/);
     assert.match(viewerSource, /function acknowledgePresentation[\s\S]*requestAnimationFrame\(\(\) => \{\s*requestAnimationFrame\(\(\) => \{[\s\S]*type: 'presented'/);
+    assert.match(viewerSource, /if \(payload\?\.hidden === true\) \{[\s\S]*acknowledgePresentation\(presentationId\);\s*return;/);
     assert.match(viewerSource, /if \(freshPresentation\) \{\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);/);
 });
 
@@ -442,10 +452,10 @@ test('cancels pending rendering and clears the session when the viewer closes', 
         viewerSource.indexOf("previous.addEventListener('click'")
     );
 
-    assert.match(closeActionSource, /if \(type === 'close'\) \{\s*hideMediaViewer\(\);\s*clearMediaViewerSession\(\);/);
+    assert.match(closeActionSource, /if \(type === 'close'\) \{\s*const hidden = hideMediaViewer\(\);\s*clearMediaViewerSession\(\);\s*await hidden;/);
     assert.match(mainSource, /function clearMediaViewerSession\(\) \{\s*mediaViewerSession\.clearAll\(\);\s*\}/);
     assert.doesNotMatch(mainSource, /mediaViewerGallery|pendingForwardMediaGallery/);
-    assert.match(hiddenStateSource, /if \(payload\?\.hidden === true\) \{[\s\S]*state = createEmptyViewerState\(state\.background\);[\s\S]*updateChrome\(\);\s*return;/);
+    assert.match(hiddenStateSource, /if \(payload\?\.hidden === true\) \{[\s\S]*state = createEmptyViewerState\(state\.background\);[\s\S]*updateChrome\(\);\s*acknowledgePresentation\(presentationId\);\s*return;/);
 });
 
 test('resolves an unopened gallery item through QQ when navigation first reaches it', () => {

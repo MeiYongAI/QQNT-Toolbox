@@ -9,6 +9,7 @@ const CHANNEL_OPEN_MEDIA_VIEWER = 'qqnt-toolbox:open-media-viewer';
 const CHANNEL_SCAN_QR_CODE = 'qqnt-toolbox:scan-qr-code';
 const CHANNEL_QR_RESULT_ACTION = 'qqnt-toolbox:qr-result-action';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
+const CHANNEL_FORWARD_OPEN_INTENT = 'qqnt-toolbox:forward-open-intent';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
@@ -34,6 +35,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     setConfig: config => ipcRenderer.invoke(CHANNEL_SET_CONFIG, config),
     recordDiagnosticEvent: payload => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_EVENT, payload),
     runDiagnosticAction: action => ipcRenderer.invoke(CHANNEL_DIAGNOSTIC_ACTION, action),
+    markForwardOpenIntent: () => ipcRenderer.send(CHANNEL_FORWARD_OPEN_INTENT),
     repeatMessage: payload => ipcRenderer.invoke(CHANNEL_REPEAT_MESSAGE, payload),
     getPathForFile: file => webUtils?.getPathForFile?.(file) || file?.path || '',
     stageFakeForwardImage: payload => ipcRenderer.invoke(CHANNEL_STAGE_FAKE_FORWARD_IMAGE, payload),

@@ -64,6 +64,10 @@ const {
     createMediaTaskRegistry
 } = require('./media-session');
 const {
+    createSingleForwardWindowController,
+    getForwardGroupScope
+} = require('./single-forward-window');
+const {
     constrainPipResize,
     fitPipBounds,
     getPipOuterSize,
@@ -99,6 +103,7 @@ const {
     CHANNEL_MEDIA_PIP_DRAG,
     CHANNEL_MEDIA_PIP_STATE_CHANGED,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
+    CHANNEL_FORWARD_OPEN_INTENT,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
@@ -268,6 +273,8 @@ const DEFAULT_CONFIG = {
         imageViewerOptimization: false,
         activeQrScan: false,
         singleMediaViewer: false,
+        singleForwardViewer: false,
+        singleForwardGroupIsolation: false,
         goBackMainList: false,
         preventMessageDrag: false,
         preventRecentContactDrag: false,
@@ -310,6 +317,7 @@ let recallViewerWindow = null;
 let mediaViewerWindow = null;
 let mediaViewerWindowReady = null;
 let pendingMediaViewerPresentation = null;
+let mediaViewerVisibilityRevision = 0;
 let mediaPipWindow = null;
 let mediaPipWindowReady = null;
 let mediaPipAspectRatio = 16 / 9;
@@ -327,6 +335,17 @@ const mediaViewerSession = createMediaSessionController({
     isSameItem: isSameInlineMediaItem
 });
 const mediaDownloadTasks = createMediaTaskRegistry();
+const singleForwardWindowController = createSingleForwardWindowController({
+    isEnabled: () => configCache?.interfaceTweaks?.singleForwardViewer === true,
+    isIsolationEnabled: () =>
+        configCache?.interfaceTweaks?.singleForwardGroupIsolation === true,
+    isForwardUrl: url => getWindowRoute(url) === 'forward',
+    getScopeKey: getForwardGroupScope,
+    getFocusedWindow: () => BrowserWindow.getFocusedWindow(),
+    onEvent: (type, details) => recordDiagnostic(
+        'info', `forward.single-window-${type}`, details
+    )
+});
 const mediaPipSession = {
     active: null,
     sticky: false
@@ -573,6 +592,9 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             singleClickMedia: config.interfaceTweaks?.singleClickMediaViewer === true,
             activeQrScan: config.interfaceTweaks?.activeQrScan === true,
             singleMediaWindow: config.interfaceTweaks?.singleMediaViewer === true,
+            singleForwardWindow: config.interfaceTweaks?.singleForwardViewer === true,
+            singleForwardGroupIsolation:
+                config.interfaceTweaks?.singleForwardGroupIsolation === true,
             menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
             preventProfileCard: config.interfaceTweaks?.preventProfileCardHover === true,
             preventRecentDrag: config.interfaceTweaks?.preventRecentContactDrag === true
@@ -743,6 +765,9 @@ function loadConfig() {
 async function saveConfig(nextConfig) {
     const configPath = getConfigPath();
     const wasDebugEnabled = isDebugEnabled();
+    const wasSingleForwardViewerEnabled = configCache?.interfaceTweaks?.singleForwardViewer === true;
+    const wasSingleForwardGroupIsolationEnabled =
+        configCache?.interfaceTweaks?.singleForwardGroupIsolation === true;
     const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateQrScanConfig(nextConfig)));
     const willDebugBeEnabled = process.env.QQNT_TOOLBOX_DEBUG === '1' || normalizedConfig.debug?.enabled === true;
     if (wasDebugEnabled && !willDebugBeEnabled) {
@@ -760,6 +785,12 @@ async function saveConfig(nextConfig) {
     }
     applyVoiceMessageConfig();
     syncMediaViewerConfig();
+    if (wasSingleForwardViewerEnabled !==
+        (configCache.interfaceTweaks.singleForwardViewer === true) ||
+        wasSingleForwardGroupIsolationEnabled !==
+        (configCache.interfaceTweaks.singleForwardGroupIsolation === true)) {
+        singleForwardWindowController.sync(BrowserWindow.getAllWindows());
+    }
     broadcastConfigChanged();
     scheduleAutomaticUpdateCheck(1000);
     return clonePlain(configCache);
@@ -1833,6 +1864,18 @@ function installConfigIpc() {
     globalThis.__qqntToolboxConfigIpcInstalled = true;
     ipcMain.handle(CHANNEL_GET_CONFIG, () => getConfig());
     ipcMain.handle(CHANNEL_SET_CONFIG, (_event, nextConfig) => saveConfig(nextConfig));
+    ipcMain.on(CHANNEL_FORWARD_OPEN_INTENT, event => {
+        const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!sourceWindow) {
+            return;
+        }
+        singleForwardWindowController.markOpenIntent(
+            sourceWindow,
+            getWindowRoute(sourceWindow.webContents.getURL()) === 'forward'
+                ? 'nested'
+            : 'root'
+        );
+    });
     ipcMain.handle(CHANNEL_GET_RECALL_CONTACTS, event =>
         getRecallContactCandidates(BrowserWindow.fromWebContents(event.sender))
     );
@@ -2755,17 +2798,26 @@ function clearMediaViewerSession() {
     mediaViewerSession.clearAll();
 }
 
-function hideMediaViewer() {
+async function hideMediaViewer() {
     if (!mediaViewerWindow || mediaViewerWindow.isDestroyed()) {
-        return;
+        return false;
     }
-    pendingMediaViewerPresentation?.finish(false);
+    const viewerWindow = mediaViewerWindow;
+    const visibilityRevision = ++mediaViewerVisibilityRevision;
+    const presentationId = crypto.randomUUID();
+    const cleared = waitForMediaViewerPresentation(presentationId);
     if (process.platform === 'win32') {
-        mediaViewerWindow.setOpacity(0);
-        mediaViewerWindow.setIgnoreMouseEvents(true);
+        viewerWindow.setOpacity(0);
+        viewerWindow.setIgnoreMouseEvents(true);
     }
-    sendMediaViewerState({ hidden: true });
-    mediaViewerWindow.hide();
+    sendMediaViewerState({ hidden: true, presentationId });
+    const didClear = await cleared;
+    if (visibilityRevision !== mediaViewerVisibilityRevision ||
+        viewerWindow !== mediaViewerWindow || viewerWindow.isDestroyed()) {
+        return false;
+    }
+    viewerWindow.hide();
+    return didClear;
 }
 
 function syncMediaViewerConfig() {
@@ -2840,13 +2892,13 @@ async function ensureMediaViewerWindow(sourceWindow) {
         viewerWindow.setOpacity(WINDOWS_MEDIA_VIEWER_OPACITY);
     }
     mediaViewerWindowReady = viewerWindow.loadFile(path.join(__dirname, 'media-viewer.html'));
-    viewerWindow.on('hide', () => sendMediaViewerState({ hidden: true }));
     viewerWindow.on('minimize', () => sendMediaViewerState({ hidden: true }));
     viewerWindow.on('restore', () => sendMediaViewerState());
     viewerWindow.on('closed', () => {
         if (mediaViewerWindow === viewerWindow) {
             mediaViewerWindow = null;
             mediaViewerWindowReady = null;
+            pendingMediaViewerPresentation?.finish(false);
             clearMediaViewerSession();
         }
     });
@@ -2882,6 +2934,7 @@ function bindMediaViewerSourceWindow(sourceWindow) {
 }
 
 async function activateMediaViewerWindow(viewerWindow, stateOverrides = null) {
+    mediaViewerVisibilityRevision += 1;
     const state = getMediaViewerPublicState();
     const presentationId = crypto.randomUUID();
     const presented = waitForMediaViewerPresentation(presentationId);
@@ -3095,7 +3148,9 @@ async function showMediaViewer(browserWindow, gallery, options = {}) {
                 source: 'chat'
             })?.catch(() => {});
         }
-        await presentMediaViewer(browserWindow);
+        if (options.deferPresentation !== true) {
+            await presentMediaViewer(browserWindow);
+        }
         recordDiagnostic('info', 'media.preview-build-completed', {
             itemCount: previewItems.length,
             selectedIndex,
@@ -3437,6 +3492,8 @@ function bindPendingInlineFileDownload(browserWindow, command) {
             Boolean(getAbsoluteFilePathCandidate([status?.filePath]));
     }, 60 * 1000);
     pending.cancel = error => waiter.cancel(error);
+    presentMediaViewer(browserWindow)
+        .catch(error => warn('pending file media viewer failed:', error?.message || error));
     waiter.promise.then(result => {
         const status = getFileAssistantStatus(result, fileIds);
         const filePath = getAbsoluteFilePathCandidate([status?.filePath]);
@@ -3748,8 +3805,9 @@ async function handleMediaViewerAction(payload = {}) {
         return { ok: completeMediaViewerPresentation(payload.presentationId) };
     }
     if (type === 'close') {
-        hideMediaViewer();
+        const hidden = hideMediaViewer();
         clearMediaViewerSession();
+        await hidden;
         return { ok: true };
     }
     if (type === 'minimize') {
@@ -3871,7 +3929,11 @@ async function openMediaViewerFromRenderer(browserWindow, payload) {
             createPendingInlineFileDownload(),
             new Error('Pending file preview was replaced.')
         );
-        const handled = await showMediaViewer(browserWindow, { items: [item], index: 0 });
+        const handled = await showMediaViewer(
+            browserWindow,
+            { items: [item], index: 0 },
+            { deferPresentation: true }
+        );
         return { handled, activateNative: true };
     }
     if (getWindowRoute(browserWindow.webContents.getURL()) === 'forward') {
@@ -7200,6 +7262,7 @@ function installNativeRequestHandler(browserWindow) {
 
 function installForAllWindows() {
     for (const browserWindow of BrowserWindow.getAllWindows()) {
+        singleForwardWindowController.install(browserWindow);
         installNativeSendHandler(browserWindow);
         installNativeRequestHandler(browserWindow);
     }
@@ -7210,6 +7273,7 @@ function start() {
     getPluginUpdater();
     scheduleAutomaticUpdateCheck();
     app?.once?.('before-quit', () => {
+        singleForwardWindowController.setQuitting(true);
         clearTimeout(mediaPipBoundsSaveTimer);
         if (mediaPipWindow && !mediaPipWindow.isDestroyed()) {
             mediaPipWindow.destroy();
@@ -7224,6 +7288,7 @@ function start() {
     applyVoiceMessageConfig();
     cleanupOldRepairFiles(true).catch(() => {});
     app?.on?.('browser-window-created', (_event, browserWindow) => {
+        singleForwardWindowController.install(browserWindow);
         installNativeSendHandler(browserWindow);
         installNativeRequestHandler(browserWindow);
         if (isVoiceMessageEnabled()) {
