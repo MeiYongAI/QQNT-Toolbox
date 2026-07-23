@@ -47,12 +47,8 @@ function parseByteRange(value, size) {
 
 function createLocalMediaServer(options = {}) {
     const maxEntries = Math.max(1, Number(options.maxEntries) || 1024);
-    const pendingFileWaitMs = Math.max(0, Number(options.pendingFileWaitMs) || 10000);
-    const pendingFilePollMs = Math.max(10, Number(options.pendingFilePollMs) || 40);
-    const pendingFileStableMs = Math.max(0, Number(options.pendingFileStableMs) || 120);
     const entries = new Map();
     const pathTokens = new Map();
-    const pendingTokens = new Map();
     let server = null;
     let startPromise = null;
 
@@ -65,39 +61,10 @@ function createLocalMediaServer(options = {}) {
         while (entries.size > maxEntries) {
             const [token, filePath] = entries.entries().next().value;
             entries.delete(token);
-            pendingTokens.delete(token);
             if (pathTokens.get(filePath) === token) {
                 pathTokens.delete(filePath);
             }
         }
-    }
-
-    async function waitForReadyFile(filePath, waitMs) {
-        const deadline = Date.now() + waitMs;
-        let previousSignature = '';
-        let stableSince = 0;
-        while (Date.now() < deadline) {
-            try {
-                const stat = await fs.promises.stat(filePath);
-                if (stat.isFile() && stat.size > 0) {
-                    const signature = `${stat.size}:${stat.mtimeMs}`;
-                    if (signature !== previousSignature) {
-                        previousSignature = signature;
-                        stableSince = Date.now();
-                    } else if (Date.now() - stableSince >= pendingFileStableMs) {
-                        return stat;
-                    }
-                } else {
-                    previousSignature = '';
-                    stableSince = 0;
-                }
-            } catch {
-                previousSignature = '';
-                stableSince = 0;
-            }
-            await new Promise(resolve => setTimeout(resolve, pendingFilePollMs));
-        }
-        return null;
     }
 
     async function handleRequest(request, response) {
@@ -110,9 +77,7 @@ function createLocalMediaServer(options = {}) {
         touchEntry(token, filePath);
         let stat;
         try {
-            stat = pendingTokens.has(token)
-                ? await waitForReadyFile(filePath, pendingTokens.get(token))
-                : await fs.promises.stat(filePath);
+            stat = await fs.promises.stat(filePath);
         } catch {
             response.writeHead(404).end();
             return;
@@ -121,7 +86,6 @@ function createLocalMediaServer(options = {}) {
             response.writeHead(404).end();
             return;
         }
-        pendingTokens.delete(token);
         const rangeHeader = request.headers.range;
         const range = rangeHeader ? parseByteRange(rangeHeader, stat.size) : null;
         if (rangeHeader && !range) {
@@ -180,7 +144,7 @@ function createLocalMediaServer(options = {}) {
         return await startPromise;
     }
 
-    async function getUrl(filePath, requestOptions = {}) {
+    async function getUrl(filePath) {
         const normalizedPath = path.resolve(String(filePath || ''));
         let token = pathTokens.get(normalizedPath);
         if (!token) {
@@ -190,12 +154,6 @@ function createLocalMediaServer(options = {}) {
             pruneEntries();
         } else {
             touchEntry(token, normalizedPath);
-        }
-        if (requestOptions.waitForReady === true) {
-            pendingTokens.set(
-                token,
-                Math.max(0, Number(requestOptions.waitMs) || pendingFileWaitMs)
-            );
         }
         const port = await start();
         return `http://127.0.0.1:${port}/${token}/${encodeURIComponent(path.basename(normalizedPath))}`;
@@ -207,7 +165,6 @@ function createLocalMediaServer(options = {}) {
         startPromise = null;
         entries.clear();
         pathTokens.clear();
-        pendingTokens.clear();
     }
 
     return Object.freeze({ close, getUrl });

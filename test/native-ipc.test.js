@@ -173,3 +173,12 @@ test('supports predicate matching for correlated native events', async () => {
     });
     assert.equal((await completed.promise).payload.filePath, 'right.jpg');
 });
+
+test('can cancel a native waiter with a reason', async () => {
+    const browserWindow = new FakeBrowserWindow(16);
+    const pending = nativeIpc.createNativeEventWaiter(browserWindow, 'never', 10000);
+
+    assert.equal(pending.cancel(new Error('cancelled media task')), true);
+    assert.equal(pending.cancel(new Error('duplicate cancellation')), false);
+    await assert.rejects(pending.promise, /cancelled media task/);
+});

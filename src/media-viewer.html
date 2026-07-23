@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* https: appimg: local:; media-src 'self' blob: http://127.0.0.1:* https: appimg: local:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* https: appimg: local:">
+    <title>媒体预览</title>
+    <link rel="stylesheet" href="media-viewer.css">
+</head>
+<body>
+    <main id="media-viewer" class="media-viewer is-concealed" data-background="black" tabindex="-1" role="dialog" aria-modal="true" aria-label="媒体预览">
+        <section id="media-stage" class="media-stage" aria-live="polite">
+            <div id="media-slot" class="media-slot"></div>
+            <div id="loading" class="media-loading" hidden aria-label="正在加载"></div>
+            <div id="load-error" class="media-error" hidden>
+                <span>媒体加载失败</span>
+                <button id="retry" class="icon-button" type="button" aria-label="重试">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                </button>
+            </div>
+        </section>
+
+        <button id="previous" class="media-nav media-nav-previous chrome" type="button" aria-label="上一个">
+            <span class="media-nav-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            </span>
+        </button>
+        <button id="next" class="media-nav media-nav-next chrome" type="button" aria-label="下一个">
+            <span class="media-nav-icon">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </span>
+        </button>
+
+        <div class="window-controls chrome">
+            <button id="minimize" class="window-button" type="button" aria-label="最小化">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+            </button>
+            <button id="close" class="window-button window-button-close" type="button" aria-label="关闭">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+
+        <div id="player-controls" class="player-controls chrome" hidden>
+            <div class="player-primary-row">
+                <div class="player-volume-group">
+                    <button id="volume-toggle" class="player-button" type="button" aria-label="静音">
+                        <img class="player-icon icon-volume-off" src="media-player-icons/player_volume_off.png" alt="">
+                        <img class="player-icon icon-volume-small" src="media-player-icons/player_volume_small.png" alt="">
+                        <img class="player-icon icon-volume-on" src="media-player-icons/player_volume_on.png" alt="">
+                    </button>
+                    <input id="volume" class="player-volume" type="range" min="0" max="1" value="1" step="0.01" aria-label="音量">
+                </div>
+
+                <button id="play-pause" class="player-button player-play-pause" type="button" aria-label="播放">
+                    <img class="player-icon icon-play" src="media-player-icons/player_play_big.png" alt="">
+                    <img class="player-icon icon-pause" src="media-player-icons/player_pause_big.png" alt="">
+                </button>
+
+                <div class="player-actions">
+                    <button id="video-fullscreen" class="player-button" type="button" aria-label="全屏播放" aria-pressed="false">
+                        <img class="player-icon icon-fullscreen" src="media-player-icons/player_fullscreen.png" alt="">
+                        <img class="player-icon icon-minimize" src="media-player-icons/player_minimize.png" alt="">
+                    </button>
+                    <button id="picture-in-picture" class="player-button" type="button" aria-label="画中画">
+                        <img class="player-icon" src="media-player-icons/player_pip.png" alt="">
+                    </button>
+                    <button id="player-settings" class="player-button player-settings-button" type="button" aria-label="播放设置" aria-expanded="false" aria-controls="player-settings-menu">
+                        <img class="player-icon" src="media-player-icons/player_settings.png" alt="">
+                        <span id="speed-badge" class="player-badge player-speed-badge" hidden>1x</span>
+                        <span id="quality-badge" class="player-badge player-quality-badge" hidden>HD</span>
+                    </button>
+                </div>
+            </div>
+
+            <div class="player-timeline-row">
+                <span id="current-time" class="player-time">0:00</span>
+                <input id="seek" class="player-seek" type="range" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+                <span id="duration" class="player-time player-remaining-time">−0:00</span>
+            </div>
+
+            <div id="player-settings-menu" class="player-settings-menu" hidden role="dialog" aria-label="播放设置">
+                <div class="player-menu-label">播放速度</div>
+                <div class="player-speed-options" role="group" aria-label="播放速度">
+                    <button type="button" data-speed="0.5">0.5x</button>
+                    <button type="button" data-speed="1">1x</button>
+                    <button type="button" data-speed="1.5">1.5x</button>
+                    <button type="button" data-speed="2">2x</button>
+                </div>
+                <div class="player-quality-row">
+                    <span>画质</span>
+                    <strong id="quality-label">原始</strong>
+                </div>
+            </div>
+        </div>
+
+        <footer class="media-footer chrome">
+            <div class="media-details">
+                <div id="media-count" class="media-count">1 / 1</div>
+                <div class="media-byline">
+                    <span id="media-sender" class="media-sender"></span>
+                    <span id="media-separator" class="media-separator" hidden>•</span>
+                    <button id="media-date" class="media-date" type="button"></button>
+                </div>
+            </div>
+            <div class="media-actions">
+                <button id="save" class="media-action" type="button" aria-label="另存为">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+                </button>
+                <button id="rotate" class="media-action" type="button" aria-label="向左旋转">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="8" height="8" rx="1.5" transform="rotate(-45 9 15)"/><path d="M8 7a8 8 0 1 1-1.7 11.6"/><path d="M8 3v4h4"/></svg>
+                </button>
+                <button id="more" class="media-action" type="button" aria-label="更多" aria-haspopup="menu" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+                </button>
+            </div>
+        </footer>
+
+        <div id="more-menu" class="media-menu chrome" hidden role="menu">
+            <button id="jump-to-message" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6h7v7"/><path d="m10 14 11-8"/><path d="M21 16v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></svg>
+                <span>定位到消息</span>
+            </button>
+            <button id="show-in-folder" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                <span>打开所在文件夹</span>
+            </button>
+            <button id="open-external" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="m10 14 11-11"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+                <span>使用系统程序打开</span>
+            </button>
+            <button id="copy-image" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>复制图片</span>
+            </button>
+            <button id="scan-qr" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><rect x="7" y="7" width="3" height="3" rx=".4"/><rect x="14" y="7" width="3" height="3" rx=".4"/><rect x="7" y="14" width="3" height="3" rx=".4"/><path d="M14 14h1v1h2v2h-3v-3Z"/></svg>
+                <span>识别二维码</span>
+            </button>
+            <button id="menu-save" type="button" role="menuitem">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+                <span>另存为</span>
+            </button>
+        </div>
+
+        <div id="toast" class="media-toast" hidden role="status" aria-live="polite"></div>
+    </main>
+    <script src="qr-result-dialog.js"></script>
+    <script src="media-viewer.js"></script>
+</body>
+</html>

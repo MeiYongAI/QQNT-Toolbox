@@ -13,6 +13,7 @@ export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:转文字', label: '转文字' },
     { id: 'qq:提取文字', label: '提取文字' },
     { id: 'qq:识别图中文字', label: '识别图中文字' },
+    { id: 'toolbox:qr-scan', label: '识别二维码', toolbox: true },
     { id: 'toolbox:voice-save', label: '保存语音', toolbox: true },
     { id: 'qq:保存', label: '保存' },
     { id: 'qq:另存为', label: '另存为' },
@@ -27,7 +28,8 @@ export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
 
 const TOOLBOX_ITEM_CLASSES = new Set([
     'qqnt-toolbox-repeat-menu-item',
-    'qqnt-toolbox-poke-menu-item'
+    'qqnt-toolbox-poke-menu-item',
+    'qqnt-toolbox-qr-scan-menu-item'
 ]);
 
 function normalizeText(value) {

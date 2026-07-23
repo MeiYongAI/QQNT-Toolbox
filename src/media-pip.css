@@ -1,0 +1,339 @@
+:root {
+    color-scheme: dark;
+    font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    background: transparent;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+    user-select: none;
+}
+
+.pip-root {
+    position: fixed;
+    inset: 0;
+    padding: 10px;
+    background: transparent;
+    isolation: isolate;
+}
+
+.pip-root::before {
+    position: absolute;
+    z-index: 0;
+    inset: 10px;
+    border-radius: 8px;
+    box-shadow:
+        0 1px 2px rgba(0, 0, 0, .18),
+        0 3px 8px rgba(0, 0, 0, .24);
+    content: "";
+    pointer-events: none;
+}
+
+.pip-shell {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    border-radius: 8px;
+    background: #000;
+    clip-path: inset(0 round 8px);
+    contain: paint;
+    cursor: default;
+}
+
+.pip-shell.is-dragging {
+    cursor: grabbing;
+}
+
+.pip-video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    background: #000;
+    clip-path: inset(0 round 8px);
+    object-fit: contain;
+    pointer-events: none;
+}
+
+.pip-controls,
+.pip-dim {
+    position: absolute;
+    inset: 0;
+}
+
+.pip-controls {
+    z-index: 3;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms linear;
+}
+
+.pip-shell:hover .pip-controls {
+    opacity: 1;
+}
+
+.pip-dim {
+    background: rgba(0, 0, 0, .22);
+}
+
+.pip-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    color: rgba(255, 255, 255, .82);
+    background: transparent;
+    appearance: none;
+    outline: none;
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.pip-button:hover,
+.pip-button:focus-visible {
+    color: #fff;
+}
+
+.pip-small-button {
+    width: 36px;
+    height: 36px;
+}
+
+.pip-icon {
+    display: block;
+    width: 24px;
+    height: 24px;
+    object-fit: contain;
+    opacity: .82;
+    pointer-events: none;
+    transition: opacity 120ms linear;
+}
+
+.pip-button:hover .pip-icon,
+.pip-button:focus-visible .pip-icon {
+    opacity: 1;
+}
+
+.pip-volume-group,
+.pip-window-actions {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    display: flex;
+    align-items: center;
+    height: 36px;
+    pointer-events: auto;
+}
+
+.pip-volume-group {
+    left: 0;
+    gap: 2px;
+}
+
+.pip-window-actions {
+    right: 0;
+}
+
+.pip-volume {
+    width: 75px;
+}
+
+.pip-volume,
+.pip-seek {
+    height: 14px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    pointer-events: auto;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.pip-volume::-webkit-slider-runnable-track,
+.pip-seek::-webkit-slider-runnable-track {
+    height: 2px;
+    border-radius: 1px;
+    background: linear-gradient(90deg,
+        rgba(255, 255, 255, .94) 0 var(--value, 0%),
+        rgba(255, 255, 255, .34) var(--value, 0%) 100%);
+}
+
+.pip-seek::-webkit-slider-runnable-track {
+    height: var(--seek-height, 2px);
+    background: linear-gradient(90deg,
+        rgba(255, 255, 255, .96) 0 var(--played, 0%),
+        rgba(255, 255, 255, .46) var(--played, 0%) var(--buffered, 0%),
+        rgba(255, 255, 255, .24) var(--buffered, 0%) 100%);
+}
+
+.pip-volume::-webkit-slider-thumb,
+.pip-seek::-webkit-slider-thumb {
+    width: 10px;
+    height: 10px;
+    margin-top: -4px;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+    opacity: 0;
+    -webkit-appearance: none;
+}
+
+.pip-volume:hover::-webkit-slider-thumb,
+.pip-volume:focus-visible::-webkit-slider-thumb,
+.pip-seek:hover::-webkit-slider-thumb,
+.pip-seek:focus-visible::-webkit-slider-thumb {
+    opacity: 1;
+}
+
+.pip-play-pause {
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    left: 50%;
+    width: 60px;
+    height: 60px;
+    transform: translate(-50%, -50%);
+}
+
+.pip-center-icon {
+    display: block;
+    width: 30px;
+    height: 30px;
+    object-fit: contain;
+    opacity: .82;
+    pointer-events: none;
+}
+
+.pip-play-pause:hover .pip-center-icon {
+    opacity: 1;
+}
+
+.pip-play-pause .icon-pause,
+.pip-play-pause.is-playing .icon-play {
+    display: none;
+}
+
+.pip-play-pause.is-playing .icon-pause {
+    display: block;
+}
+
+.pip-playback {
+    position: absolute;
+    z-index: 2;
+    right: 4px;
+    bottom: 4px;
+    left: 4px;
+    height: 26px;
+    pointer-events: auto;
+}
+
+.pip-times {
+    position: absolute;
+    right: 2px;
+    bottom: 7px;
+    left: 2px;
+    display: flex;
+    justify-content: space-between;
+    color: rgba(255, 255, 255, .94);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 14px;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .72);
+}
+
+.pip-seek {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+}
+
+.pip-seek:hover,
+.pip-seek:focus-visible {
+    --seek-height: 4px;
+}
+
+.pip-loading,
+.pip-error {
+    position: absolute;
+    z-index: 4;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
+.pip-loading {
+    width: 28px;
+    height: 28px;
+    border: 2px solid rgba(255, 255, 255, .28);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: pip-spin .72s linear infinite;
+}
+
+.pip-error {
+    color: rgba(255, 255, 255, .82);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.pip-root [hidden] {
+    display: none !important;
+}
+
+.pip-small-button .icon-volume-off,
+.pip-small-button .icon-volume-small {
+    display: none;
+}
+
+.pip-small-button.is-muted .icon-volume-on,
+.pip-small-button.is-low .icon-volume-on {
+    display: none;
+}
+
+.pip-small-button.is-muted .icon-volume-off,
+.pip-small-button.is-low:not(.is-muted) .icon-volume-small {
+    display: block;
+}
+
+@keyframes pip-spin {
+    to {
+        transform: translate(-50%, -50%) rotate(360deg);
+    }
+}
+
+@media (max-width: 280px) {
+    .pip-volume {
+        display: none;
+    }
+}
+
+@media (max-height: 180px) {
+    .pip-times {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pip-controls,
+    .pip-icon {
+        transition: none;
+    }
+}

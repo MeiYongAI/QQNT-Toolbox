@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* https: appimg: local:; media-src 'self' blob: http://127.0.0.1:* https: appimg: local:; style-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* https: appimg: local:">
+    <title>画中画</title>
+    <link rel="stylesheet" href="media-pip.css">
+</head>
+<body>
+    <main id="pip-root" class="pip-root">
+        <section id="pip-shell" class="pip-shell" aria-label="视频画中画">
+            <video id="pip-video" class="pip-video" playsinline preload="auto"></video>
+            <div id="pip-loading" class="pip-loading" hidden aria-label="正在加载"></div>
+            <div id="pip-error" class="pip-error" hidden>视频加载失败</div>
+
+            <div class="pip-controls" aria-hidden="false">
+                <div class="pip-dim"></div>
+
+                <div class="pip-volume-group">
+                    <button id="volume-toggle" class="pip-button pip-small-button" type="button" aria-label="静音">
+                        <img class="pip-icon icon-volume-off" src="media-player-icons/player_volume_off.png" alt="">
+                        <img class="pip-icon icon-volume-small" src="media-player-icons/player_volume_small.png" alt="">
+                        <img class="pip-icon icon-volume-on" src="media-player-icons/player_volume_on.png" alt="">
+                    </button>
+                    <input id="volume" class="pip-volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="音量">
+                </div>
+
+                <div class="pip-window-actions">
+                    <button id="enlarge" class="pip-button pip-small-button" type="button" aria-label="返回媒体预览">
+                        <img class="pip-icon" src="media-player-icons/player_pip_enlarge.png" alt="">
+                    </button>
+                    <button id="close" class="pip-button pip-small-button" type="button" aria-label="关闭">
+                        <img class="pip-icon" src="media-player-icons/player_pip_close.png" alt="">
+                    </button>
+                </div>
+
+                <button id="play-pause" class="pip-button pip-play-pause" type="button" aria-label="播放">
+                    <img class="pip-center-icon icon-play" src="media-player-icons/player_pip_play.png" alt="">
+                    <img class="pip-center-icon icon-pause" src="media-player-icons/player_pip_pause.png" alt="">
+                </button>
+
+                <div class="pip-playback">
+                    <div class="pip-times">
+                        <span id="current-time">0:00</span>
+                        <span id="remaining-time">−0:00</span>
+                    </div>
+                    <input id="seek" class="pip-seek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度">
+                </div>
+            </div>
+        </section>
+    </main>
+    <script src="media-pip.js"></script>
+</body>
+</html>

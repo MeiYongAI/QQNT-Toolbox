@@ -355,7 +355,15 @@ function createNativeEventWaiter(browserWindow, waitResponse, timeoutMs = 10000)
     });
     return {
         promise,
-        cancel: () => removeWaiter(state, waiter)
+        cancel: error => {
+            if (!removeWaiter(state, waiter)) {
+                return false;
+            }
+            if (error) {
+                waiter.reject(error);
+            }
+            return true;
+        }
     };
 }
 

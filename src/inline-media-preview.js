@@ -7,6 +7,7 @@ const VIDEO_EXTENSIONS = new Set([
     '.3g2', '.3gp', '.asf', '.avi', '.flv', '.m2ts', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg',
     '.mts', '.ogv', '.ts', '.vob', '.webm', '.wmv'
 ]);
+const INLINE_PREVIEW_VIDEO_EXTENSIONS = new Set(['.m4v', '.mov', '.mp4', '.ogv', '.webm']);
 const NATIVE_MEDIA_VIEWER_ROUTES = ['/image-viewer', '/video-viewer', '/media-viewer'];
 const SOURCE_URL_PATTERN = /^(?:https?|appimg|local|blob):/i;
 const DATA_IMAGE_URL_PATTERN = /^data:image\/[a-z0-9.+-]+(?:;[^,]*)?,/i;
@@ -27,6 +28,24 @@ function classifyMediaFilePath(...values) {
         }
     }
     return '';
+}
+
+function getMediaExtension(value) {
+    const source = String(value || '').trim().split(/[?#]/, 1)[0];
+    return source ? path.extname(source).toLowerCase() : '';
+}
+
+function isInlineMediaItemSupported(item) {
+    const type = item?.type === 'video' || item?.type === 'image' ? item.type : '';
+    if (!type) {
+        return false;
+    }
+    const extension = [item?.filePath, item?.sourceUrl, item?.name]
+        .map(getMediaExtension)
+        .find(Boolean);
+    return type === 'video'
+        ? INLINE_PREVIEW_VIDEO_EXTENSIONS.has(extension)
+        : IMAGE_EXTENSIONS.has(extension) || /^data:image\//i.test(String(item?.sourceUrl || ''));
 }
 
 function resolveLocalFilePath(value) {
@@ -68,6 +87,44 @@ function firstAbsoluteFilePath(...values) {
     return '';
 }
 
+function normalizeInlineMediaVisit(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const element = value.element || value.ele;
+    const msgId = String(value.msgId || '').trim();
+    const chatType = Number(value.chatType) || 0;
+    if (!msgId || !chatType || !element || typeof element !== 'object') {
+        return null;
+    }
+    return {
+        msgId,
+        msgRandom: String(value.msgRandom || '').trim(),
+        msgSeq: String(value.msgSeq || '').trim(),
+        msgTime: String(value.msgTime || '').trim(),
+        chatType,
+        senderUid: String(value.senderUid || '').trim(),
+        peerUid: String(value.peerUid || '').trim(),
+        guildId: String(value.guildId || '').trim(),
+        element
+    };
+}
+
+function createInlineMediaVisitDownloadPayload(item) {
+    const visit = normalizeInlineMediaVisit(item?.visit);
+    if (!visit) {
+        return null;
+    }
+    const { element, ...context } = visit;
+    return [{
+        downloadType: 1,
+        thumbSize: 0,
+        ...context,
+        ele: element,
+        useHttps: true
+    }];
+}
+
 function extractInlineMediaItem(media, sourceIndex) {
     const context = media?.context;
     if (!context) {
@@ -78,8 +135,20 @@ function extractInlineMediaItem(media, sourceIndex) {
         peerUid: String(context.peerUid || media?.peerUid || '').trim(),
         msgId: String(context.msgId || media?.msgId || '').trim(),
         msgSeq: String(context.msgSeq || media?.msgSeq || '').trim(),
+        msgTime: String(context.msgTime || media?.msgTime || '').trim(),
+        guildId: String(context.guildId || media?.guildId || '').trim(),
         elementId: String(context.elementId || media?.elementId || '').trim()
     };
+    const senderName = String(
+        context.sendRemarkName || context.sendMemberName || context.sendNickName ||
+        context.senderNick || context.senderName || context.senderUid || context.senderUin ||
+        media?.sendRemarkName || media?.sendMemberName || media?.sendNickName ||
+        media?.senderNick || media?.senderName || media?.senderUid || media?.senderUin || ''
+    ).trim();
+    const timestamp = Number(context.msgTime || context.timestamp || media?.msgTime || media?.timestamp);
+    const fileSize = Number(
+        context.video?.fileSize || context.fileSize || media?.fileSize
+    );
     const hasVideo = Boolean(context.video && typeof context.video === 'object');
     const type = hasVideo ? 'video' : 'image';
     const sourceValues = hasVideo
@@ -130,7 +199,10 @@ function extractInlineMediaItem(media, sourceIndex) {
         ...(previewSource ? { previewSource } : {}),
         name: explicitName || path.basename(filePath) || (type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex,
-        identity
+        identity,
+        ...(senderName ? { senderName } : {}),
+        ...(Number.isFinite(timestamp) && timestamp > 0 ? { timestamp } : {}),
+        ...(Number.isFinite(fileSize) && fileSize > 0 ? { fileSize } : {})
     };
 }
 
@@ -164,6 +236,8 @@ function normalizeInlineMediaOpenItem(value) {
         peerUid: String(identity.peerUid || '').trim(),
         msgId: String(identity.msgId || '').trim(),
         msgSeq: String(identity.msgSeq || '').trim(),
+        msgTime: String(identity.msgTime || '').trim(),
+        guildId: String(identity.guildId || '').trim(),
         elementId: String(identity.elementId || '').trim()
     };
     const explicitType = value?.type === 'video' || value?.type === 'image' ? value.type : '';
@@ -176,6 +250,9 @@ function normalizeInlineMediaOpenItem(value) {
     const previewPath = resolveLocalFilePath(previewValue);
     const previewSource = normalizeInlineMediaSourceUrl(previewValue) ||
         (previewPath && path.isAbsolute(previewPath) ? previewPath : '');
+    const senderName = String(value?.senderName || '').trim();
+    const timestamp = Number(value?.timestamp);
+    const fileSize = Number(value?.fileSize);
     return {
         type,
         ...(filePath ? { filePath } : {}),
@@ -186,17 +263,20 @@ function normalizeInlineMediaOpenItem(value) {
             (type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex: Number.isInteger(Number(value?.sourceIndex)) ? Number(value.sourceIndex) : 0,
         identity: normalizedIdentity,
+        ...(senderName ? { senderName } : {}),
+        ...(Number.isFinite(timestamp) && timestamp > 0 ? { timestamp } : {}),
+        ...(Number.isFinite(fileSize) && fileSize > 0 ? { fileSize } : {}),
         ...(pendingFile ? { pendingFile: true } : {})
     };
 }
 
-function createInlineMediaDownloadRequest(item) {
+function createInlineMediaDownloadRequest(item, triggerType = 0) {
     const identity = item?.identity || {};
     const filePath = resolveLocalFilePath(item?.filePath);
     const request = {
         fileModelId: '0',
         downSourceType: 0,
-        triggerType: 1,
+        triggerType: Number(triggerType) === 1 ? 1 : 0,
         msgId: String(identity.msgId || '').trim(),
         chatType: Number(identity.chatType) || 0,
         peerUid: String(identity.peerUid || '').trim(),
@@ -211,8 +291,8 @@ function createInlineMediaDownloadRequest(item) {
         : null;
 }
 
-function createInlineMediaDownloadPayload(item) {
-    const getReq = createInlineMediaDownloadRequest(item);
+function createInlineMediaDownloadPayload(item, triggerType = 0) {
+    const getReq = createInlineMediaDownloadRequest(item, triggerType);
     return getReq ? [{ getReq }, null] : null;
 }
 
@@ -340,14 +420,17 @@ module.exports = {
     classifyMediaFilePath,
     createInlineMediaDownloadPayload,
     createInlineMediaDownloadRequest,
+    createInlineMediaVisitDownloadPayload,
     extractInlineMediaGallery,
     extractInlineMediaPreview,
     getInlineMediaMessageKeys,
     hasSameInlineMediaContent,
+    isInlineMediaItemSupported,
     isNativeMediaViewerUrl,
     isSameInlineMediaItem,
     mergeInlineMediaItems,
     normalizeInlineMediaOpenItem,
     normalizeInlineMediaSourceUrl,
+    normalizeInlineMediaVisit,
     resolveInlineReplyPreview
 };

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, shell } = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const os = require('os');
@@ -42,8 +42,10 @@ const { getTencentFilesRoots } = require('./qq-data-root');
 const {
     classifyMediaFilePath,
     createInlineMediaDownloadPayload,
+    createInlineMediaVisitDownloadPayload,
     extractInlineMediaGallery,
     getInlineMediaMessageKeys,
+    isInlineMediaItemSupported,
     isNativeMediaViewerUrl,
     isSameInlineMediaItem,
     mergeInlineMediaItems,
@@ -57,17 +59,45 @@ const {
     sanitizeMarketFaceData
 } = require('./emoji-image-preview');
 const { createLocalMediaServer } = require('./local-media-server');
+const {
+    createMediaSessionController,
+    createMediaTaskRegistry
+} = require('./media-session');
+const {
+    constrainPipResize,
+    fitPipBounds,
+    getPipOuterSize,
+    movePipBounds,
+    normalizeAspectRatio,
+    snapPipBounds
+} = require('./media-pip-window');
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
 const { createPluginUpdater } = require('./plugin-updater');
+const {
+    expandQrScanPathCandidates,
+    getOpenableQrUrl,
+    isQqThumbnailPath,
+    migrateQrScanConfig,
+    normalizeQrScanInfos,
+    summarizeQrScanValue
+} = require('./qr-scan');
 const {
     CHANNEL_GET_CONFIG,
     CHANNEL_SET_CONFIG,
     CHANNEL_CONFIG_CHANGED,
     CHANNEL_DIAGNOSTIC_EVENT,
     CHANNEL_DIAGNOSTIC_ACTION,
-    CHANNEL_INLINE_MEDIA_PREVIEW,
-    CHANNEL_OPEN_INLINE_MEDIA,
-    CHANNEL_PREPARE_INLINE_MEDIA,
+    CHANNEL_OPEN_MEDIA_VIEWER,
+    CHANNEL_SCAN_QR_CODE,
+    CHANNEL_QR_RESULT_ACTION,
+    CHANNEL_MEDIA_VIEWER_GET_STATE,
+    CHANNEL_MEDIA_VIEWER_PREPARE,
+    CHANNEL_MEDIA_VIEWER_ACTION,
+    CHANNEL_MEDIA_VIEWER_STATE_CHANGED,
+    CHANNEL_MEDIA_PIP_GET_STATE,
+    CHANNEL_MEDIA_PIP_ACTION,
+    CHANNEL_MEDIA_PIP_DRAG,
+    CHANNEL_MEDIA_PIP_STATE_CHANGED,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
@@ -116,6 +146,8 @@ const RETRY_DELAY_MS = 800;
 const REPAIR_FILE_TTL_MS = 24 * 60 * 60 * 1000;
 const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
 const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
+const WINDOWS_MEDIA_VIEWER_OPACITY = 254 / 255;
+const MEDIA_VIEWER_PRESENT_TIMEOUT_MS = 750;
 const SET_MESSAGE_REACTION_COMMAND = 'nodeIKernelMsgService/setMsgEmojiLikes';
 const FORWARD_RESOURCE_DOWNLOAD_TIMEOUT_MS = 60 * 1000;
 const MAX_INLINE_MEDIA_PEERS = 40;
@@ -126,7 +158,7 @@ const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
 const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
 const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
 const POKE_RECALL_COMMAND = 'OidbSvcTrpcTcp.0xF51_1';
-const POKE_NATIVE_BINARY = 'poke-bridge.win32-x64.node';
+const WINDOWS_NATIVE_BINARY = 'poke-bridge.win32-x64.node';
 const MAX_RECALL_CACHE_SIZE = 100000;
 const IMAGE_EXTENSIONS = new Set([
     '.apng', '.bmp', '.gif', '.jfif', '.jpeg', '.jpg', '.png', '.webp'
@@ -219,6 +251,12 @@ const DEFAULT_CONFIG = {
     interfaceTweaks: {
         inlineMediaViewer: false,
         inlineMediaBackground: 'black',
+        mediaPipBounds: {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+        },
         openEmojiAsImage: false,
         singleClickMediaViewer: false,
         showFullUnreadCount: false,
@@ -228,7 +266,7 @@ const DEFAULT_CONFIG = {
             catalog: []
         },
         imageViewerOptimization: false,
-        disableImageQrScan: false,
+        activeQrScan: false,
         singleMediaViewer: false,
         goBackMainList: false,
         preventMessageDrag: false,
@@ -259,6 +297,7 @@ const cleanupState = {
 };
 const pokeState = {
     bridge: null,
+    bridgeLoadAttempted: false,
     bridgeInstalled: false,
     wrapperApi: null,
     wrapperSession: null,
@@ -268,9 +307,29 @@ const pokeState = {
 const recallStates = new Map();
 let configCache = null;
 let recallViewerWindow = null;
+let mediaViewerWindow = null;
+let mediaViewerWindowReady = null;
+let pendingMediaViewerPresentation = null;
+let mediaPipWindow = null;
+let mediaPipWindowReady = null;
+let mediaPipAspectRatio = 16 / 9;
+let mediaPipBoundsSaveTimer = null;
+let mediaPipApplyingBounds = false;
+let mediaPipDragging = false;
+let mediaPipDragOrigin = null;
+let mediaPipNativeHandle = null;
 const recallViewerRecordIndex = new Map();
 const recallViewerState = {
     accountUin: ''
+};
+const mediaViewerSession = createMediaSessionController({
+    createId: () => crypto.randomUUID(),
+    isSameItem: isSameInlineMediaItem
+});
+const mediaDownloadTasks = createMediaTaskRegistry();
+const mediaPipSession = {
+    active: null,
+    sticky: false
 };
 const inlineMediaServer = createLocalMediaServer();
 let reactionEmojiCatalog = null;
@@ -512,6 +571,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             inlineMedia: config.interfaceTweaks?.inlineMediaViewer === true,
             emojiAsImage: config.interfaceTweaks?.openEmojiAsImage === true,
             singleClickMedia: config.interfaceTweaks?.singleClickMediaViewer === true,
+            activeQrScan: config.interfaceTweaks?.activeQrScan === true,
             singleMediaWindow: config.interfaceTweaks?.singleMediaViewer === true,
             menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
             preventProfileCard: config.interfaceTweaks?.preventProfileCardHover === true,
@@ -628,10 +688,26 @@ function normalizeSimplifyItemList(items, prefix) {
     return Array.from(normalized.values());
 }
 
+function normalizeMediaPipBounds(value) {
+    const number = key => {
+        const result = Number(value?.[key]);
+        return Number.isFinite(result) ? Math.round(result) : 0;
+    };
+    return {
+        x: number('x'),
+        y: number('y'),
+        width: Math.max(0, number('width')),
+        height: Math.max(0, number('height'))
+    };
+}
+
 function normalizeSimplifyConfig(config) {
     if (!INLINE_MEDIA_BACKGROUND_VALUES.has(config.interfaceTweaks?.inlineMediaBackground)) {
         config.interfaceTweaks.inlineMediaBackground = DEFAULT_CONFIG.interfaceTweaks.inlineMediaBackground;
     }
+    config.interfaceTweaks.mediaPipBounds = normalizeMediaPipBounds(
+        config.interfaceTweaks.mediaPipBounds
+    );
     config.sideBar.top = normalizeSimplifyItemList(config.sideBar.top, 'sidebar-top');
     config.sideBar.bottom = normalizeSimplifyItemList(config.sideBar.bottom, 'sidebar-bottom');
     config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
@@ -652,7 +728,9 @@ function loadConfig() {
             fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
             return clonePlain(configCache);
         }
-        configCache = normalizeSimplifyConfig(mergeConfig(JSON.parse(fsSync.readFileSync(configPath, 'utf8'))));
+        configCache = normalizeSimplifyConfig(mergeConfig(migrateQrScanConfig(
+            JSON.parse(fsSync.readFileSync(configPath, 'utf8'))
+        )));
         fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
         return clonePlain(configCache);
     } catch (error) {
@@ -665,7 +743,7 @@ function loadConfig() {
 async function saveConfig(nextConfig) {
     const configPath = getConfigPath();
     const wasDebugEnabled = isDebugEnabled();
-    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(nextConfig));
+    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateQrScanConfig(nextConfig)));
     const willDebugBeEnabled = process.env.QQNT_TOOLBOX_DEBUG === '1' || normalizedConfig.debug?.enabled === true;
     if (wasDebugEnabled && !willDebugBeEnabled) {
         recordDiagnostic('info', 'diagnostics.disabled');
@@ -681,6 +759,7 @@ async function saveConfig(nextConfig) {
         });
     }
     applyVoiceMessageConfig();
+    syncMediaViewerConfig();
     broadcastConfigChanged();
     scheduleAutomaticUpdateCheck(1000);
     return clonePlain(configCache);
@@ -743,7 +822,12 @@ function applyVoiceMessageConfig() {
 function registerPokeAccount(browserWindow, value) {
     const selfUin = normalizeUin(value);
     if (selfUin && browserWindow && !browserWindow.isDestroyed()) {
-        getWindowState(browserWindow).selfUin = selfUin;
+        const state = getWindowState(browserWindow);
+        if (state.selfUin && state.selfUin !== selfUin) {
+            state.inlineMediaByPeer.clear();
+            state.inlineReplySourcesByPeer.clear();
+        }
+        state.selfUin = selfUin;
         getRecallState(selfUin);
     }
     return Boolean(selfUin);
@@ -982,16 +1066,28 @@ async function getRecallContactCandidates(browserWindow) {
     return contacts;
 }
 
+function getWindowsNativeBridge() {
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+        return null;
+    }
+    if (pokeState.bridge || pokeState.bridgeLoadAttempted) {
+        return pokeState.bridge;
+    }
+    pokeState.bridgeLoadAttempted = true;
+    try {
+        pokeState.bridge = require(path.join(__dirname, '..', 'native', WINDOWS_NATIVE_BINARY));
+    } catch {
+        pokeState.bridge = null;
+    }
+    return pokeState.bridge;
+}
+
 function installPokeBridge() {
     if (pokeState.bridgeInstalled) {
         return true;
     }
-    if (process.platform !== 'win32' || process.arch !== 'x64') {
-        return false;
-    }
     try {
-        pokeState.bridge ||= require(path.join(__dirname, '..', 'native', POKE_NATIVE_BINARY));
-        const code = Number(pokeState.bridge?.install?.());
+        const code = Number(getWindowsNativeBridge()?.install?.());
         pokeState.bridgeInstalled = code === 1 || code === 2;
         return pokeState.bridgeInstalled;
     } catch {
@@ -1773,29 +1869,65 @@ function installConfigIpc() {
         }, 250).unref?.();
         return result;
     });
-    ipcMain.handle(CHANNEL_OPEN_INLINE_MEDIA, async (event, payload) => {
+    ipcMain.handle(CHANNEL_OPEN_MEDIA_VIEWER, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         const summary = {
             type: payload?.type || '',
             source: payload?.source || 'message'
         };
         try {
-            const opened = browserWindow
-                ? await openInlineMediaFromRenderer(browserWindow, payload)
-                : false;
-            recordDiagnostic(opened ? 'info' : 'warn', 'media.inline-open', {
+            const decision = browserWindow
+                ? await openMediaViewerFromRenderer(browserWindow, payload)
+                : { handled: false, activateNative: true };
+            recordDiagnostic(decision.handled ? 'info' : 'warn', 'media.viewer-open', {
                 ...summary,
-                ok: opened
+                ok: decision.handled,
+                activateNative: decision.activateNative
             });
-            return opened;
+            return decision;
         } catch (error) {
-            recordDiagnostic('error', 'media.inline-open-failed', { ...summary, error });
-            return false;
+            recordDiagnostic('error', 'media.viewer-open-failed', { ...summary, error });
+            return { handled: false, activateNative: true };
         }
     });
-    ipcMain.handle(CHANNEL_PREPARE_INLINE_MEDIA, async (event, payload) => {
+    ipcMain.handle(CHANNEL_SCAN_QR_CODE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
-        return browserWindow ? await prepareInlineMedia(browserWindow, payload) : null;
+        return browserWindow
+            ? await scanQrCode(browserWindow, payload)
+            : { ok: false, reason: 'window-unavailable' };
+    });
+    ipcMain.handle(CHANNEL_QR_RESULT_ACTION, (event, payload) =>
+        handleQrResultAction(event, payload)
+    );
+    ipcMain.handle(CHANNEL_MEDIA_VIEWER_GET_STATE, event =>
+        isToolboxMediaViewerSender(event.sender) ? getMediaViewerPublicState() : null
+    );
+    ipcMain.handle(CHANNEL_MEDIA_VIEWER_PREPARE, async (event, payload) => {
+        if (!isToolboxMediaViewerSender(event.sender)) {
+            return null;
+        }
+        const sourceWindow = getMediaViewerSourceWindow(payload?.galleryId);
+        return sourceWindow ? await prepareMediaViewerItem(sourceWindow, payload) : null;
+    });
+    ipcMain.handle(CHANNEL_MEDIA_VIEWER_ACTION, async (event, payload) => {
+        if (!isToolboxMediaViewerSender(event.sender)) {
+            return { ok: false };
+        }
+        return await handleMediaViewerAction(payload);
+    });
+    ipcMain.handle(CHANNEL_MEDIA_PIP_GET_STATE, event =>
+        isToolboxMediaPipSender(event.sender) ? getMediaPipPublicState() : null
+    );
+    ipcMain.handle(CHANNEL_MEDIA_PIP_ACTION, async (event, payload) => {
+        if (!isToolboxMediaPipSender(event.sender)) {
+            return { ok: false };
+        }
+        return await handleMediaPipAction(payload);
+    });
+    ipcMain.on(CHANNEL_MEDIA_PIP_DRAG, (event, payload) => {
+        if (isToolboxMediaPipSender(event.sender)) {
+            handleMediaPipDrag(payload);
+        }
     });
     ipcMain.handle(CHANNEL_OPEN_EMOJI_AS_IMAGE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
@@ -1974,9 +2106,7 @@ function getWindowState(browserWindow) {
             inFlightRecords: new Set(),
             pluginAttrIds: new Map(),
             inlineMediaByPeer: new Map(),
-            inlineReplySourcesByPeer: new Map(),
-            inlineMediaGallery: null,
-            pendingInlineFileDownload: null
+            inlineReplySourcesByPeer: new Map()
         };
         windowStates.set(browserWindow, state);
     }
@@ -2044,8 +2174,190 @@ function replyWithNativeResult(event, request, result) {
     return true;
 }
 
-function replyWithEmptyQrResult(event, request) {
-    return replyWithNativeResult(event, request, { infos: [] });
+function normalizeQrFilePath(value) {
+    let source = normalizeText(value);
+    if (!source) {
+        return '';
+    }
+    if (/^appimg:\/\//i.test(source)) {
+        source = source.replace(/^appimg:\/\/+?/i, '');
+        try {
+            source = decodeURIComponent(source);
+        } catch {
+        }
+        if (/^\/[a-z]:[\\/]/i.test(source)) {
+            source = source.slice(1);
+        }
+    } else if (/^file:/i.test(source)) {
+        try {
+            source = fileURLToPath(source);
+        } catch {
+            return '';
+        }
+    }
+    return path.isAbsolute(source) ? path.normalize(source) : '';
+}
+
+async function resolveQrScanFile(browserWindow, payload) {
+    const candidatePaths = expandQrScanPathCandidates([
+        payload?.filePath,
+        ...(Array.isArray(payload?.candidatePaths) ? payload.candidatePaths : []),
+        payload?.sourceUrl
+    ].map(normalizeQrFilePath).filter(Boolean));
+    const existingPaths = candidatePaths
+        .map(filePath => getExistingFilePath([filePath]))
+        .filter(Boolean);
+    const preferredPath = existingPaths[0] || '';
+    const unresolvedPath = candidatePaths.find(path.isAbsolute) || '';
+    const item = normalizeInlineMediaOpenItem({
+        ...payload,
+        type: 'image',
+        ...(unresolvedPath ? { filePath: unresolvedPath } : {})
+    });
+    if (!item || item.type !== 'image') {
+        return preferredPath;
+    }
+    if (preferredPath && !isQqThumbnailPath(preferredPath)) {
+        return preferredPath;
+    }
+    if (!createInlineMediaDownloadPayload(item)) {
+        return preferredPath;
+    }
+    try {
+        const downloadedPath = await downloadInlineMedia(browserWindow, item, {
+            triggerType: 0,
+            source: 'qr-scan'
+        });
+        return getExistingFilePath([downloadedPath]) || preferredPath;
+    } catch (error) {
+        if (preferredPath) {
+            recordDiagnostic('info', 'qr-scan.original-unavailable', {
+                reason: error?.message || String(error)
+            });
+            return preferredPath;
+        }
+        throw error;
+    }
+}
+
+function getQrScanFileSummary(filePath) {
+    let bytes = 0;
+    let width = 0;
+    let height = 0;
+    try {
+        bytes = fsSync.statSync(filePath).size;
+    } catch {
+    }
+    try {
+        const size = nativeImage.createFromPath(filePath).getSize();
+        width = Number(size.width) || 0;
+        height = Number(size.height) || 0;
+    } catch {
+    }
+    return {
+        source: /[\\/]Ori[\\/]/i.test(filePath)
+            ? 'qq-original'
+            : isQqThumbnailPath(filePath) ? 'qq-thumbnail' : 'local',
+        extension: path.extname(filePath).toLowerCase(),
+        bytes,
+        width,
+        height
+    };
+}
+
+async function invokeQqQrScanner(browserWindow, filePath) {
+    const service = getQqWrapperSession()?.getNodeMiscService?.();
+    if (typeof service?.scanQBar === 'function') {
+        return {
+            method: 'wrapper',
+            result: await Promise.resolve(service.scanQBar(filePath))
+        };
+    }
+    return {
+        method: 'ipc',
+        result: await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            QR_SCAN_COMMAND,
+            [filePath],
+            true,
+            30000
+        )
+    };
+}
+
+async function scanQrCode(browserWindow, payload) {
+    if (getInterfaceTweaksConfig()?.activeQrScan !== true) {
+        return { ok: false, reason: 'disabled' };
+    }
+    if (!browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+        return { ok: false, reason: 'window-unavailable' };
+    }
+    try {
+        const filePath = await resolveQrScanFile(browserWindow, payload);
+        if (!filePath) {
+            return {
+                ok: false,
+                reason: 'image-unavailable',
+                message: '图片尚未下载完成'
+            };
+        }
+        const scan = await invokeQqQrScanner(browserWindow, filePath);
+        const result = scan.result;
+        if (isNativeFailure(result)) {
+            throw new Error('QQ QBar returned a failure result.');
+        }
+        const infos = normalizeQrScanInfos(result);
+        recordDiagnostic('info', 'qr-scan.completed', {
+            method: scan.method,
+            resultCount: infos.length,
+            file: getQrScanFileSummary(filePath),
+            resultShape: summarizeQrScanValue(result)
+        });
+        return {
+            ok: true,
+            count: infos.length,
+            infos: infos.map(info => ({
+                text: info.text,
+                url: getOpenableQrUrl(info.text)
+            })),
+            ...(infos.length ? {} : { message: '未识别到二维码' })
+        };
+    } catch (error) {
+        recordDiagnostic('warn', 'qr-scan.failed', {
+            reason: error?.message || String(error)
+        });
+        return {
+            ok: false,
+            reason: 'scan-failed',
+            message: '二维码识别失败'
+        };
+    }
+}
+
+async function handleQrResultAction(event, payload = {}) {
+    const type = normalizeText(payload.type);
+    if (type === 'open') {
+        const url = getOpenableQrUrl(payload.url);
+        if (!url) {
+            return { ok: false, reason: 'invalid-url' };
+        }
+        if (isToolboxMediaViewerSender(event?.sender)) {
+            hideMediaViewer();
+            clearMediaViewerSession();
+        }
+        await shell.openExternal(url);
+        return { ok: true };
+    }
+    if (type === 'copy') {
+        const content = String(payload.text ?? '');
+        if (!content || content.length > 128 * 1024) {
+            return { ok: false, reason: 'invalid-text' };
+        }
+        clipboard.writeText(content);
+        return { ok: true };
+    }
+    return { ok: false, reason: 'invalid-action' };
 }
 
 function isMediaViewerWindow(browserWindow) {
@@ -2057,10 +2369,576 @@ function isMediaViewerWindow(browserWindow) {
 
 function closeExistingMediaViewers(sender) {
     for (const browserWindow of BrowserWindow.getAllWindows()) {
-        if (browserWindow.webContents !== sender && isMediaViewerWindow(browserWindow)) {
+        if (browserWindow !== mediaViewerWindow && browserWindow.webContents !== sender &&
+            isMediaViewerWindow(browserWindow)) {
             browserWindow.close();
         }
     }
+}
+
+function isToolboxMediaViewerSender(sender) {
+    return Boolean(
+        mediaViewerWindow && !mediaViewerWindow.isDestroyed() &&
+        mediaViewerWindow.webContents === sender
+    );
+}
+
+function isToolboxMediaPipSender(sender) {
+    return Boolean(
+        mediaPipWindow && !mediaPipWindow.isDestroyed() &&
+        mediaPipWindow.webContents === sender
+    );
+}
+
+function normalizeMediaPlaybackState(value) {
+    const currentTime = Number(value?.currentTime);
+    const volume = Number(value?.volume);
+    const playbackRate = Number(value?.playbackRate);
+    return {
+        currentTime: Number.isFinite(currentTime) && currentTime >= 0 ? currentTime : 0,
+        paused: value?.paused !== false,
+        volume: Number.isFinite(volume) ? Math.min(Math.max(volume, 0), 1) : 1,
+        muted: value?.muted === true,
+        playbackRate: Number.isFinite(playbackRate)
+            ? Math.min(Math.max(playbackRate, 0.25), 4)
+            : 1
+    };
+}
+
+function cloneMediaViewerGallery(gallery, selectedIndex = gallery?.index) {
+    const items = Array.isArray(gallery?.items)
+        ? gallery.items.map(item => ({ ...item }))
+        : [];
+    const index = Number(selectedIndex);
+    return {
+        id: normalizeText(gallery?.id),
+        index: Number.isInteger(index)
+            ? Math.min(Math.max(index, 0), Math.max(0, items.length - 1))
+            : 0,
+        items
+    };
+}
+
+function getMediaPipPublicState() {
+    const active = mediaPipSession.active;
+    const gallery = active?.gallery;
+    const index = gallery?.index || 0;
+    return {
+        galleryId: gallery?.id || '',
+        index,
+        item: active?.viewerItems[index]
+            ? { ...active.viewerItems[index] }
+            : null,
+        playback: active?.playback
+            ? { ...active.playback }
+            : normalizeMediaPlaybackState()
+    };
+}
+
+function sendMediaPipState(payload = getMediaPipPublicState()) {
+    if (!mediaPipWindow || mediaPipWindow.isDestroyed() ||
+        mediaPipWindow.webContents.isDestroyed()) {
+        return false;
+    }
+    mediaPipWindow.webContents.send(CHANNEL_MEDIA_PIP_STATE_CHANGED, payload);
+    return true;
+}
+
+function clearMediaPipSession() {
+    mediaPipSession.active = null;
+}
+
+function hideMediaPipWindow() {
+    if (!mediaPipWindow || mediaPipWindow.isDestroyed()) {
+        return;
+    }
+    mediaPipDragging = false;
+    mediaPipDragOrigin = null;
+    endMediaPipNativeMove();
+    sendMediaPipState({ hidden: true });
+    mediaPipWindow.hide();
+}
+
+function closeMediaPipSession() {
+    hideMediaPipWindow();
+    clearMediaPipSession();
+}
+
+function getMediaPipDisplay(sourceWindow) {
+    const reference = mediaViewerWindow && !mediaViewerWindow.isDestroyed()
+        ? mediaViewerWindow
+        : sourceWindow;
+    try {
+        return screen.getDisplayMatching(reference.getBounds());
+    } catch {
+        return screen.getPrimaryDisplay();
+    }
+}
+
+function scheduleMediaPipBoundsSave() {
+    if (mediaPipApplyingBounds || mediaPipDragging ||
+        !mediaPipWindow || mediaPipWindow.isDestroyed()) {
+        return;
+    }
+    const bounds = normalizeMediaPipBounds(mediaPipWindow.getBounds());
+    const config = configCache || loadConfig();
+    config.interfaceTweaks.mediaPipBounds = bounds;
+    clearTimeout(mediaPipBoundsSaveTimer);
+    mediaPipBoundsSaveTimer = setTimeout(() => {
+        mediaPipBoundsSaveTimer = null;
+        const configPath = getConfigPath();
+        fs.mkdir(path.dirname(configPath), { recursive: true })
+            .then(() => fs.writeFile(configPath, JSON.stringify(configCache, null, 2), 'utf8'))
+            .catch(error => warn('media PiP bounds save failed:', error?.message || error));
+    }, 250);
+    mediaPipBoundsSaveTimer.unref?.();
+}
+
+function setMediaPipBounds(viewerWindow, bounds) {
+    if (!bounds || viewerWindow.isDestroyed()) {
+        return;
+    }
+    mediaPipApplyingBounds = true;
+    try {
+        viewerWindow.setBounds(bounds);
+    } finally {
+        mediaPipApplyingBounds = false;
+    }
+}
+
+function moveMediaPipWindow(dx, dy) {
+    if (mediaPipNativeHandle) {
+        try {
+            const result = Number(getWindowsNativeBridge()?.moveWindow?.(
+                mediaPipNativeHandle,
+                Math.round(dx),
+                Math.round(dy)
+            ));
+            if (result === 1) {
+                return;
+            }
+        } catch {
+        }
+        endMediaPipNativeMove();
+    }
+    setMediaPipBounds(mediaPipWindow, movePipBounds(mediaPipDragOrigin, dx, dy));
+}
+
+function beginMediaPipNativeMove() {
+    endMediaPipNativeMove();
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+        return;
+    }
+    try {
+        const handle = mediaPipWindow.getNativeWindowHandle();
+        const result = Number(getWindowsNativeBridge()?.beginWindowMove?.(handle));
+        if (result === 1) {
+            mediaPipNativeHandle = handle;
+        }
+    } catch {
+    }
+}
+
+function endMediaPipNativeMove() {
+    if (mediaPipNativeHandle) {
+        try {
+            getWindowsNativeBridge()?.endWindowMove?.();
+        } catch {
+        }
+    }
+    mediaPipNativeHandle = null;
+}
+
+function handleMediaPipDrag(payload = {}) {
+    if (!mediaPipWindow || mediaPipWindow.isDestroyed()) {
+        mediaPipDragging = false;
+        mediaPipDragOrigin = null;
+        endMediaPipNativeMove();
+        return;
+    }
+    const phase = normalizeText(payload.phase);
+    if (phase === 'start') {
+        mediaPipDragging = true;
+        mediaPipDragOrigin = mediaPipWindow.getBounds();
+        beginMediaPipNativeMove();
+        return;
+    }
+    if (phase === 'end') {
+        const wasDragging = mediaPipDragging;
+        mediaPipDragging = false;
+        mediaPipDragOrigin = null;
+        endMediaPipNativeMove();
+        if (wasDragging) {
+            snapMediaPipWindow();
+        }
+        return;
+    }
+    const dx = Number(payload.dx);
+    const dy = Number(payload.dy);
+    if (phase !== 'move' || !mediaPipDragging || !mediaPipDragOrigin ||
+        !Number.isFinite(dx) || !Number.isFinite(dy)) {
+        return;
+    }
+    moveMediaPipWindow(dx, dy);
+}
+
+function configureMediaPipGeometry(viewerWindow, sourceWindow, aspectRatio) {
+    mediaPipAspectRatio = normalizeAspectRatio(aspectRatio);
+    const display = getMediaPipDisplay(sourceWindow);
+    const workArea = display.workArea || display.bounds;
+    const bounds = fitPipBounds(
+        getConfig().interfaceTweaks.mediaPipBounds,
+        workArea,
+        mediaPipAspectRatio
+    );
+    const minimum = getPipOuterSize(workArea, mediaPipAspectRatio, 1);
+    const maximum = getPipOuterSize(workArea, mediaPipAspectRatio, Number.MAX_SAFE_INTEGER);
+    viewerWindow.setMinimumSize(minimum.width, minimum.height);
+    viewerWindow.setMaximumSize(maximum.width, maximum.height);
+    setMediaPipBounds(viewerWindow, bounds);
+}
+
+function handleMediaPipResize(event, proposedBounds, details) {
+    if (!mediaPipWindow || mediaPipWindow.isDestroyed()) {
+        return;
+    }
+    const current = mediaPipWindow.getBounds();
+    const display = screen.getDisplayMatching(current);
+    const workArea = display.workArea || display.bounds;
+    const bounds = constrainPipResize(
+        current,
+        proposedBounds,
+        details?.edge,
+        workArea,
+        mediaPipAspectRatio
+    );
+    if (!bounds) {
+        return;
+    }
+    event.preventDefault();
+    setMediaPipBounds(mediaPipWindow, bounds);
+    scheduleMediaPipBoundsSave();
+}
+
+function snapMediaPipWindow() {
+    if (mediaPipDragging || !mediaPipWindow || mediaPipWindow.isDestroyed()) {
+        return;
+    }
+    const current = mediaPipWindow.getBounds();
+    const display = screen.getDisplayMatching(current);
+    const snapped = snapPipBounds(current, display.workArea || display.bounds);
+    if (snapped && (snapped.x !== current.x || snapped.y !== current.y)) {
+        setMediaPipBounds(mediaPipWindow, snapped);
+    }
+    scheduleMediaPipBoundsSave();
+}
+
+async function ensureMediaPipWindow(sourceWindow, aspectRatio) {
+    if (mediaPipWindow && !mediaPipWindow.isDestroyed()) {
+        await mediaPipWindowReady;
+        configureMediaPipGeometry(mediaPipWindow, sourceWindow, aspectRatio);
+        return mediaPipWindow;
+    }
+    const display = getMediaPipDisplay(sourceWindow);
+    const initialBounds = fitPipBounds(
+        getConfig().interfaceTweaks.mediaPipBounds,
+        display.workArea || display.bounds,
+        aspectRatio
+    );
+    const viewerWindow = new BrowserWindow({
+        ...initialBounds,
+        show: false,
+        frame: false,
+        transparent: true,
+        resizable: true,
+        maximizable: false,
+        minimizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        focusable: false,
+        hasShadow: false,
+        backgroundColor: '#00000000',
+        title: `${PLUGIN_NAME} - 画中画`,
+        webPreferences: {
+            preload: path.join(__dirname, 'media-pip-preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            backgroundThrottling: false
+        }
+    });
+    mediaPipWindow = viewerWindow;
+    mediaPipWindowReady = viewerWindow.loadFile(path.join(__dirname, 'media-pip.html'));
+    viewerWindow.setMenuBarVisibility(false);
+    viewerWindow.on('will-resize', handleMediaPipResize);
+    viewerWindow.on('resize', scheduleMediaPipBoundsSave);
+    viewerWindow.on('move', scheduleMediaPipBoundsSave);
+    viewerWindow.on('moved', snapMediaPipWindow);
+    viewerWindow.on('closed', () => {
+        if (mediaPipWindow === viewerWindow) {
+            mediaPipDragging = false;
+            mediaPipDragOrigin = null;
+            endMediaPipNativeMove();
+            mediaPipWindow = null;
+            mediaPipWindowReady = null;
+            clearMediaPipSession();
+        }
+    });
+    try {
+        await mediaPipWindowReady;
+        configureMediaPipGeometry(viewerWindow, sourceWindow, aspectRatio);
+    } catch (error) {
+        if (!viewerWindow.isDestroyed()) {
+            viewerWindow.destroy();
+        }
+        throw error;
+    }
+    return viewerWindow;
+}
+
+function getMediaViewerSourceWindow(galleryId = '') {
+    const sourceWindow = mediaViewerSession.get(null, normalizeText(galleryId))?.sourceWindow;
+    if (!sourceWindow || sourceWindow.isDestroyed() || sourceWindow.webContents.isDestroyed()) {
+        return null;
+    }
+    return sourceWindow;
+}
+
+function getMediaViewerPublicState() {
+    const state = mediaViewerSession.getPublicState(
+        getInterfaceTweaksConfig()?.inlineMediaBackground || 'black'
+    );
+    return {
+        ...state,
+        qrScanEnabled: getInterfaceTweaksConfig()?.activeQrScan === true
+    };
+}
+
+function sendMediaViewerState(payload = getMediaViewerPublicState()) {
+    if (!mediaViewerWindow || mediaViewerWindow.isDestroyed() ||
+        mediaViewerWindow.webContents.isDestroyed()) {
+        return false;
+    }
+    mediaViewerWindow.webContents.send(CHANNEL_MEDIA_VIEWER_STATE_CHANGED, payload);
+    return true;
+}
+
+function waitForMediaViewerPresentation(presentationId) {
+    pendingMediaViewerPresentation?.finish(false);
+    return new Promise(resolve => {
+        const entry = {
+            presentationId,
+            timer: null,
+            finish(value) {
+                if (pendingMediaViewerPresentation === entry) {
+                    pendingMediaViewerPresentation = null;
+                }
+                clearTimeout(entry.timer);
+                resolve(value === true);
+            }
+        };
+        entry.timer = setTimeout(() => entry.finish(false), MEDIA_VIEWER_PRESENT_TIMEOUT_MS);
+        entry.timer.unref?.();
+        pendingMediaViewerPresentation = entry;
+    });
+}
+
+function completeMediaViewerPresentation(presentationId) {
+    const entry = pendingMediaViewerPresentation;
+    if (!entry || entry.presentationId !== normalizeText(presentationId)) {
+        return false;
+    }
+    entry.finish(true);
+    return true;
+}
+
+function clearMediaViewerSession() {
+    mediaViewerSession.clearAll();
+}
+
+function hideMediaViewer() {
+    if (!mediaViewerWindow || mediaViewerWindow.isDestroyed()) {
+        return;
+    }
+    pendingMediaViewerPresentation?.finish(false);
+    if (process.platform === 'win32') {
+        mediaViewerWindow.setOpacity(0);
+        mediaViewerWindow.setIgnoreMouseEvents(true);
+    }
+    sendMediaViewerState({ hidden: true });
+    mediaViewerWindow.hide();
+}
+
+function syncMediaViewerConfig() {
+    if (!isInlineMediaViewerEnabled()) {
+        mediaPipSession.sticky = false;
+        hideMediaViewer();
+        closeMediaPipSession();
+        clearMediaViewerSession();
+        return;
+    }
+    if (mediaViewerWindow?.isVisible()) {
+        sendMediaViewerState();
+    }
+}
+
+function getMediaViewerDisplay(sourceWindow) {
+    try {
+        return screen.getDisplayMatching(sourceWindow.getBounds());
+    } catch {
+        return screen.getPrimaryDisplay();
+    }
+}
+
+async function positionMediaViewerWindow(viewerWindow, sourceWindow) {
+    const display = getMediaViewerDisplay(sourceWindow);
+    if (viewerWindow.isDestroyed()) {
+        return;
+    }
+    const currentDisplay = screen.getDisplayMatching(viewerWindow.getBounds());
+    if (viewerWindow.isFullScreen() && currentDisplay.id === display.id) {
+        return;
+    }
+    if (viewerWindow.isFullScreen()) {
+        viewerWindow.setFullScreen(false);
+    }
+    viewerWindow.setBounds(display.bounds);
+    viewerWindow.setFullScreen(true);
+}
+
+async function ensureMediaViewerWindow(sourceWindow) {
+    if (mediaViewerWindow && !mediaViewerWindow.isDestroyed()) {
+        await mediaViewerWindowReady;
+        await positionMediaViewerWindow(mediaViewerWindow, sourceWindow);
+        return mediaViewerWindow;
+    }
+    const display = getMediaViewerDisplay(sourceWindow);
+    const viewerWindow = new BrowserWindow({
+        ...display.bounds,
+        show: false,
+        frame: false,
+        resizable: false,
+        maximizable: false,
+        thickFrame: false,
+        transparent: true,
+        skipTaskbar: true,
+        fullscreen: false,
+        fullscreenable: true,
+        autoHideMenuBar: true,
+        backgroundColor: '#00000000',
+        title: `${PLUGIN_NAME} - 媒体预览`,
+        webPreferences: {
+            preload: path.join(__dirname, 'media-viewer-preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false
+        }
+    });
+    mediaViewerWindow = viewerWindow;
+    viewerWindow.setMenuBarVisibility(false);
+    if (process.platform === 'win32') {
+        // A sub-255 opacity gives Chromium an explicit layered window, so it
+        // does not pause windows visible through the translucent backdrop.
+        viewerWindow.setOpacity(WINDOWS_MEDIA_VIEWER_OPACITY);
+    }
+    mediaViewerWindowReady = viewerWindow.loadFile(path.join(__dirname, 'media-viewer.html'));
+    viewerWindow.on('hide', () => sendMediaViewerState({ hidden: true }));
+    viewerWindow.on('minimize', () => sendMediaViewerState({ hidden: true }));
+    viewerWindow.on('restore', () => sendMediaViewerState());
+    viewerWindow.on('closed', () => {
+        if (mediaViewerWindow === viewerWindow) {
+            mediaViewerWindow = null;
+            mediaViewerWindowReady = null;
+            clearMediaViewerSession();
+        }
+    });
+    try {
+        await mediaViewerWindowReady;
+        await positionMediaViewerWindow(viewerWindow, sourceWindow);
+    } catch (error) {
+        if (!viewerWindow.isDestroyed()) {
+            viewerWindow.destroy();
+        }
+        throw error;
+    }
+    return viewerWindow;
+}
+
+function bindMediaViewerSourceWindow(sourceWindow) {
+    const sourceState = getWindowState(sourceWindow);
+    if (sourceState.mediaViewerCloseBound) {
+        return;
+    }
+    sourceState.mediaViewerCloseBound = true;
+    sourceWindow.once('closed', () => {
+        if (mediaViewerSession.get(sourceWindow)) {
+            hideMediaViewer();
+            mediaViewerSession.clear(sourceWindow);
+        }
+        mediaViewerSession.clearStagedForward(sourceWindow);
+        mediaDownloadTasks.clear(sourceWindow, new Error('The source window closed.'));
+        if (mediaPipSession.active?.sourceWindow === sourceWindow) {
+            closeMediaPipSession();
+        }
+    });
+}
+
+async function activateMediaViewerWindow(viewerWindow, stateOverrides = null) {
+    const state = getMediaViewerPublicState();
+    const presentationId = crypto.randomUUID();
+    const presented = waitForMediaViewerPresentation(presentationId);
+    if (process.platform === 'win32') {
+        viewerWindow.setOpacity(0);
+        viewerWindow.setIgnoreMouseEvents(true);
+    }
+    sendMediaViewerState({
+        ...state,
+        ...stateOverrides,
+        presentationId
+    });
+    if (viewerWindow.isMinimized()) {
+        viewerWindow.restore();
+    }
+    viewerWindow.showInactive();
+    const didPresent = await presented;
+    if (viewerWindow.isDestroyed() ||
+        mediaViewerSession.get()?.gallery.id !== state.galleryId) {
+        return false;
+    }
+    if (!didPresent) {
+        viewerWindow.hide();
+        throw new Error('Media viewer did not commit its first frame.');
+    }
+    if (!viewerWindow.isVisible()) {
+        return false;
+    }
+    if (process.platform === 'win32') {
+        viewerWindow.setOpacity(WINDOWS_MEDIA_VIEWER_OPACITY);
+        viewerWindow.setIgnoreMouseEvents(false);
+    }
+    viewerWindow.show();
+    viewerWindow.focus();
+    viewerWindow.webContents.focus();
+    return true;
+}
+
+async function presentMediaViewer(sourceWindow) {
+    let session = mediaViewerSession.get(sourceWindow);
+    if (!session) {
+        return false;
+    }
+    const selection = mediaViewerSession.getSelection(
+        sourceWindow,
+        session.gallery.id,
+        session.gallery.index
+    );
+    if (selection && await openMediaPipForStickyMode(selection)) {
+        return true;
+    }
+    const viewerWindow = await ensureMediaViewerWindow(sourceWindow);
+    session = mediaViewerSession.get(sourceWindow, session.gallery.id);
+    if (!session) {
+        return false;
+    }
+    return await activateMediaViewerWindow(viewerWindow);
 }
 
 function isInlineMediaHost(browserWindow) {
@@ -2071,23 +2949,105 @@ function isInlineMediaHost(browserWindow) {
     return ['#/main/message', '#/chat', '#/forward', '#/record'].some(route => url.includes(route));
 }
 
+function getInlineMediaExpectedSize(item) {
+    const size = Number(item?.fileSize);
+    return Number.isSafeInteger(size) && size > 0 ? size : 0;
+}
+
+function isDecodableInlineImage(filePath) {
+    try {
+        const image = nativeImage.createFromPath(filePath);
+        const size = image?.getSize?.();
+        return Boolean(!image?.isEmpty?.() && size?.width > 0 && size?.height > 0);
+    } catch {
+        return false;
+    }
+}
+
+function getReadyInlineMediaPath(item) {
+    const filePath = getAbsoluteFilePathCandidate([item?.filePath]);
+    if (!filePath) {
+        return '';
+    }
+    try {
+        const stat = fsSync.statSync(filePath);
+        const expectedSize = getInlineMediaExpectedSize(item);
+        const ready = stat.isFile() && stat.size > 0 && (
+            !expectedSize || stat.size >= expectedSize ||
+            item?.type === 'image' && isDecodableInlineImage(filePath)
+        );
+        return ready
+            ? filePath
+            : '';
+    } catch {
+        return '';
+    }
+}
+
 function isInlineMediaItemAvailable(item) {
-    return Boolean(
-        getExistingFilePath([item?.filePath]) ||
+    return isInlineMediaItemSupported(item) && Boolean(
+        getReadyInlineMediaPath(item) ||
         normalizeInlineMediaSourceUrl(item?.sourceUrl)
     );
 }
 
 function canResolveInlineMediaItem(item) {
-    return Boolean(createInlineMediaDownloadPayload(item));
+    return isInlineMediaItemSupported(item) && Boolean(createInlineMediaDownloadPayload(item));
 }
 
 function canOpenInlineMediaItem(item) {
-    return isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) ||
-        Boolean(getAbsoluteFilePathCandidate([item?.filePath])) || item?.pendingFile === true;
+    return isInlineMediaItemSupported(item) && (
+        isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) || item?.pendingFile === true
+    );
 }
 
-async function showInlineMediaPreview(browserWindow, gallery) {
+function canListInlineMediaItem(item) {
+    return isInlineMediaItemSupported(item) && Boolean(
+        getAbsoluteFilePathCandidate([item?.filePath]) ||
+        normalizeInlineMediaSourceUrl(item?.sourceUrl) ||
+        canResolveInlineMediaItem(item) ||
+        item?.pendingFile === true
+    );
+}
+
+async function createMediaViewerDisplayItem(item) {
+    const localPath = getReadyInlineMediaPath(item);
+    const sourceUrl = normalizeInlineMediaSourceUrl(item.sourceUrl);
+    const needsResolve = !localPath && (item.pendingFile === true || canResolveInlineMediaItem(item));
+    const previewPath = getExistingFilePath([item.previewSource]);
+    const previewUrl = previewPath ? '' : normalizeInlineMediaSourceUrl(item.previewSource);
+    const src = localPath ? await inlineMediaServer.getUrl(localPath) : sourceUrl;
+    return {
+        id: getInlineMediaItemKey(item),
+        type: item.type,
+        src,
+        previewSrc: previewPath ? await inlineMediaServer.getUrl(previewPath) : previewUrl,
+        name: item.name,
+        ...(item.senderName ? { senderName: item.senderName } : {}),
+        ...(item.timestamp ? { timestamp: item.timestamp } : {}),
+        canJump: Boolean(item.identity?.chatType && item.identity?.peerUid && item.identity?.msgId),
+        needsResolve
+    };
+}
+
+function createDeferredMediaViewerDisplayItem(item) {
+    const sourceUrl = normalizeInlineMediaSourceUrl(item?.sourceUrl);
+    const previewUrl = normalizeInlineMediaSourceUrl(item?.previewSource);
+    return {
+        id: getInlineMediaItemKey(item),
+        type: item.type,
+        src: sourceUrl,
+        previewSrc: previewUrl,
+        name: item.name,
+        ...(item.senderName ? { senderName: item.senderName } : {}),
+        ...(item.timestamp ? { timestamp: item.timestamp } : {}),
+        canJump: Boolean(item.identity?.chatType && item.identity?.peerUid && item.identity?.msgId),
+        needsResolve: !sourceUrl || canResolveInlineMediaItem(item)
+    };
+}
+
+async function showMediaViewer(browserWindow, gallery, options = {}) {
+    let session = null;
     try {
         recordDiagnostic('info', 'media.preview-build-started', {
             itemCount: Array.isArray(gallery?.items) ? gallery.items.length : 0,
@@ -2105,12 +3065,7 @@ async function showInlineMediaPreview(browserWindow, gallery) {
             return false;
         }
         const selectedKey = getInlineMediaItemKey(selected);
-        const items = gallery.items.filter(item =>
-            isInlineMediaItemAvailable(item) || canResolveInlineMediaItem(item) || (
-                getInlineMediaItemKey(item) === selectedKey &&
-                (Boolean(getAbsoluteFilePathCandidate([item?.filePath])) || item?.pendingFile === true)
-            )
-        );
+        const items = gallery.items.filter(canListInlineMediaItem);
         const index = items.findIndex(item => getInlineMediaItemKey(item) === selectedKey);
         if (index < 0) {
             recordDiagnostic('info', 'media.preview-skipped', {
@@ -2118,54 +3073,45 @@ async function showInlineMediaPreview(browserWindow, gallery) {
             });
             return false;
         }
-        const galleryId = crypto.randomUUID();
-        getWindowState(browserWindow).inlineMediaGallery = { id: galleryId, items };
-        const previewItems = await Promise.all(items.map(async item => {
-            const localPath = getExistingFilePath([item.filePath]);
-            const selectedItem = getInlineMediaItemKey(item) === selectedKey;
-            const pendingPath = !localPath && selectedItem
-                ? getAbsoluteFilePathCandidate([item.filePath])
-                : '';
-            const sourceUrl = normalizeInlineMediaSourceUrl(item.sourceUrl);
-            const needsResolve = !localPath && (item.pendingFile === true || canResolveInlineMediaItem(item));
-            const previewPath = getExistingFilePath([item.previewSource]);
-            const previewUrl = !previewPath
-                ? normalizeInlineMediaSourceUrl(item.previewSource)
-                : '';
-            const localUrl = localPath
-                ? await inlineMediaServer.getUrl(localPath)
-                : pendingPath
-                    ? await inlineMediaServer.getUrl(pendingPath, {
-                        waitForReady: true,
-                        waitMs: item.type === 'video' ? 60000 : 10000
-                    })
-                    : '';
-            const src = localUrl || sourceUrl;
-            return {
-                type: item.type,
-                src,
-                previewSrc: previewPath ? await inlineMediaServer.getUrl(previewPath) : previewUrl,
-                name: item.name,
-                pending: Boolean(pendingPath) || item.pendingFile === true,
-                needsResolve
-            };
-        }));
-        const sender = browserWindow.webContents;
-        sender.send(CHANNEL_INLINE_MEDIA_PREVIEW, {
-            galleryId,
-            index,
-            items: previewItems
+        session = mediaViewerSession.begin(browserWindow, { items, index }, {
+            nativeFallback: options.nativeFallback
         });
+        if (!session) {
+            return false;
+        }
+        bindMediaViewerSourceWindow(browserWindow);
+        closeExistingMediaViewers(browserWindow.webContents);
+        const previewItems = items.map(createDeferredMediaViewerDisplayItem);
+        previewItems[index] = await createMediaViewerDisplayItem(items[index]);
+        if (!mediaViewerSession.setViewerItems(session, previewItems)) {
+            return true;
+        }
+        const selectedIndex = session.gallery.index;
+        const selectedItem = session.gallery.items[selectedIndex];
+        if (previewItems[selectedIndex]?.needsResolve && selectedItem?.pendingFile !== true) {
+            // Start QQ's manual download while its chat window still owns focus.
+            downloadInlineMedia(browserWindow, selectedItem, {
+                triggerType: 0,
+                source: 'chat'
+            })?.catch(() => {});
+        }
+        await presentMediaViewer(browserWindow);
         recordDiagnostic('info', 'media.preview-build-completed', {
             itemCount: previewItems.length,
-            selectedIndex: index,
-            selectedSource: previewItems[index]?.pending
-                ? 'pending-local'
-                : previewItems[index]?.src?.startsWith('http://127.0.0.1:') ? 'local' : 'resource',
+            selectedIndex,
+            selectedSource: previewItems[selectedIndex]?.needsResolve
+                ? 'unresolved'
+                : previewItems[selectedIndex]?.src?.startsWith('http://127.0.0.1:')
+                    ? 'local'
+                    : 'resource',
             unresolvedItems: previewItems.filter(item => item.needsResolve).length
         });
         return true;
     } catch (error) {
+        if (session && mediaViewerSession.get(browserWindow, session.gallery.id) === session) {
+            hideMediaViewer();
+            mediaViewerSession.clear(browserWindow);
+        }
         recordDiagnostic('error', 'media.preview-build-failed', {
             reason: error?.message || String(error)
         });
@@ -2173,31 +3119,256 @@ async function showInlineMediaPreview(browserWindow, gallery) {
     }
 }
 
-function requestInlineMediaDownload(browserWindow, item) {
-    if (getExistingFilePath([item?.filePath])) {
+function findInlineMediaDownloadInfo(value, item) {
+    const msgId = normalizeText(item?.identity?.msgId);
+    const elementId = normalizeText(item?.identity?.elementId);
+    if (!msgId || !elementId) {
+        return null;
+    }
+    return findIpcObject(value, candidate =>
+        normalizeText(candidate?.msgId) === msgId &&
+        normalizeText(candidate?.msgElementId || candidate?.elementId) === elementId &&
+        (candidate?.filePath !== undefined || candidate?.fileErrCode !== undefined)
+    );
+}
+
+async function hasCompleteIsoMediaStructure(filePath, fileSize) {
+    if (!['.m4v', '.mov', '.mp4'].includes(path.extname(filePath).toLowerCase()) || fileSize < 8) {
         return false;
     }
-    const nativePayload = createInlineMediaDownloadPayload(item);
-    if (!nativePayload) {
+    const handle = await fs.open(filePath, 'r');
+    const header = Buffer.alloc(16);
+    let offset = 0;
+    let hasMovie = false;
+    let hasMediaData = false;
+    try {
+        while (offset + 8 <= fileSize) {
+            const { bytesRead } = await handle.read(header, 0, 16, offset);
+            if (bytesRead < 8) {
+                return false;
+            }
+            let boxSize = header.readUInt32BE(0);
+            let headerSize = 8;
+            if (boxSize === 1) {
+                if (bytesRead < 16) {
+                    return false;
+                }
+                const extendedSize = header.readBigUInt64BE(8);
+                if (extendedSize > BigInt(Number.MAX_SAFE_INTEGER)) {
+                    return false;
+                }
+                boxSize = Number(extendedSize);
+                headerSize = 16;
+            } else if (boxSize === 0) {
+                boxSize = fileSize - offset;
+            }
+            if (boxSize < headerSize || boxSize > fileSize - offset) {
+                return false;
+            }
+            const boxType = header.toString('ascii', 4, 8);
+            hasMovie ||= boxType === 'moov';
+            hasMediaData ||= boxType === 'mdat';
+            offset += boxSize;
+        }
+        return offset === fileSize && hasMovie && hasMediaData;
+    } finally {
+        await handle.close();
+    }
+}
+
+async function waitForCompletedInlineMediaFile(browserWindow, item, filePath, expectedSize, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+            throw new Error('The source window closed before the media file became available.');
+        }
+        try {
+            const stat = await fs.stat(filePath);
+            if (stat.isFile() && stat.size > 0) {
+                if (!expectedSize || stat.size >= expectedSize) {
+                    return filePath;
+                }
+                const validation = item?.type === 'image' && isDecodableInlineImage(filePath)
+                    ? 'decoded-image'
+                    : item?.type === 'video' && await hasCompleteIsoMediaStructure(filePath, stat.size)
+                        ? 'complete-video'
+                        : '';
+                if (validation) {
+                    recordDiagnostic('info', 'media.download-size-mismatch-accepted', {
+                        type: item.type,
+                        fileName: path.basename(filePath),
+                        expectedSize,
+                        observedSize: stat.size,
+                        validation
+                    });
+                    return filePath;
+                }
+            }
+        } catch {
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('QQ reported a completed media download, but the file is incomplete.');
+}
+
+function resolveInlineMediaDownload(browserWindow, item, options) {
+    const key = getInlineMediaItemKey(item);
+    const current = mediaDownloadTasks.get(browserWindow, 'rich', key);
+    if (current) {
+        return current.promise;
+    }
+    const deadline = Date.now() + (options.timeoutMs || 65 * 1000);
+    const waiter = createNativeEventWaiter(browserWindow, (response, result) => {
+        const cmdName = normalizeText(result?.cmdName || response?.cmdName);
+        return /nodeIKernelMsgListener\/onRichMediaDownloadComplete$/i.test(cmdName) &&
+            Boolean(findInlineMediaDownloadInfo(result, item) || findInlineMediaDownloadInfo(response, item));
+    }, Math.max(1, deadline - Date.now()));
+    const entry = {
+        promise: null,
+        cancel: error => waiter.cancel(error)
+    };
+    entry.promise = (async () => {
+        try {
+            recordDiagnostic('info', 'media.download-requested', {
+                type: item.type,
+                source: options.source,
+                method: options.method
+            });
+            await options.start();
+            const event = await waiter.promise;
+            const info = findInlineMediaDownloadInfo(event, item);
+            if (!info) {
+                throw new Error('QQ completed a different media download.');
+            }
+            const errorCode = Number(info.fileErrCode);
+            if (Number.isFinite(errorCode) && errorCode !== 0) {
+                throw new Error(`QQ media download failed: ${info.fileErrMsg || errorCode}`);
+            }
+            const filePath = getAbsoluteFilePathCandidate([
+                info.filePath,
+                info.commonFileInfo?.filePath
+            ]);
+            if (!filePath) {
+                throw new Error('QQ completed the media download without a local path.');
+            }
+            const eventSize = Number(info.totalSize || info.commonFileInfo?.fileSize);
+            const expectedSize = Number.isSafeInteger(eventSize) && eventSize > 0
+                ? eventSize
+                : getInlineMediaExpectedSize(item);
+            let observedSize = 0;
+            try {
+                observedSize = (await fs.stat(filePath)).size;
+            } catch {
+            }
+            recordDiagnostic('info', 'media.download-complete-signaled', {
+                type: item.type,
+                source: options.source,
+                fileName: path.basename(filePath),
+                expectedSize,
+                observedSize
+            });
+            await waitForCompletedInlineMediaFile(
+                browserWindow,
+                item,
+                filePath,
+                expectedSize,
+                Math.max(1, deadline - Date.now())
+            );
+            item.filePath = filePath;
+            try {
+                item.fileSize = (await fs.stat(filePath)).size;
+            } catch {
+            }
+            recordDiagnostic('info', 'media.download-resolved', {
+                type: item.type,
+                source: options.source
+            });
+            return filePath;
+        } catch (error) {
+            recordDiagnostic('warn', 'media.download-failed', {
+                type: item.type,
+                source: options.source,
+                error: error?.message || String(error)
+            });
+            throw error;
+        } finally {
+            waiter.cancel();
+        }
+    })();
+    mediaDownloadTasks.set(browserWindow, 'rich', key, entry);
+    entry.promise.catch(() => {});
+    return entry.promise;
+}
+
+function downloadInlineMedia(browserWindow, item, options = {}) {
+    const triggerType = Number(options.triggerType) === 1 ? 1 : 0;
+    const payload = createInlineMediaDownloadPayload(item, triggerType);
+    if (!payload) {
+        return null;
+    }
+    return resolveInlineMediaDownload(browserWindow, item, {
+        source: options.source || 'chat',
+        method: 'downloadRichMedia',
+        start: () => qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/downloadRichMedia',
+            payload,
+            false
+        )
+    });
+}
+
+function watchInlineMediaDownload(browserWindow, item, options = {}) {
+    return resolveInlineMediaDownload(browserWindow, item, {
+        source: options.source || 'forward',
+        method: options.method || 'native-click',
+        start: async () => {}
+    });
+}
+
+function openForwardMediaViewerFromDownloadRequest(browserWindow, command) {
+    if (!isInlineMediaViewerEnabled() ||
+        getWindowRoute(browserWindow?.webContents?.getURL()) !== 'forward' ||
+        !/nodeIKernelMsgService\/downloadRichMedia$/i.test(normalizeText(command?.cmdName))) {
         return false;
     }
-    Promise.resolve(qqNativeInvoke(
-        browserWindow,
-        'ntApi',
-        'nodeIKernelMsgService/downloadRichMedia',
-        nativePayload,
-        false
-    )).catch(error => {
-        recordDiagnostic('warn', 'media.download-request-failed', {
-            type: item?.type || '',
-            error
-        });
+    const firstArgument = Array.isArray(command.payload) ? command.payload[0] : command.payload;
+    const request = firstArgument?.getReq;
+    if (Number(request?.triggerType) !== 0) {
+        return false;
+    }
+    const filePath = getAbsoluteFilePathCandidate([request?.filePath]);
+    const item = normalizeInlineMediaOpenItem({
+        type: classifyMediaFilePath(filePath),
+        filePath,
+        name: path.basename(filePath),
+        identity: {
+            chatType: request?.chatType,
+            peerUid: request?.peerUid,
+            msgId: request?.msgId,
+            elementId: request?.elementId
+        }
     });
-    recordDiagnostic('info', 'media.download-requested', {
-        type: item?.type || '',
-        source: 'chat',
-        method: 'downloadRichMedia'
-    });
+    if (item?.type !== 'video' || !isInlineMediaItemSupported(item)) {
+        return false;
+    }
+    watchInlineMediaDownload(browserWindow, item, {
+        source: 'forward',
+        method: 'native-request'
+    })?.catch(() => {});
+    const stagedGallery = mediaViewerSession.consumeStagedForward(browserWindow, item);
+    if (stagedGallery) {
+        showMediaViewer(browserWindow, stagedGallery)
+            .catch(error => warn('forward media viewer failed:', error?.message || error));
+        return true;
+    }
+    const activeSession = mediaViewerSession.get(browserWindow);
+    if (activeSession?.gallery.items.some(candidate => isSameInlineMediaItem(candidate, item))) {
+        return true;
+    }
+    showMediaViewer(browserWindow, { items: [item], index: 0 })
+        .catch(error => warn('forward media viewer failed:', error?.message || error));
     return true;
 }
 
@@ -2247,12 +3418,12 @@ function bindPendingInlineFileDownload(browserWindow, command) {
     if (!/nodeIKernelFileAssistantService\/downloadFile$/i.test(normalizeText(command?.cmdName))) {
         return;
     }
-    const state = getWindowState(browserWindow);
-    const gallery = state.inlineMediaGallery;
-    const item = gallery?.items?.[gallery.index];
-    const pending = state.pendingInlineFileDownload;
+    const session = mediaViewerSession.get(browserWindow);
+    const item = session?.gallery.items?.[session.gallery.index];
+    const itemKey = getInlineMediaItemKey(item);
+    const pending = mediaDownloadTasks.get(browserWindow, 'file', itemKey);
     const fileIds = getFileAssistantDownloadIds(command.payload);
-    if (!pending || pending.itemKey !== getInlineMediaItemKey(item) || pending.bound || !fileIds.length) {
+    if (!pending || pending.bound || !fileIds.length) {
         return;
     }
     pending.bound = true;
@@ -2265,6 +3436,7 @@ function bindPendingInlineFileDownload(browserWindow, command) {
         return Number(status?.fileStatus) === 2 && normalizeText(status?.fileProgress) === '0' &&
             Boolean(getAbsoluteFilePathCandidate([status?.filePath]));
     }, 60 * 1000);
+    pending.cancel = error => waiter.cancel(error);
     waiter.promise.then(result => {
         const status = getFileAssistantStatus(result, fileIds);
         const filePath = getAbsoluteFilePathCandidate([status?.filePath]);
@@ -2283,92 +3455,490 @@ function bindPendingInlineFileDownload(browserWindow, command) {
     });
 }
 
-async function prepareInlineMedia(browserWindow, payload) {
+async function prepareMediaViewerItem(browserWindow, payload) {
     if (!isInlineMediaViewerEnabled() || !browserWindow || browserWindow.isDestroyed() ||
         browserWindow.webContents.isDestroyed()) {
         return null;
     }
-    const gallery = getWindowState(browserWindow).inlineMediaGallery;
     const index = Number(payload?.index);
-    if (!gallery || normalizeText(payload?.galleryId) !== gallery.id ||
-        !Number.isInteger(index) || index < 0 || index >= gallery.items.length) {
+    const selection = mediaViewerSession.getSelection(
+        browserWindow,
+        normalizeText(payload?.galleryId),
+        index
+    );
+    if (!selection) {
         return null;
     }
-    const item = gallery.items[index];
-    const pendingFile = getWindowState(browserWindow).pendingInlineFileDownload;
-    if (item.pendingFile === true && pendingFile?.itemKey === getInlineMediaItemKey(item)) {
+    const { gallery, item } = selection;
+    const finalize = result => {
+        if (result) {
+            mediaViewerSession.patchViewerItem(
+                browserWindow,
+                gallery.id,
+                index,
+                { ...result, needsResolve: false }
+            );
+        }
+        return result;
+    };
+    const itemKey = getInlineMediaItemKey(item);
+    const pendingFile = mediaDownloadTasks.get(browserWindow, 'file', itemKey);
+    if (item.pendingFile === true && pendingFile) {
         const filePath = await pendingFile.promise;
-        return {
+        return finalize({
             type: item.type,
             src: await inlineMediaServer.getUrl(filePath),
-            name: item.name,
-            pending: false
-        };
+            name: item.name
+        });
     }
-    const existingPath = getExistingFilePath([item.filePath]);
+    const existingPath = getReadyInlineMediaPath(item);
     if (existingPath) {
-        return {
+        return finalize({
             type: item.type,
             src: await inlineMediaServer.getUrl(existingPath),
-            name: item.name,
-            pending: false
-        };
+            name: item.name
+        });
     }
-    const pendingPath = getAbsoluteFilePathCandidate([item.filePath]);
-    if (pendingPath && requestInlineMediaDownload(browserWindow, item)) {
-        return {
+    const preload = payload?.preload === true;
+    if (preload && item.type === 'video') {
+        return null;
+    }
+    const pendingDownload = mediaDownloadTasks.get(browserWindow, 'rich', itemKey);
+    const downloadedPath = pendingDownload
+        ? await pendingDownload.promise
+        : await downloadInlineMedia(browserWindow, item, {
+            triggerType: preload ? 1 : 0,
+            source: preload ? 'preload' : 'chat'
+        });
+    if (downloadedPath) {
+        return finalize({
             type: item.type,
-            src: await inlineMediaServer.getUrl(pendingPath, {
-                waitForReady: true,
-                waitMs: item.type === 'video' ? 60000 : 10000
-            }),
-            name: item.name,
-            pending: true
-        };
+            src: await inlineMediaServer.getUrl(downloadedPath),
+            name: item.name
+        });
     }
     const sourceUrl = normalizeInlineMediaSourceUrl(item.sourceUrl);
-    return sourceUrl ? {
+    return sourceUrl ? finalize({
         type: item.type,
         src: sourceUrl,
-        name: item.name,
-        pending: false
-    } : null;
+        name: item.name
+    }) : null;
 }
 
-async function openInlineMediaFromRenderer(browserWindow, payload) {
+function getMediaViewerSelection(payload) {
+    const sourceWindow = getMediaViewerSourceWindow(payload?.galleryId);
+    return sourceWindow
+        ? mediaViewerSession.getSelection(sourceWindow, normalizeText(payload?.galleryId), payload?.index)
+        : null;
+}
+
+async function resolveMediaViewerLocalFile(selection) {
+    let filePath = getExistingFilePath([selection.item.filePath]);
+    if (filePath) {
+        return filePath;
+    }
+    await prepareMediaViewerItem(selection.sourceWindow, {
+        galleryId: selection.gallery.id,
+        index: selection.index
+    });
+    filePath = getExistingFilePath([selection.item.filePath]);
+    return filePath;
+}
+
+async function saveMediaViewerItem(selection) {
+    const sourcePath = await resolveMediaViewerLocalFile(selection);
+    if (!sourcePath) {
+        return { ok: false, message: '媒体尚未保存到本地' };
+    }
+    const fileName = path.basename(normalizeText(selection.item.name) || sourcePath);
+    const result = await dialog.showSaveDialog(mediaViewerWindow, {
+        title: '另存为',
+        defaultPath: path.join(app.getPath('downloads'), fileName)
+    });
+    if (result.canceled || !result.filePath) {
+        return { ok: false, canceled: true };
+    }
+    if (normalizeComparablePath(result.filePath) !== normalizeComparablePath(sourcePath)) {
+        await fs.copyFile(sourcePath, result.filePath);
+    }
+    return { ok: true, message: '已保存' };
+}
+
+async function copyMediaViewerImage(selection) {
+    if (selection.item.type !== 'image') {
+        return { ok: false };
+    }
+    const filePath = await resolveMediaViewerLocalFile(selection);
+    const sourceUrl = normalizeInlineMediaSourceUrl(selection.item.sourceUrl);
+    const image = filePath
+        ? nativeImage.createFromPath(filePath)
+        : /^data:image\//i.test(sourceUrl)
+            ? nativeImage.createFromDataURL(sourceUrl)
+            : null;
+    if (!image || image.isEmpty()) {
+        return { ok: false, message: '图片尚未保存到本地' };
+    }
+    clipboard.writeImage(image);
+    return { ok: true, message: '已复制' };
+}
+
+async function jumpToMediaViewerMessage(selection) {
+    const identity = selection.item.identity || {};
+    const peerUid = normalizeText(identity.peerUid);
+    const msgId = normalizeText(identity.msgId);
+    const chatType = Number(identity.chatType);
+    if (!peerUid || !msgId || !chatType) {
+        return { ok: false, message: '无法定位这条消息' };
+    }
+    const command = {
+        promiseId: crypto.randomUUID(),
+        sender: 'MsgRecordWindow',
+        type: 'req',
+        postMessageType: 'invoke',
+        eventName: 'invoke',
+        params: {
+            moduleName: 'mainPage',
+            cmdName: 'jumpNewAio',
+            args: [{
+                peerUid,
+                chatType,
+                type: 1,
+                params: { msgId }
+            }]
+        }
+    };
+    const sourceWindow = selection.sourceWindow;
+    hideMediaViewer();
+    if (sourceWindow.isMinimized()) {
+        sourceWindow.restore();
+    }
+    sourceWindow.show();
+    sourceWindow.focus();
+    sourceWindow.webContents.focus();
+    const source = `(() => { const channel = new BroadcastChannel('MainWindow'); channel.postMessage(${JSON.stringify(command)}); channel.close(); return true; })()`;
+    await sourceWindow.webContents.executeJavaScript(source, true);
+    return { ok: true };
+}
+
+async function openMediaPip(selection, payload) {
+    const item = selection.viewerItem;
+    if (item?.type !== 'video' || !normalizeInlineMediaSourceUrl(item.src)) {
+        return { ok: false };
+    }
+    const videoWidth = Number(payload?.videoWidth);
+    const videoHeight = Number(payload?.videoHeight);
+    const aspectRatio = videoWidth > 0 && videoHeight > 0
+        ? videoWidth / videoHeight
+        : 16 / 9;
+    mediaPipSession.active = {
+        sourceWindow: selection.sourceWindow,
+        gallery: cloneMediaViewerGallery(selection.gallery, selection.index),
+        viewerItems: selection.session.viewerItems.map(viewerItem => ({ ...viewerItem })),
+        playback: normalizeMediaPlaybackState(payload?.playback)
+    };
+    let pipWindow;
+    try {
+        pipWindow = await ensureMediaPipWindow(selection.sourceWindow, aspectRatio);
+    } catch (error) {
+        clearMediaPipSession();
+        throw error;
+    }
+    mediaPipSession.sticky = true;
+    sendMediaPipState();
+    hideMediaViewer();
+    pipWindow.showInactive();
+    pipWindow.setAlwaysOnTop(
+        true,
+        process.platform === 'win32' ? 'pop-up-menu' : 'floating'
+    );
+    pipWindow.moveTop();
+    return { ok: true };
+}
+
+async function openMediaPipForStickyMode(selection) {
+    let item = selection.viewerItem;
+    if (!mediaPipSession.sticky || item?.type !== 'video') {
+        return false;
+    }
+    try {
+        if (!normalizeInlineMediaSourceUrl(item.src) && item.needsResolve) {
+            await prepareMediaViewerItem(selection.sourceWindow, {
+                galleryId: selection.gallery.id,
+                index: selection.index
+            });
+            selection = getMediaViewerSelection({
+                galleryId: selection.gallery.id,
+                index: selection.index
+            });
+            item = selection?.viewerItem;
+        }
+        if (!selection || item?.type !== 'video' || !normalizeInlineMediaSourceUrl(item.src)) {
+            return false;
+        }
+        const result = await openMediaPip(selection, {
+            playback: { paused: false }
+        });
+        return result.ok === true;
+    } catch (error) {
+        recordDiagnostic('warn', 'media.pip-auto-open-failed', {
+            reason: error?.message || String(error)
+        });
+        return false;
+    }
+}
+
+async function restoreMediaViewerFromPip(playback) {
+    const pip = mediaPipSession.active;
+    const sourceWindow = pip?.sourceWindow;
+    const sessionGallery = pip?.gallery;
+    const gallery = cloneMediaViewerGallery(sessionGallery);
+    const viewerItems = pip?.viewerItems.map(item => ({ ...item })) || [];
+    if (!sourceWindow || sourceWindow.isDestroyed() || sourceWindow.webContents.isDestroyed() ||
+        !gallery.id || !viewerItems[gallery.index]) {
+        closeMediaPipSession();
+        return { ok: false };
+    }
+    playback = normalizeMediaPlaybackState(playback);
+    const viewerWindow = await ensureMediaViewerWindow(sourceWindow);
+    if (mediaPipSession.active !== pip) {
+        return { ok: false };
+    }
+    const session = mediaViewerSession.begin(sourceWindow, gallery, { viewerItems });
+    if (!session) {
+        return { ok: false };
+    }
+    bindMediaViewerSourceWindow(sourceWindow);
+    await activateMediaViewerWindow(viewerWindow, { playback });
+    closeMediaPipSession();
+    return { ok: true };
+}
+
+async function handleMediaPipAction(payload = {}) {
+    const type = normalizeText(payload.type);
+    const pip = mediaPipSession.active;
+    const matchesSession = normalizeText(payload.galleryId) === pip?.gallery.id &&
+        Number(payload.index) === pip?.gallery.index;
+    if (!matchesSession) {
+        return { ok: false };
+    }
+    if (type === 'close') {
+        closeMediaPipSession();
+        return { ok: true };
+    }
+    if (type === 'metadata') {
+        const width = Number(payload.videoWidth);
+        const height = Number(payload.videoHeight);
+        if (!mediaPipWindow || mediaPipWindow.isDestroyed() ||
+            !pip?.sourceWindow || width <= 0 || height <= 0) {
+            return { ok: false };
+        }
+        configureMediaPipGeometry(mediaPipWindow, pip.sourceWindow, width / height);
+        return { ok: true };
+    }
+    if (type === 'enlarge') {
+        mediaPipSession.sticky = false;
+        return await restoreMediaViewerFromPip(payload.playback);
+    }
+    return { ok: false };
+}
+
+async function handleMediaViewerAction(payload = {}) {
+    const type = normalizeText(payload.type);
+    if (type === 'presented') {
+        return { ok: completeMediaViewerPresentation(payload.presentationId) };
+    }
+    if (type === 'close') {
+        hideMediaViewer();
+        clearMediaViewerSession();
+        return { ok: true };
+    }
+    if (type === 'minimize') {
+        mediaViewerWindow?.minimize();
+        return { ok: true };
+    }
+    const selection = getMediaViewerSelection(payload);
+    if (!selection) {
+        return { ok: false };
+    }
+    if (type === 'select') {
+        mediaViewerSession.select(
+            selection.sourceWindow,
+            selection.gallery.id,
+            selection.index
+        );
+        await openMediaPipForStickyMode(selection);
+        return { ok: true };
+    }
+    try {
+        if (type === 'fallback-native') {
+            const fallback = mediaViewerSession.takeNativeFallback(
+                selection.sourceWindow,
+                selection.gallery.id
+            );
+            return await openNativeMediaViewerFallback(
+                selection.sourceWindow,
+                fallback,
+                selection.item.sourceIndex
+            );
+        }
+        if (type === 'open-pip') {
+            return await openMediaPip(selection, payload);
+        }
+        if (type === 'save') {
+            return await saveMediaViewerItem(selection);
+        }
+        if (type === 'copy-image') {
+            return await copyMediaViewerImage(selection);
+        }
+        if (type === 'scan-qr') {
+            if (selection.item.type !== 'image') {
+                return { ok: false };
+            }
+            return await scanQrCode(selection.sourceWindow, selection.item);
+        }
+        if (type === 'show-in-folder') {
+            const filePath = await resolveMediaViewerLocalFile(selection);
+            if (!filePath) {
+                return { ok: false, message: '媒体尚未保存到本地' };
+            }
+            shell.showItemInFolder(filePath);
+            return { ok: true };
+        }
+        if (type === 'open-external') {
+            const filePath = await resolveMediaViewerLocalFile(selection);
+            if (filePath) {
+                const error = await shell.openPath(filePath);
+                return error ? { ok: false, message: '无法打开媒体' } : { ok: true };
+            }
+            const sourceUrl = normalizeInlineMediaSourceUrl(selection.item.sourceUrl);
+            if (/^https?:/i.test(sourceUrl)) {
+                await shell.openExternal(sourceUrl);
+                return { ok: true };
+            }
+            return { ok: false, message: '媒体尚未保存到本地' };
+        }
+        if (type === 'jump-to-message') {
+            return await jumpToMediaViewerMessage(selection);
+        }
+    } catch (error) {
+        if (type === 'jump-to-message' && !selection.sourceWindow.isDestroyed()) {
+            await presentMediaViewer(selection.sourceWindow).catch(() => {});
+        }
+        recordDiagnostic('warn', 'media.viewer-action-failed', {
+            type,
+            reason: error?.message || String(error)
+        });
+        return { ok: false, message: '操作失败' };
+    }
+    return { ok: false };
+}
+
+async function selectExistingMediaViewerItem(browserWindow, item) {
+    const session = mediaViewerSession.get(browserWindow);
+    if (!session) {
+        return false;
+    }
+    const index = mediaViewerSession.findItem(browserWindow, item);
+    if (index < 0) {
+        return false;
+    }
+    mediaViewerSession.select(browserWindow, session.gallery.id, index);
+    if (session.viewerItems.length) {
+        await presentMediaViewer(browserWindow);
+    }
+    return true;
+}
+
+async function openMediaViewerFromRenderer(browserWindow, payload) {
+    const nativeFallback = { handled: false, activateNative: true };
     if (!isInlineMediaViewerEnabled() ||
         !browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
-        return false;
+        return nativeFallback;
     }
     const item = normalizeInlineMediaOpenItem(payload);
-    if (!item) {
-        return false;
+    if (!item || !isInlineMediaItemSupported(item)) {
+        return nativeFallback;
     }
-    const state = getWindowState(browserWindow);
+    const requestedItems = Array.isArray(payload?.gallery?.items)
+        ? payload.gallery.items.map(normalizeInlineMediaOpenItem).filter(Boolean)
+        : [];
+    const requestedIndex = requestedItems.findIndex(candidate => isSameInlineMediaItem(candidate, item));
     if (item.pendingFile === true) {
-        state.pendingInlineFileDownload?.reject(new Error('Pending file preview was replaced.'));
-        state.pendingInlineFileDownload = {
-            ...createPendingInlineFileDownload(),
-            itemKey: getInlineMediaItemKey(item)
-        };
-        closeExistingMediaViewers(browserWindow.webContents);
-        return await showInlineMediaPreview(browserWindow, { items: [item], index: 0 });
+        mediaDownloadTasks.replaceKind(
+            browserWindow,
+            'file',
+            getInlineMediaItemKey(item),
+            createPendingInlineFileDownload(),
+            new Error('Pending file preview was replaced.')
+        );
+        const handled = await showMediaViewer(browserWindow, { items: [item], index: 0 });
+        return { handled, activateNative: true };
     }
-    state.pendingInlineFileDownload?.reject(new Error('Pending file preview was replaced.'));
-    state.pendingInlineFileDownload = null;
-    const hasLocalFile = Boolean(getExistingFilePath([item.filePath]));
-    const hasResourceSource = Boolean(normalizeInlineMediaSourceUrl(item.sourceUrl));
-    const nativeDownloadStarted = item.type === 'video' && payload?.nativeDownloadStarted === true;
-    const downloadRequested = hasLocalFile
-        ? false
-        : nativeDownloadStarted
-            ? Boolean(getAbsoluteFilePathCandidate([item.filePath]))
-            : requestInlineMediaDownload(browserWindow, item);
-    if (!hasLocalFile && !hasResourceSource && !downloadRequested) {
-        return false;
+    if (getWindowRoute(browserWindow.webContents.getURL()) === 'forward') {
+        const gallery = requestedIndex >= 0
+            ? { items: requestedItems, index: requestedIndex }
+            : { items: [item], index: 0 };
+        const handled = mediaViewerSession.stageForward(browserWindow, gallery);
+        recordDiagnostic('info', 'media.forward-gallery-staged', {
+            itemCount: gallery.items.length,
+            selectedIndex: gallery.index
+        });
+        return { handled, activateNative: true };
     }
-    closeExistingMediaViewers(browserWindow.webContents);
-    return await showInlineMediaPreview(browserWindow, { items: [item], index: 0 });
+    if (requestedItems.length > 1 && requestedIndex >= 0) {
+        const handled = await showMediaViewer(browserWindow, {
+            items: requestedItems,
+            index: requestedIndex
+        });
+        return { handled, activateNative: !handled };
+    }
+    if (await selectExistingMediaViewerItem(browserWindow, item)) {
+        return { handled: true, activateNative: false };
+    }
+    mediaDownloadTasks.clearKind(
+        browserWindow,
+        'file',
+        new Error('Pending file preview was replaced.')
+    );
+    if (!canOpenInlineMediaItem(item)) {
+        return nativeFallback;
+    }
+    const handled = await showMediaViewer(browserWindow, { items: [item], index: 0 });
+    return { handled, activateNative: !handled };
+}
+
+function buildNativeMediaViewerPayload(fallback, sourceIndex) {
+    const payload = fallback?.payload;
+    if (!Array.isArray(payload)) {
+        return null;
+    }
+    const result = payload.slice();
+    if (result[0] && typeof result[0] === 'object' && Number.isInteger(Number(sourceIndex))) {
+        result[0] = { ...result[0], index: Number(sourceIndex) };
+    }
+    return result;
+}
+
+async function openNativeMediaViewerFallback(browserWindow, fallback, sourceIndex) {
+    const payload = buildNativeMediaViewerPayload(fallback, sourceIndex);
+    if (!payload || !browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+        return { ok: false };
+    }
+    await qqNativeInvoke(
+        browserWindow,
+        'WindowApi',
+        OPEN_MEDIA_VIEWER_COMMAND,
+        payload,
+        false
+    );
+    if (mediaViewerSession.get(browserWindow)) {
+        hideMediaViewer();
+        mediaViewerSession.clear(browserWindow);
+    }
+    recordDiagnostic('info', 'media.native-viewer-fallback', {
+        selectedIndex: Number(sourceIndex) || 0
+    });
+    return { ok: true };
 }
 
 async function waitForEmojiImageFile(filePath, timeoutMs = 8000) {
@@ -2450,8 +4020,7 @@ async function openEmojiAsImageFromRenderer(browserWindow, payload) {
     }
     const source = filePath || sourceUrl;
     if (isInlineMediaViewerEnabled() && isInlineMediaHost(browserWindow)) {
-        closeExistingMediaViewers(browserWindow.webContents);
-        const opened = await showInlineMediaPreview(browserWindow, {
+        const opened = await showMediaViewer(browserWindow, {
             items: [{
                 type: 'image',
                 ...(filePath ? { filePath } : { sourceUrl }),
@@ -2462,7 +4031,7 @@ async function openEmojiAsImageFromRenderer(browserWindow, payload) {
         if (opened) {
             recordDiagnostic('info', 'emoji-image.opened', {
                 source: filePath ? 'local' : 'resource',
-                viewer: 'inline'
+                viewer: 'telegram'
             });
         }
         return opened;
@@ -2488,6 +4057,7 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
         return false;
     }
     bindPendingInlineFileDownload(browserWindow, command);
+    openForwardMediaViewerFromDownloadRequest(browserWindow, command);
     applyCustomImageSummary(command, getMessageTweaksConfig());
     if (isDebugEnabled() && getWindowRoute(browserWindow?.webContents?.getURL()) === 'forward' &&
         /(?:RichMedia|VideoPlay)/i.test(command.cmdName)) {
@@ -2502,13 +4072,10 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
     }
     const tweaks = getInterfaceTweaksConfig();
     const request = args.find(value => typeof value?.callbackId === 'string');
-    if (tweaks.disableImageQrScan === true && command.cmdName === QR_SCAN_COMMAND) {
-        recordDiagnostic('info', 'qr-scan.blocked');
-        return Boolean(request && replyWithEmptyQrResult(args[0], request));
-    }
     if (command.cmdName !== OPEN_MEDIA_VIEWER_COMMAND) {
         return false;
     }
+    mediaViewerSession.clearStagedForward(browserWindow);
     if (isInlineMediaViewerEnabled(tweaks) && isInlineMediaHost(browserWindow)) {
         const gallery = extractInlineMediaGallery(command);
         if (!gallery) {
@@ -2518,9 +4085,31 @@ function handleToolboxNativeRequest(browserWindow, _channel, args) {
         if (!canOpenInlineMediaItem(selected)) {
             return false;
         }
-        closeExistingMediaViewers(browserWindow.webContents);
-        showInlineMediaPreview(browserWindow, gallery)
-            .catch(error => warn('inline media preview failed:', error?.message || error));
+        const activeSession = mediaViewerSession.get(browserWindow);
+        const activeItem = activeSession?.gallery.items?.[activeSession.gallery.index];
+        const activeGalleryContainsIncoming = mediaViewerSession.containsAll(
+            browserWindow,
+            gallery.items
+        );
+        if (activeGalleryContainsIncoming && activeItem && isSameInlineMediaItem(activeItem, selected)) {
+            recordDiagnostic('info', 'media.native-viewer-coalesced', {
+                selectedIndex: gallery.index
+            });
+            if (request) {
+                replyWithNativeResult(args[0], request, null);
+            }
+            return true;
+        }
+        const nativeFallback = { payload: command.payload };
+        showMediaViewer(browserWindow, gallery, { nativeFallback })
+            .catch(error => {
+                warn('media viewer failed:', error?.message || error);
+                openNativeMediaViewerFallback(browserWindow, nativeFallback, selected.sourceIndex)
+                    .catch(fallbackError => warn(
+                        'native media viewer fallback failed:',
+                        fallbackError?.message || fallbackError
+                    ));
+            });
         recordDiagnostic('info', 'media.native-viewer-intercepted', {
             itemCount: gallery.items.length,
             selectedIndex: gallery.index
@@ -4037,7 +5626,8 @@ function getInlineMediaPeerKey(value) {
     const peerUid = normalizeText(
         value?.peerUid || value?.peerUin || value?.peer?.peerUid || value?.peer?.peerUin
     );
-    return chatType && peerUid ? `${chatType}:${peerUid}` : '';
+    const guildId = normalizeText(value?.guildId || value?.peer?.guildId);
+    return chatType && peerUid ? `${chatType}:${peerUid}:${guildId}` : '';
 }
 
 function getInlineMediaItemKey(item) {
@@ -4051,7 +5641,8 @@ function getInlineMediaItemKey(item) {
         )}`;
 }
 
-function createInlineMediaItem(record, element, elementIndex) {
+function createInlineMediaItem(record, element, elementIndex, options = {}) {
+    const lazy = options.lazy === true;
     let type;
     let media;
     let filePath;
@@ -4059,17 +5650,36 @@ function createInlineMediaItem(record, element, elementIndex) {
     if (Number(element?.elementType) === 2 || element?.picElement) {
         type = 'image';
         media = element.picElement || element;
-        sourceValues = [media.sourcePath, media.filePath, media.originPath, media.localPath, media.path];
-        filePath = getPicSourcePath(media) || getPendingPicPath(media);
+        sourceValues = [
+            media.sourcePath,
+            media.filePath,
+            media.originPath,
+            media.localPath,
+            media.path,
+            media.originImageUrl,
+            media.remoteUrl,
+            media.originUrl,
+            media.url
+        ];
+        filePath = lazy ? getPendingPicPath(media) : getPicSourcePath(media) || getPendingPicPath(media);
     } else if (Number(element?.elementType) === 5 || element?.videoElement) {
         type = 'video';
         media = element.videoElement || element;
-        sourceValues = [media.filePath, media.sourcePath, media.originPath, media.localPath, media.path];
-        filePath = getVideoSourcePath(media) || getPendingVideoPath(media);
+        sourceValues = [
+            media.filePath,
+            media.sourcePath,
+            media.originPath,
+            media.localPath,
+            media.path,
+            media.remoteUrl,
+            media.originUrl,
+            media.url
+        ];
+        filePath = lazy ? getPendingVideoPath(media) : getVideoSourcePath(media) || getPendingVideoPath(media);
     } else if (Number(element?.elementType) === 3 || element?.fileElement) {
         media = element.fileElement || element;
         sourceValues = [media.filePath, media.sourcePath, media.originPath, media.localPath, media.path];
-        filePath = getFileSourcePath(media) || getPendingFilePath(media);
+        filePath = lazy ? getPendingFilePath(media) : getFileSourcePath(media) || getPendingFilePath(media);
         type = classifyMediaFilePath(media.fileName, filePath, ...sourceValues);
     }
     const sourceUrl = getInlineMediaSourceUrl(sourceValues);
@@ -4080,6 +5690,8 @@ function createInlineMediaItem(record, element, elementIndex) {
         ),
         msgId: normalizeText(record?.msgId),
         msgSeq: normalizeText(record?.msgSeq),
+        msgTime: normalizeText(record?.msgTime),
+        guildId: normalizeText(record?.guildId || record?.peer?.guildId),
         elementId: normalizeText(element?.elementId)
     };
     if (!type || (!filePath && !sourceUrl)) {
@@ -4090,9 +5702,16 @@ function createInlineMediaItem(record, element, elementIndex) {
         ...getThumbPathCandidates(media.thumbPath),
         ...getThumbPathCandidates(media.picThumbPath)
     ];
-    const previewSource = getExistingFilePath(previewCandidates) ||
-        getInlineMediaSourceUrl(previewCandidates) ||
-        getAbsoluteFilePathCandidate(previewCandidates);
+    const previewSource = lazy
+        ? getInlineMediaSourceUrl(previewCandidates) || getAbsoluteFilePathCandidate(previewCandidates)
+        : getExistingFilePath(previewCandidates) ||
+            getInlineMediaSourceUrl(previewCandidates) ||
+            getAbsoluteFilePathCandidate(previewCandidates);
+    const senderName = normalizeText(
+        record?.sendRemarkName || record?.sendMemberName || record?.sendNickName ||
+        record?.senderNick || record?.senderName || record?.senderUid || record?.senderUin
+    );
+    const timestamp = Number(record?.msgTime || record?.timestamp);
     return {
         type,
         ...(filePath ? { filePath } : {}),
@@ -4101,9 +5720,13 @@ function createInlineMediaItem(record, element, elementIndex) {
         fingerprint: normalizeText(
             media.md5HexStr || media.originImageMd5 || media.videoMd5 || media.fileMd5
         ).toLowerCase(),
-        name: normalizeText(media.fileName || media.summary) || path.basename(filePath),
+        name: normalizeText(media.fileName || media.summary) ||
+            (filePath ? path.basename(filePath) : type === 'video' ? 'video.mp4' : 'image.png'),
         sourceIndex: elementIndex,
-        identity
+        identity,
+        ...(senderName ? { senderName } : {}),
+        ...(Number.isFinite(timestamp) && timestamp > 0 ? { timestamp } : {}),
+        ...(Number(media.fileSize) > 0 ? { fileSize: Number(media.fileSize) } : {})
     };
 }
 
@@ -4115,14 +5738,30 @@ function compareInlineMediaItems(left, right) {
         if (difference !== 0n) {
             return difference < 0n ? -1 : 1;
         }
-    } else if (leftSeq !== rightSeq) {
+    } else if (leftSeq && rightSeq && leftSeq !== rightSeq) {
         return leftSeq.localeCompare(rightSeq);
+    }
+    const leftTime = normalizeText(left?.identity?.msgTime || left?.timestamp);
+    const rightTime = normalizeText(right?.identity?.msgTime || right?.timestamp);
+    if (/^\d+$/.test(leftTime) && /^\d+$/.test(rightTime)) {
+        const difference = BigInt(leftTime) - BigInt(rightTime);
+        if (difference !== 0n) {
+            return difference < 0n ? -1 : 1;
+        }
+    } else if (leftTime && rightTime && leftTime !== rightTime) {
+        return leftTime.localeCompare(rightTime);
+    }
+    const leftMsgId = normalizeText(left?.identity?.msgId);
+    const rightMsgId = normalizeText(right?.identity?.msgId);
+    if (leftMsgId && rightMsgId && leftMsgId !== rightMsgId) {
+        return leftMsgId.localeCompare(rightMsgId, undefined, { numeric: true });
     }
     return Number(left?.sourceIndex) - Number(right?.sourceIndex);
 }
 
 function rememberInlineMediaRecords(browserWindow, context) {
-    if (!isInlineMediaViewerEnabled()) {
+    if (!isInlineMediaViewerEnabled() ||
+        getWindowRoute(browserWindow?.webContents?.getURL()) === 'forward') {
         return;
     }
     const state = getWindowState(browserWindow);
@@ -4198,14 +5837,18 @@ function rememberInlineMediaRecords(browserWindow, context) {
 }
 
 function completeInlineMediaGallery(browserWindow, gallery) {
-    const selected = gallery?.items?.[gallery.index];
-    const peerKey = getInlineMediaPeerKey(selected?.identity);
-    const peerItems = peerKey ? getWindowState(browserWindow).inlineMediaByPeer.get(peerKey) : null;
-    if (!selected || !peerItems?.size) {
+    if (getWindowRoute(browserWindow?.webContents?.getURL()) === 'forward') {
         return gallery;
     }
-    const rememberedItems = Array.from(peerItems.values());
-    const replySources = getWindowState(browserWindow).inlineReplySourcesByPeer.get(peerKey);
+    const selected = gallery?.items?.[gallery.index];
+    if (!selected) {
+        return gallery;
+    }
+    const peerKey = getInlineMediaPeerKey(selected?.identity);
+    const state = browserWindow ? getWindowState(browserWindow) : null;
+    const peerItems = peerKey ? state?.inlineMediaByPeer.get(peerKey) : null;
+    const rememberedItems = Array.from(peerItems?.values?.() || []);
+    const replySources = peerKey ? state?.inlineReplySourcesByPeer.get(peerKey) : null;
     const viewerItems = gallery.items.map(item =>
         resolveInlineReplyPreview(item, rememberedItems, replySources)
     );
@@ -4213,7 +5856,7 @@ function completeInlineMediaGallery(browserWindow, gallery) {
     const items = mergeInlineMediaItems(
         rememberedItems,
         viewerItems
-    ).sort(compareInlineMediaItems);
+    ).filter(canListInlineMediaItem).sort(compareInlineMediaItems);
     const index = items.findIndex(item => isSameInlineMediaItem(item, selectedItem));
     return index >= 0 ? { items, index } : gallery;
 }
@@ -5177,24 +6820,17 @@ function getForwardDetailMediaPathCandidates(media) {
 }
 
 async function invokeForwardDetailMediaDownload(browserWindow, record, element) {
+    const payload = createInlineMediaVisitDownloadPayload({
+        visit: { ...record, element }
+    });
+    if (!payload) {
+        throw new Error('The forwarded media visit context is incomplete.');
+    }
     return await qqNativeInvoke(
         browserWindow,
         'ntApi',
         'nodeIKernelRichMediaService/downloadRichMediaInVisit',
-        [{
-            downloadType: 1,
-            thumbSize: 0,
-            msgId: normalizeText(record?.msgId),
-            msgRandom: normalizeText(record?.msgRandom),
-            msgSeq: normalizeText(record?.msgSeq),
-            msgTime: normalizeText(record?.msgTime),
-            chatType: Number(record?.chatType),
-            senderUid: normalizeText(record?.senderUid),
-            peerUid: normalizeText(record?.peerUid),
-            guildId: normalizeText(record?.guildId),
-            ele: element,
-            useHttps: true
-        }],
+        payload,
         false
     );
 }
@@ -5530,9 +7166,9 @@ function handleNativeSend(browserWindow, channel, args) {
     if (isVoiceMessageEnabled()) {
         voiceFileSender?.rememberNativePeerAliases?.(browserWindow, context.aliases);
     }
-    rememberInlineMediaRecords(browserWindow, context);
     processDeleteBubbleSkin(context);
     processPreventRecall(browserWindow, context);
+    rememberInlineMediaRecords(browserWindow, context);
     processPokeUpdates(browserWindow, context);
     Promise.resolve()
         .then(() => processMessageUpdates(browserWindow, context))
@@ -5573,7 +7209,16 @@ function start() {
     loadConfig();
     getPluginUpdater();
     scheduleAutomaticUpdateCheck();
-    app?.once?.('before-quit', () => inlineMediaServer.close());
+    app?.once?.('before-quit', () => {
+        clearTimeout(mediaPipBoundsSaveTimer);
+        if (mediaPipWindow && !mediaPipWindow.isDestroyed()) {
+            mediaPipWindow.destroy();
+        }
+        if (mediaViewerWindow && !mediaViewerWindow.isDestroyed()) {
+            mediaViewerWindow.destroy();
+        }
+        inlineMediaServer.close();
+    });
     installConfigIpc();
     installForAllWindows();
     applyVoiceMessageConfig();

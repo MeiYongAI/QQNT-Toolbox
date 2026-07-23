@@ -7,6 +7,7 @@ import { matchesControlLabelValue } from './control-label-match.js';
 import { createReactionLimitController } from './reaction-limit.js';
 import { createFakeForwardEditor } from './fake-forward-editor.js';
 import { createRecallFilterEditor } from './recall-filter-editor.js';
+import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
 let handleToolboxVueComponentMount = () => {};
@@ -16,7 +17,6 @@ let handleToolboxVueComponentMount = () => {};
     const SETTINGS_ID = 'qqnt-toolbox-settings';
     const STYLE_ID = 'qqnt-toolbox-style';
     const SETTINGS_STYLE_ID = 'qqnt-toolbox-settings-style';
-    const INLINE_MEDIA_PREVIEW_ID = 'qqnt-toolbox-inline-media-preview';
     const MESSAGE_MEDIA_SELECTOR = [
         '.pic-element',
         '.mix-message__container--pic',
@@ -44,8 +44,7 @@ let handleToolboxVueComponentMount = () => {};
         '[class*="reply-message" i]',
         '[class*="reaction" i]',
         '[class*="emoji-like" i]',
-        '.q-context-menu',
-        '#qqnt-toolbox-inline-media-preview'
+        '.q-context-menu'
     ].join(',');
     const VIDEO_FILE_EXTENSIONS = new Set([
         '3g2', '3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg',
@@ -56,13 +55,14 @@ let handleToolboxVueComponentMount = () => {};
     ]);
     const POKE_FALLBACK_MENU_ID = 'qqnt-toolbox-poke-fallback-menu';
     const REPEAT_FALLBACK_MENU_ID = 'qqnt-toolbox-repeat-fallback-menu';
+    const QR_VIEWER_BUTTON_ID = 'qqnt-toolbox-qr-viewer-button';
     const POKE_RECALL_NOTICE = '若对方QQ版本过低，可能无法撤回。';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
     const ACTIVE_REPEAT_PEER_KEY_PREFIX = 'qqnt-toolbox-active-repeat-peer';
     const MSG_TYPE_GRAY_TIPS = 5;
     const SEND_STATUS_SUCCESS_NO_SEQ = 3;
     const TOOLBOX_MENU_TYPE_REPEAT = 990101;
-    const INLINE_MEDIA_BACKGROUND_VALUES = new Set(['transparent', 'white', 'semi', 'black']);
+    const TOOLBOX_MENU_TYPE_QR_SCAN = 990102;
     const RECALL_MARKER_STYLE_VALUES = new Set(['badge', 'outline']);
     const RECALL_FILTER_MODE_VALUES = new Set(['all', 'blacklist', 'whitelist']);
     const TEMP_POKE_CHAT_TYPES = new Set([99, 100, 101, 102, 103, 111, 117, 119]);
@@ -169,7 +169,7 @@ let handleToolboxVueComponentMount = () => {};
                 catalog: []
             },
             imageViewerOptimization: false,
-            disableImageQrScan: false,
+            activeQrScan: false,
             singleMediaViewer: false,
             goBackMainList: false,
             preventMessageDrag: false,
@@ -213,8 +213,6 @@ let handleToolboxVueComponentMount = () => {};
     let replyAtEditor = null;
     let replyAtCleanupBusy = false;
     let imageViewerDrag = null;
-    let inlineMediaPreviewPreviousFocus = null;
-    let inlineMediaPreviewOpenedAt = 0;
     let emojiImageOpenUntil = 0;
     const nativeMediaDispatchEvents = new WeakSet();
     let messageBadgeObserver = null;
@@ -228,6 +226,7 @@ let handleToolboxVueComponentMount = () => {};
     let pokeAccountRegistration = null;
     let nativeMenuSuppressionObserver = null;
     let nativeMenuSuppressionTimer = 0;
+    let qrScanInFlight = false;
     let activeRepeatPeerSignature = '';
     let simplifyBarObserver = null;
     let simplifyObservedContainers = [];
@@ -366,11 +365,6 @@ let handleToolboxVueComponentMount = () => {};
 
     function getByPath(object, path) {
         return String(path).split('.').reduce((value, key) => value?.[key], object);
-    }
-
-    function getInlineMediaBackground() {
-        const value = String(getByPath(currentConfig, 'interfaceTweaks.inlineMediaBackground') || '');
-        return INLINE_MEDIA_BACKGROUND_VALUES.has(value) ? value : 'black';
     }
 
     function setByPath(object, path, value) {
@@ -546,203 +540,6 @@ let handleToolboxVueComponentMount = () => {};
     user-select: none;
     display: flex;
     flex-direction: column;
-}
-#${INLINE_MEDIA_PREVIEW_ID} {
-    position: fixed;
-    inset: 0;
-    z-index: 2147483647;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-sizing: border-box;
-    padding: 32px;
-    overflow: hidden;
-    outline: none;
-    background: #000;
-    cursor: zoom-out;
-    user-select: none;
-    -webkit-app-region: no-drag;
-}
-#${INLINE_MEDIA_PREVIEW_ID}[data-background="transparent"] {
-    background: transparent;
-}
-#${INLINE_MEDIA_PREVIEW_ID}[data-background="white"] {
-    background: #fff;
-}
-#${INLINE_MEDIA_PREVIEW_ID}[data-background="semi"] {
-    background: rgba(0, 0, 0, .72);
-}
-#${INLINE_MEDIA_PREVIEW_ID}[data-background="black"] {
-    background: #000;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    min-width: 0;
-    min-height: 0;
-}
-#${INLINE_MEDIA_PREVIEW_ID}.is-pannable .qqnt-toolbox-media-stage {
-    cursor: grab;
-    touch-action: none;
-}
-#${INLINE_MEDIA_PREVIEW_ID}.is-panning .qqnt-toolbox-media-stage {
-    cursor: grabbing;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage::after {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 24px;
-    height: 24px;
-    box-sizing: border-box;
-    border: 2px solid rgba(255, 255, 255, .28);
-    border-top-color: #fff;
-    border-radius: 50%;
-    content: '';
-    opacity: 0;
-    pointer-events: none;
-    z-index: 2;
-    box-shadow: 0 0 0 8px rgba(0, 0, 0, .46);
-    transform: translate(-50%, -50%);
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage.is-loading::after {
-    opacity: 1;
-    animation: qqnt-toolbox-media-loading .7s linear infinite;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-error {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    color: rgba(255, 255, 255, .82);
-    font-size: 13px;
-    line-height: 20px;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-retry {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    color: #fff;
-    background: rgba(255, 255, 255, .14);
-    font: 20px/1 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
-    cursor: pointer;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-retry:hover {
-    background: rgba(255, 255, 255, .24);
-}
-@keyframes qqnt-toolbox-media-loading {
-    to { transform: translate(-50%, -50%) rotate(360deg); }
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > img,
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
-    display: block;
-    max-width: 100%;
-    max-height: 100%;
-    object-fit: contain;
-    transform-origin: center;
-    will-change: transform;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > img {
-    pointer-events: none;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > .qqnt-toolbox-media-placeholder {
-    opacity: 1;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video {
-    background: #000;
-    cursor: default;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-panel {
-    padding: 0 8px;
-    background-color: rgba(0, 0, 0, .82);
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-timeline {
-    min-width: 0;
-    margin: 0 8px;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-current-time-display,
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-time-remaining-display {
-    padding: 0 2px;
-    font-variant-numeric: tabular-nums;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-fullscreen-button,
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-stage > video::-webkit-media-controls-overflow-button {
-    display: none !important;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav {
-    position: absolute;
-    top: 50%;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 42px;
-    height: 42px;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    color: #fff;
-    background: rgba(24, 24, 24, .68);
-    box-shadow: 0 2px 10px rgba(0, 0, 0, .24);
-    cursor: pointer;
-    transform: translateY(-50%);
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav:hover:not(:disabled) {
-    background: rgba(50, 50, 50, .88);
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav:disabled {
-    opacity: .24;
-    cursor: default;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav[hidden],
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-counter[hidden] {
-    display: none;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--previous {
-    left: 18px;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--next {
-    right: 18px;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav-icon {
-    width: 11px;
-    height: 11px;
-    border-top: 2px solid currentColor;
-    border-right: 2px solid currentColor;
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--previous .qqnt-toolbox-media-nav-icon {
-    margin-left: 4px;
-    transform: rotate(-135deg);
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-nav--next .qqnt-toolbox-media-nav-icon {
-    margin-right: 4px;
-    transform: rotate(45deg);
-}
-#${INLINE_MEDIA_PREVIEW_ID} .qqnt-toolbox-media-counter {
-    position: absolute;
-    left: 50%;
-    bottom: 16px;
-    z-index: 2;
-    min-width: 48px;
-    box-sizing: border-box;
-    padding: 5px 10px;
-    border-radius: 14px;
-    color: #fff;
-    background: rgba(24, 24, 24, .68);
-    font: 12px/18px var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
-    text-align: center;
-    pointer-events: none;
-    transform: translateX(-50%);
 }
 #${PANEL_ID}[hidden] {
     display: none;
@@ -1029,7 +826,7 @@ let handleToolboxVueComponentMount = () => {};
 }
 #${PANEL_ID} .qqnt-toolbox-swatch[data-value="semi"] .qqnt-toolbox-swatch-sample {
     background:
-        linear-gradient(rgba(0, 0, 0, .72), rgba(0, 0, 0, .72)),
+        linear-gradient(#222222eb, #222222eb),
         conic-gradient(#b8bcc4 25%, #fff 0 50%, #b8bcc4 0 75%, #fff 0) 0 0 / 8px 8px;
 }
 #${PANEL_ID} .qqnt-toolbox-swatch[data-value="black"] .qqnt-toolbox-swatch-sample {
@@ -1260,6 +1057,32 @@ let handleToolboxVueComponentMount = () => {};
     letter-spacing: 0;
     text-align: left;
     white-space: nowrap;
+}
+#${QR_VIEWER_BUTTON_ID} {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    color: inherit;
+    background: transparent;
+    cursor: pointer;
+}
+#${QR_VIEWER_BUTTON_ID}:hover {
+    background: var(--overlay_hover, rgba(127, 127, 127, .14));
+}
+#${QR_VIEWER_BUTTON_ID} svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 body.qqnt-toolbox-side-repeat .message .qqnt-toolbox-repeat-slot.plus-one-btn,
 body.qqnt-toolbox-side-repeat .ml-item .qqnt-toolbox-repeat-slot.plus-one-btn {
@@ -1873,7 +1696,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             renderSimplifySections(root);
             updateConfigUi(root);
         }
-        syncInlineMediaPreviewBackground();
         fakeForwardEditor?.sync();
         const panel = document.getElementById(PANEL_ID);
         if (panel && !panel.hidden && !isConfigEnabled('floatingPanel.enabled')) {
@@ -1912,8 +1734,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         body.append(
             createCategoryTitle(text('功能')),
             createSection('interface', text('界面调整'), [
-                createSwitchItem(text('窗口内查看媒体'), text('图片和视频不再打开独立预览窗口'), 'interfaceTweaks.inlineMediaViewer'),
-                createSwatchItem(text('媒体查看背景'), text('选择预览遮罩颜色'), 'interfaceTweaks.inlineMediaBackground', [
+                createSwitchItem(text('TG 样式媒体预览'), text('使用独立全屏窗口查看图片和视频'), 'interfaceTweaks.inlineMediaViewer'),
+                createSwatchItem(text('媒体预览背景'), text('选择全屏预览背景颜色'), 'interfaceTweaks.inlineMediaBackground', [
                     { value: 'transparent', label: text('透明') },
                     { value: 'white', label: text('白色') },
                     { value: 'semi', label: text('半透明') },
@@ -1923,7 +1745,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     child: true
                 }),
                 createSwitchItem(text('以图片方式打开表情'), text('点击商城表情时按图片打开'), 'interfaceTweaks.openEmojiAsImage'),
-                createSwitchItem(text('单击查看媒体'), text('只改变打开手势，不受查看器类型影响'), 'interfaceTweaks.singleClickMediaViewer'),
+                createSwitchItem(text('单击查看媒体'), text('单击消息中的图片或视频即可打开'), 'interfaceTweaks.singleClickMediaViewer'),
                 createSwitchItem(text('显示完整未读数'), text('消息列表未读数不再以 99+ 封顶'), 'interfaceTweaks.showFullUnreadCount'),
                 createSwitchItem(text('自定义消息菜单排序'), text('调整消息右键菜单中的全部项目'), 'interfaceTweaks.messageContextMenuOrder.enabled'),
                 createActionItem(text('菜单顺序'), '', 'editMessageContextMenuOrder', {
@@ -1931,10 +1753,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'interfaceTweaks.messageContextMenuOrder.enabled',
                     child: true
                 }),
-                createSwitchItem(text('图片查看器优化'), text('点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
-                createSwitchItem(text('图片自动二维码识别'), text('关闭可避免加载本地识码模型'), 'interfaceTweaks.disableImageQrScan', {
-                    inverted: true
-                }),
+                createSwitchItem(text('图片查看器优化'), text('仅优化 QQ 原生查看器：点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
+                createSwitchItem(text('二维码主动识别'), text('在消息与媒体查看器中按需点击识别，不影响 QQ 自带识别'), 'interfaceTweaks.activeQrScan'),
                 createSwitchItem(text('单窗口媒体预览'), text('打开新媒体时关闭旧预览窗口'), 'interfaceTweaks.singleMediaViewer'),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
@@ -3253,6 +3073,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             document.querySelector('.topbar.container-topbar .topbar-content')?.style.setProperty('padding-right', `${controlWidth - 10}px`);
         }
         syncUnreadCountObserver();
+        syncActiveQrViewerButton();
         applySimplifyTweaks();
     }
 
@@ -3445,6 +3266,160 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             Boolean(document.querySelector('.main-area.main-area--image, .main-area--image'));
     }
 
+    function createQrCodeIcon() {
+        const namespace = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(namespace, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '1.8');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        svg.setAttribute('aria-hidden', 'true');
+        for (const value of [
+            ['rect', { x: '3', y: '3', width: '5', height: '5', rx: '1' }],
+            ['rect', { x: '16', y: '3', width: '5', height: '5', rx: '1' }],
+            ['rect', { x: '3', y: '16', width: '5', height: '5', rx: '1' }],
+            ['path', { d: 'M21 16h-3a2 2 0 0 0-2 2v3M21 21v.01M12 7v3a2 2 0 0 1-2 2H7M3 12h.01M12 3h.01M12 16v.01M16 12h1M21 12v.01M12 21v-1' }]
+        ]) {
+            const element = document.createElementNS(namespace, value[0]);
+            for (const [name, attribute] of Object.entries(value[1])) {
+                element.setAttribute(name, attribute);
+            }
+            svg.append(element);
+        }
+        return svg;
+    }
+
+    function getQrImageSources(element, event = null) {
+        const path = event?.composedPath?.() || [];
+        const visual = path.find(item => item instanceof HTMLImageElement) ||
+            (element instanceof HTMLImageElement ? element : element?.querySelector?.('img'));
+        return Array.from(new Set([
+            visual?.currentSrc,
+            visual?.src,
+            visual?.getAttribute?.('src'),
+            visual?.getAttribute?.('data-src'),
+            element?.getAttribute?.('src'),
+            element?.getAttribute?.('data-src')
+        ].map(normalizeText).filter(Boolean)));
+    }
+
+    function getQrLocalPath(value) {
+        let source = normalizeText(value);
+        if (!source) {
+            return '';
+        }
+        if (/^appimg:\/\//i.test(source)) {
+            source = source.replace(/^appimg:\/\/+?/i, '');
+            try {
+                source = decodeURIComponent(source);
+            } catch {
+            }
+            if (/^\/[a-z]:[\\/]/i.test(source)) {
+                source = source.slice(1);
+            }
+            return source;
+        }
+        return /^(?:file:|[a-z]:[\\/]|\/)/i.test(source) ? source : '';
+    }
+
+    function createQrScanPayload(event, target = getSingleClickMediaTarget(event)) {
+        if (!target || target.isVideo) {
+            return null;
+        }
+        const item = target.inlineMedia || {};
+        const sources = getQrImageSources(target.element, event);
+        const candidatePaths = Array.from(new Set([
+            item.filePath,
+            ...sources.map(getQrLocalPath)
+        ].map(normalizeText).filter(Boolean)));
+        const sourceUrl = normalizeText(item.sourceUrl) ||
+            sources.find(value => /^(?:https?|appimg|local|file):/i.test(value)) || '';
+        if (!candidatePaths.length && !sourceUrl) {
+            return null;
+        }
+        return {
+            ...item,
+            type: 'image',
+            ...(candidatePaths[0] ? { filePath: candidatePaths[0] } : {}),
+            ...(sourceUrl ? { sourceUrl } : {}),
+            candidatePaths
+        };
+    }
+
+    async function requestQrScan(payload) {
+        const bridge = getBridge();
+        const scanQrCode = bridge?.scanQrCode;
+        if (!payload || typeof scanQrCode !== 'function' || qrScanInFlight) {
+            return;
+        }
+        qrScanInFlight = true;
+        document.getElementById(QR_VIEWER_BUTTON_ID)?.setAttribute('aria-busy', 'true');
+        try {
+            const result = await scanQrCode(payload);
+            globalThis.qqntToolboxQrDialog?.show?.({
+                infos: result?.infos,
+                message: result?.message || (result?.ok === false ? '二维码识别失败' : ''),
+                onOpen: info => bridge.qrResultAction?.({
+                    type: 'open',
+                    url: info.url
+                }),
+                onCopy: content => bridge.qrResultAction?.({
+                    type: 'copy',
+                    text: content
+                })
+            });
+        } catch {
+            globalThis.qqntToolboxQrDialog?.show?.({
+                message: '二维码识别失败'
+            });
+        } finally {
+            qrScanInFlight = false;
+            document.getElementById(QR_VIEWER_BUTTON_ID)?.removeAttribute('aria-busy');
+        }
+    }
+
+    function syncActiveQrViewerButton() {
+        const existing = document.getElementById(QR_VIEWER_BUTTON_ID);
+        if (!isConfigEnabled('interfaceTweaks.activeQrScan') || !isImageViewerWindow()) {
+            existing?.remove();
+            return;
+        }
+        const footer = document.querySelector('.main-area__footer');
+        const nativeButton = footer?.querySelector(
+            `.image-viewer__qrcode:not(#${QR_VIEWER_BUTTON_ID})`
+        );
+        if (nativeButton) {
+            existing?.remove();
+            return;
+        }
+        if (!footer || existing) {
+            return;
+        }
+        const button = document.createElement('button');
+        button.id = QR_VIEWER_BUTTON_ID;
+        button.type = 'button';
+        button.className = 'image-viewer__qrcode image-viewer__icon';
+        button.setAttribute('aria-label', text('识别二维码'));
+        button.append(createQrCodeIcon());
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const image = document.querySelector('.main-area__image');
+            const payload = image && createQrScanPayload({
+                target: image,
+                composedPath: () => [image]
+            }, {
+                element: image,
+                isVideo: false,
+                inlineMedia: null
+            });
+            requestQrScan(payload);
+        });
+        footer.append(button);
+    }
+
     function isNativeMediaViewerWindow() {
         const hash = String(location.hash || '').toLowerCase();
         return ['#/image-viewer', '#/video-viewer', '#/media-viewer'].some(route => hash.includes(route)) ||
@@ -3453,589 +3428,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 '.main-area--video',
                 '[class*="media-viewer"]'
             ].join(',')));
-    }
-
-    function closeInlineMediaPreview() {
-        const layer = document.getElementById(INLINE_MEDIA_PREVIEW_ID);
-        layer?.qqntToolboxDispose?.();
-        layer?.querySelector('video')?.pause?.();
-        layer?.remove();
-        if (inlineMediaPreviewPreviousFocus instanceof HTMLElement && inlineMediaPreviewPreviousFocus.isConnected) {
-            inlineMediaPreviewPreviousFocus.focus({ preventScroll: true });
-        }
-        inlineMediaPreviewPreviousFocus = null;
-        inlineMediaPreviewOpenedAt = 0;
-    }
-
-    function syncInlineMediaPreviewBackground() {
-        const layer = document.getElementById(INLINE_MEDIA_PREVIEW_ID);
-        if (layer) {
-            layer.dataset.background = getInlineMediaBackground();
-        }
-    }
-
-    function openInlineMediaPreview(payload) {
-        const galleryId = normalizeText(payload?.galleryId);
-        const items = (Array.isArray(payload?.items) ? payload.items : [payload])
-            .map(item => ({
-                type: item?.type === 'video' ? 'video' : 'image',
-                src: normalizeText(item?.src),
-                previewSrc: normalizeText(item?.previewSrc),
-                name: normalizeText(item?.name),
-                pending: item?.pending === true,
-                needsResolve: item?.needsResolve === true,
-                loadRevision: 0
-            }))
-            .filter(item => item.src || item.needsResolve);
-        let index = Math.min(Math.max(Number(payload?.index) || 0, 0), items.length - 1);
-        if (!items.length || !document.body || isNativeMediaViewerWindow()) {
-            return;
-        }
-        recordRendererDiagnostic('media.preview-rendered', {
-            itemCount: items.length,
-            selectedType: items[index]?.type || '',
-            unresolvedItems: items.filter(item => item.needsResolve).length
-        });
-        injectStyle();
-        closeInlineMediaPreview();
-        inlineMediaPreviewPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        const layer = document.createElement('div');
-        layer.id = INLINE_MEDIA_PREVIEW_ID;
-        layer.dataset.background = getInlineMediaBackground();
-        layer.tabIndex = -1;
-        layer.setAttribute('role', 'dialog');
-        layer.setAttribute('aria-modal', 'true');
-        const stage = document.createElement('div');
-        stage.className = 'qqnt-toolbox-media-stage';
-        const createNavButton = (direction, label) => {
-            const button = document.createElement('button');
-            button.type = 'button';
-            button.className = `qqnt-toolbox-media-nav qqnt-toolbox-media-nav--${direction}`;
-            button.setAttribute('aria-label', label);
-            button.title = label;
-            const icon = document.createElement('span');
-            icon.className = 'qqnt-toolbox-media-nav-icon';
-            button.append(icon);
-            return button;
-        };
-        const previous = createNavButton('previous', text('上一个'));
-        const next = createNavButton('next', text('下一个'));
-        const counter = document.createElement('div');
-        counter.className = 'qqnt-toolbox-media-counter';
-        let activeMedia = null;
-        let mediaScale = 1;
-        let mediaOffsetX = 0;
-        let mediaOffsetY = 0;
-        let mediaPanState = null;
-        let suppressPreviewCloseUntil = 0;
-        let wheelNavigationDelta = 0;
-        let wheelNavigationLockedUntil = 0;
-        let activeMediaIndex = -1;
-        let renderSequence = 0;
-        let loadingPlaceholder = null;
-        let disposed = false;
-        let loadController = null;
-        let preloadTimer = 0;
-        const preparedMedia = new Map();
-        const getMediaPanBounds = () => {
-            if (activeMedia?.tagName !== 'IMG') {
-                return { maxX: 0, maxY: 0, pannable: false };
-            }
-            const scaledWidth = activeMedia.offsetWidth * mediaScale;
-            const scaledHeight = activeMedia.offsetHeight * mediaScale;
-            const maxX = Math.max(0, (scaledWidth - stage.clientWidth) / 2);
-            const maxY = Math.max(0, (scaledHeight - stage.clientHeight) / 2);
-            return { maxX, maxY, pannable: maxX > .5 || maxY > .5 };
-        };
-        const resetMediaPan = () => {
-            if (mediaPanState) {
-                try {
-                    stage.releasePointerCapture(mediaPanState.pointerId);
-                } catch {
-                }
-            }
-            mediaPanState = null;
-            layer.classList.remove('is-panning');
-        };
-        const applyMediaTransform = () => {
-            if (!activeMedia) {
-                layer.classList.remove('is-pannable');
-                return;
-            }
-            const bounds = getMediaPanBounds();
-            mediaOffsetX = Math.max(-bounds.maxX, Math.min(bounds.maxX, mediaOffsetX));
-            mediaOffsetY = Math.max(-bounds.maxY, Math.min(bounds.maxY, mediaOffsetY));
-            activeMedia.style.transform =
-                `translate3d(${mediaOffsetX}px, ${mediaOffsetY}px, 0) scale(${mediaScale})`;
-            layer.classList.toggle('is-pannable', bounds.pannable);
-            if (!bounds.pannable) {
-                resetMediaPan();
-            }
-        };
-        const handleMediaViewportResize = () => applyMediaTransform();
-        window.addEventListener('resize', handleMediaViewportResize, { passive: true });
-        const releaseMedia = media => {
-            media?.pause?.();
-            media?.removeAttribute?.('poster');
-            media?.removeAttribute?.('src');
-            media?.load?.();
-        };
-        const clearLoadingPlaceholder = () => {
-            const placeholder = loadingPlaceholder;
-            loadingPlaceholder = null;
-            releaseMedia(placeholder);
-            placeholder?.remove?.();
-        };
-        const createAbortError = () => Object.assign(new Error('media load aborted'), { name: 'AbortError' });
-        const isAbortError = error => error?.name === 'AbortError';
-        const getMediaSource = item => {
-            if (!item.loadRevision || !/^https?:/i.test(item.src)) {
-                return item.src;
-            }
-            const separator = item.src.includes('?') ? '&' : '?';
-            return `${item.src}${separator}qqnt_toolbox_retry=${item.loadRevision}`;
-        };
-        const loadMedia = async (item, mediaIndex, signal) => {
-            const isVideo = item.type === 'video';
-            const media = document.createElement(isVideo ? 'video' : 'img');
-            media.draggable = false;
-            if (isVideo) {
-                media.preload = 'metadata';
-                media.playsInline = true;
-                if (item.previewSrc) {
-                    media.poster = item.previewSrc;
-                }
-            } else {
-                media.decoding = 'async';
-            }
-            await new Promise((resolve, reject) => {
-                const readyEvent = isVideo ? 'loadedmetadata' : 'load';
-                let settled = false;
-                const timer = window.setTimeout(
-                    () => finish(new Error('media load timed out')),
-                    item.pending ? (isVideo ? 65000 : 12000) : isVideo ? 12000 : 6000
-                );
-                const cleanup = () => {
-                    clearTimeout(timer);
-                    media.removeEventListener(readyEvent, handleReady);
-                    media.removeEventListener('error', handleError);
-                    signal.removeEventListener('abort', handleAbort);
-                };
-                const finish = error => {
-                    if (settled) {
-                        return;
-                    }
-                    settled = true;
-                    cleanup();
-                    if (error) {
-                        releaseMedia(media);
-                        reject(error);
-                    } else {
-                        resolve();
-                    }
-                };
-                const handleReady = async () => {
-                    recordRendererDiagnostic('media.load-ready', {
-                        index: mediaIndex,
-                        type: item.type,
-                        readyState: Number(media.readyState) || 0
-                    });
-                    if (!isVideo) {
-                        await media.decode?.().catch(() => {});
-                    }
-                    finish(signal.aborted ? createAbortError() : null);
-                };
-                function handleError() {
-                    finish(new Error('media load failed'));
-                }
-                const handleAbort = () => finish(createAbortError());
-                media.addEventListener(readyEvent, handleReady, { once: true });
-                media.addEventListener('error', handleError, { once: true });
-                signal.addEventListener('abort', handleAbort, { once: true });
-                if (signal.aborted) {
-                    handleAbort();
-                    return;
-                }
-                media.src = getMediaSource(item);
-                media.load?.();
-            });
-            return media;
-        };
-        const prepareMedia = async (item, mediaIndex, signal) => {
-            if (item.src) {
-                try {
-                    return await loadMedia(item, mediaIndex, signal);
-                } catch (error) {
-                    if (isAbortError(error)) {
-                        throw error;
-                    }
-                }
-            }
-            if (!item.needsResolve || !galleryId || signal.aborted) {
-                throw signal.aborted ? createAbortError() : new Error('media load failed');
-            }
-            const resolved = await getBridge()?.prepareInlineMedia?.({ galleryId, index: mediaIndex });
-            if (signal.aborted) {
-                throw createAbortError();
-            }
-            if (!resolved?.src) {
-                throw new Error('media resolve failed');
-            }
-            item.src = normalizeText(resolved.src);
-            item.previewSrc = normalizeText(resolved.previewSrc) || item.previewSrc;
-            item.name = normalizeText(resolved.name) || item.name;
-            item.pending = resolved.pending === true;
-            item.loadRevision += 1;
-            return await loadMedia(item, mediaIndex, signal);
-        };
-        const dropPreparedMedia = mediaIndex => {
-            const entry = preparedMedia.get(mediaIndex);
-            if (!entry) {
-                return;
-            }
-            preparedMedia.delete(mediaIndex);
-            entry.controller.abort();
-            releaseMedia(entry.media);
-        };
-        const getPreparedMedia = mediaIndex => {
-            if (mediaIndex < 0 || mediaIndex >= items.length) {
-                return null;
-            }
-            const cached = preparedMedia.get(mediaIndex);
-            if (cached) {
-                return cached;
-            }
-            const entry = {
-                controller: new AbortController(),
-                media: null,
-                promise: null
-            };
-            entry.promise = prepareMedia(items[mediaIndex], mediaIndex, entry.controller.signal)
-                .then(media => {
-                    if (entry.controller.signal.aborted) {
-                        releaseMedia(media);
-                        throw createAbortError();
-                    }
-                    entry.media = media;
-                    return media;
-                })
-                .catch(error => {
-                    if (preparedMedia.get(mediaIndex) === entry) {
-                        preparedMedia.delete(mediaIndex);
-                    }
-                    throw error;
-                });
-            preparedMedia.set(mediaIndex, entry);
-            return entry;
-        };
-        const scheduleAdjacentPreload = () => {
-            clearTimeout(preloadTimer);
-            const scheduledIndex = index;
-            preloadTimer = window.setTimeout(() => {
-                preloadTimer = 0;
-                if (disposed || index !== scheduledIndex) {
-                    return;
-                }
-                const retained = new Set([index - 1, index + 1]);
-                for (const mediaIndex of retained) {
-                    if (items[mediaIndex]?.type !== 'image') {
-                        continue;
-                    }
-                    getPreparedMedia(mediaIndex)?.promise.catch(() => {});
-                }
-                for (const mediaIndex of Array.from(preparedMedia.keys())) {
-                    if (!retained.has(mediaIndex)) {
-                        dropPreparedMedia(mediaIndex);
-                    }
-                }
-            }, 100);
-        };
-        const updateNavigation = () => {
-            previous.disabled = index === 0;
-            next.disabled = index === items.length - 1;
-            previous.hidden = items.length < 2;
-            next.hidden = items.length < 2;
-            counter.hidden = items.length < 2;
-            counter.textContent = `${index + 1} / ${items.length}`;
-        };
-        const render = async () => {
-            const sequence = ++renderSequence;
-            const renderIndex = index;
-            const item = items[renderIndex];
-            const isVideo = item.type === 'video';
-            clearTimeout(preloadTimer);
-            preloadTimer = 0;
-            loadController?.abort();
-            const prepared = getPreparedMedia(renderIndex);
-            if (!prepared) {
-                return;
-            }
-            preparedMedia.delete(renderIndex);
-            loadController = prepared.controller;
-            activeMedia?.pause?.();
-            resetMediaPan();
-            clearLoadingPlaceholder();
-            if (!activeMedia) {
-                stage.replaceChildren();
-            }
-            mediaScale = 1;
-            mediaOffsetX = 0;
-            mediaOffsetY = 0;
-            suppressPreviewCloseUntil = 0;
-            wheelNavigationDelta = 0;
-            stage.classList.add('is-loading');
-            stage.setAttribute('aria-busy', 'true');
-            layer.setAttribute('aria-label', text(isVideo ? '视频预览' : '图片预览'));
-            updateNavigation();
-            if (!activeMedia && item.previewSrc) {
-                loadingPlaceholder = document.createElement('img');
-                loadingPlaceholder.className = 'qqnt-toolbox-media-placeholder';
-                loadingPlaceholder.alt = '';
-                loadingPlaceholder.decoding = 'async';
-                const placeholder = loadingPlaceholder;
-                placeholder.addEventListener('error', () => {
-                    if (loadingPlaceholder === placeholder) {
-                        clearLoadingPlaceholder();
-                    }
-                }, { once: true });
-                loadingPlaceholder.src = item.previewSrc;
-                stage.append(loadingPlaceholder);
-            }
-            let media;
-            try {
-                media = await prepared.promise;
-            } catch (loadError) {
-                if (disposed || sequence !== renderSequence) {
-                    return;
-                }
-                recordRendererDiagnostic('media.load-failed', {
-                    index: renderIndex,
-                    type: item.type,
-                    reason: loadError?.message || String(loadError)
-                }, 'warn');
-                const previousMedia = activeMedia;
-                activeMedia = null;
-                activeMediaIndex = -1;
-                const error = document.createElement('div');
-                error.className = 'qqnt-toolbox-media-error';
-                const errorLabel = document.createElement('span');
-                errorLabel.textContent = text('\u5a92\u4f53\u52a0\u8f7d\u5931\u8d25');
-                const retry = document.createElement('button');
-                retry.type = 'button';
-                retry.className = 'qqnt-toolbox-media-retry qqnt-toolbox-media-control';
-                retry.setAttribute('aria-label', text('重试'));
-                retry.title = text('重试');
-                retry.textContent = '↻';
-                retry.addEventListener('click', event => {
-                    event.preventDefault();
-                    stopEvent(event);
-                    if (disposed || index !== renderIndex) {
-                        return;
-                    }
-                    if (item.needsResolve) {
-                        item.src = '';
-                    }
-                    item.loadRevision += 1;
-                    render().catch(() => {});
-                });
-                error.append(errorLabel, retry);
-                clearLoadingPlaceholder();
-                stage.replaceChildren(error);
-                releaseMedia(previousMedia);
-                stage.classList.remove('is-loading');
-                stage.removeAttribute('aria-busy');
-                return;
-            }
-            if (disposed || sequence !== renderSequence) {
-                return;
-            }
-            clearLoadingPlaceholder();
-            const previousMedia = activeMedia;
-            activeMedia = media;
-            activeMediaIndex = renderIndex;
-            if (isVideo) {
-                media.controls = true;
-                media.setAttribute('controlsList', 'nodownload nofullscreen noremoteplayback');
-                media.disablePictureInPicture = true;
-                media.disableRemotePlayback = true;
-                media.autoplay = true;
-                media.preload = 'auto';
-                media.playsInline = true;
-                if (media.readyState >= 3) {
-                    media.play().catch(() => {});
-                } else {
-                    media.addEventListener('canplay', () => {
-                        if (activeMedia === media) {
-                            media.play().catch(() => {});
-                        }
-                    }, { once: true });
-                }
-            } else {
-                media.alt = item.name || text('图片');
-            }
-            stage.replaceChildren(media);
-            if (previousMedia !== media) {
-                releaseMedia(previousMedia);
-            }
-            applyMediaTransform();
-            stage.classList.remove('is-loading');
-            stage.removeAttribute('aria-busy');
-            scheduleAdjacentPreload();
-        };
-        const navigate = delta => {
-            const nextIndex = Math.min(Math.max(index + delta, 0), items.length - 1);
-            if (nextIndex === index) {
-                return;
-            }
-            index = nextIndex;
-            render().catch(() => {});
-        };
-        layer.qqntToolboxNavigate = navigate;
-        previous.addEventListener('click', () => navigate(-1));
-        next.addEventListener('click', () => navigate(1));
-        layer.append(stage, previous, next, counter);
-        render().catch(() => {});
-        layer.qqntToolboxDispose = () => {
-            disposed = true;
-            clearTimeout(preloadTimer);
-            loadController?.abort();
-            for (const mediaIndex of Array.from(preparedMedia.keys())) {
-                dropPreparedMedia(mediaIndex);
-            }
-            resetMediaPan();
-            clearLoadingPlaceholder();
-            window.removeEventListener('resize', handleMediaViewportResize);
-            renderSequence += 1;
-            activeMedia = null;
-            activeMediaIndex = -1;
-        };
-        const stopEvent = event => {
-            event.stopPropagation();
-            event.stopImmediatePropagation?.();
-        };
-        stage.addEventListener('pointerdown', event => {
-            if (event.button !== 0 || !getMediaPanBounds().pannable) {
-                return;
-            }
-            mediaPanState = {
-                pointerId: event.pointerId,
-                startX: event.clientX,
-                startY: event.clientY,
-                offsetX: mediaOffsetX,
-                offsetY: mediaOffsetY,
-                moved: false
-            };
-            try {
-                stage.setPointerCapture(event.pointerId);
-            } catch {
-            }
-            event.preventDefault();
-            stopEvent(event);
-        });
-        stage.addEventListener('pointermove', event => {
-            if (!mediaPanState || mediaPanState.pointerId !== event.pointerId) {
-                return;
-            }
-            const deltaX = event.clientX - mediaPanState.startX;
-            const deltaY = event.clientY - mediaPanState.startY;
-            if (!mediaPanState.moved && Math.hypot(deltaX, deltaY) < 4) {
-                stopEvent(event);
-                return;
-            }
-            mediaPanState.moved = true;
-            mediaOffsetX = mediaPanState.offsetX + deltaX;
-            mediaOffsetY = mediaPanState.offsetY + deltaY;
-            layer.classList.add('is-panning');
-            applyMediaTransform();
-            event.preventDefault();
-            stopEvent(event);
-        });
-        const finishMediaPan = (event, cancelled = false) => {
-            if (!mediaPanState || mediaPanState.pointerId !== event.pointerId) {
-                return;
-            }
-            const moved = mediaPanState.moved;
-            resetMediaPan();
-            if (moved && !cancelled) {
-                suppressPreviewCloseUntil = performance.now() + 350;
-                event.preventDefault();
-            }
-            stopEvent(event);
-        };
-        stage.addEventListener('pointerup', event => finishMediaPan(event));
-        stage.addEventListener('pointercancel', event => finishMediaPan(event, true));
-        for (const eventName of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'dblclick']) {
-            layer.addEventListener(eventName, stopEvent);
-        }
-        for (const eventName of ['contextmenu', 'dragstart']) {
-            layer.addEventListener(eventName, event => {
-                event.preventDefault();
-                stopEvent(event);
-            }, { passive: false });
-        }
-        layer.addEventListener('wheel', event => {
-            event.preventDefault();
-            stopEvent(event);
-            if (!Number.isFinite(event.deltaY) || event.deltaY === 0) {
-                return;
-            }
-            if (!event.ctrlKey) {
-                const now = performance.now();
-                if (now < wheelNavigationLockedUntil) {
-                    wheelNavigationDelta = 0;
-                    return;
-                }
-                wheelNavigationDelta += event.deltaY;
-                if (Math.abs(wheelNavigationDelta) < 60) {
-                    return;
-                }
-                const direction = wheelNavigationDelta > 0 ? 1 : -1;
-                wheelNavigationDelta = 0;
-                wheelNavigationLockedUntil = now + 180;
-                navigate(direction);
-                return;
-            }
-            wheelNavigationDelta = 0;
-            if (!activeMedia) {
-                return;
-            }
-            const stageRect = stage.getBoundingClientRect();
-            const pointerX = event.clientX - stageRect.left - stageRect.width / 2;
-            const pointerY = event.clientY - stageRect.top - stageRect.height / 2;
-            const wheelDelta = Math.max(-160, Math.min(160, event.deltaY));
-            const nextScale = Math.max(.25, Math.min(8, mediaScale * Math.exp(-wheelDelta * .0018)));
-            if (nextScale === mediaScale) {
-                return;
-            }
-            const scaleRatio = nextScale / mediaScale;
-            mediaOffsetX = pointerX - (pointerX - mediaOffsetX) * scaleRatio;
-            mediaOffsetY = pointerY - (pointerY - mediaOffsetY) * scaleRatio;
-            mediaScale = nextScale;
-            applyMediaTransform();
-        }, { passive: false });
-        layer.addEventListener('click', event => {
-            stopEvent(event);
-            if (performance.now() < suppressPreviewCloseUntil) {
-                event.preventDefault();
-                return;
-            }
-            if (performance.now() - inlineMediaPreviewOpenedAt < 320) {
-                event.preventDefault();
-                return;
-            }
-            if (event.target instanceof Element && event.target.closest('.qqnt-toolbox-media-control, .qqnt-toolbox-media-nav')) {
-                event.preventDefault();
-                return;
-            }
-            const isVideo = items[index].type === 'video';
-            if (!isVideo || event.target === layer || event.target === stage) {
-                event.preventDefault();
-                closeInlineMediaPreview();
-            }
-        });
-        document.body.append(layer);
-        inlineMediaPreviewOpenedAt = performance.now();
-        layer.focus({ preventScroll: true });
     }
 
     function getVideoOpenControl(element) {
@@ -4275,7 +3667,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return null;
         }
         const messageElement = getMessageElementFromElement(event.target);
-        if (!(messageElement instanceof Element) || event.target.closest(`#${INLINE_MEDIA_PREVIEW_ID}`)) {
+        if (!(messageElement instanceof Element)) {
             return null;
         }
         const record = findMessageRecordFromElement(messageElement) || findMessageRecordFromElement(event.target);
@@ -4404,6 +3796,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             peerUid: normalizeText(peer?.peerUid || record?.peerUid || record?.peer?.peerUid),
             msgId: normalizeText(record?.msgId),
             msgSeq: normalizeText(record?.msgSeq),
+            msgTime: normalizeText(record?.msgTime),
+            guildId: normalizeText(peer?.guildId || record?.guildId || record?.peer?.guildId),
             elementId: normalizeText(recordElement?.elementId)
         };
         const pendingFile = kind.endsWith('-file') && !filePath && !sourceUrl &&
@@ -4423,13 +3817,39 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 filePath.split(/[\\/]/).pop() || (type === 'video' ? 'video.mp4' : 'image.png'),
             sourceIndex,
             identity,
+            ...(Number(media?.fileSize) > 0 ? { fileSize: Number(media.fileSize) } : {}),
             ...(pendingFile ? { pendingFile: true } : {})
         };
-        if (!isForwardRecordWindow()) {
-            return item;
-        }
-        item.recordSource = 'forward-detail';
         return item;
+    }
+
+    function getInlineMediaIdentityKey(item) {
+        const identity = item?.identity || {};
+        const msgId = normalizeText(identity.msgId);
+        const elementId = normalizeText(identity.elementId);
+        return msgId && elementId
+            ? `${msgId}:${elementId}`
+            : `${item?.type || ''}:${normalizeText(item?.filePath || item?.sourceUrl)}`;
+    }
+
+    function getForwardInlineMediaGallery(selectedItem) {
+        const items = [];
+        const seen = new Set();
+        for (const messageElement of getVisibleMessageElements()) {
+            const record = findMessageRecordFromElement(messageElement);
+            const elements = Array.isArray(record?.elements) ? record.elements : [];
+            elements.forEach((element, index) => {
+                const item = createInlineMediaOpenItem(record, element, index);
+                const key = item && getInlineMediaIdentityKey(item);
+                if (item && key && !seen.has(key)) {
+                    seen.add(key);
+                    items.push(item);
+                }
+            });
+        }
+        const selectedKey = getInlineMediaIdentityKey(selectedItem);
+        const index = items.findIndex(item => getInlineMediaIdentityKey(item) === selectedKey);
+        return index >= 0 ? { items, index } : null;
     }
 
     function getMediaDomSelectorGroups(kind) {
@@ -4559,8 +3979,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             '.reply-message__inner',
             '[class*="reply-message" i]',
             '[class*="reaction" i]',
-            '.q-context-menu',
-            '#' + INLINE_MEDIA_PREVIEW_ID
+            '.q-context-menu'
         ];
         const visual = (event.composedPath?.() || []).find(item =>
             item instanceof Element && item.tagName === 'IMG' &&
@@ -4594,7 +4013,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (!(item instanceof Element) || !item.matches(MESSAGE_MEDIA_SELECTOR)) {
                 continue;
             }
-            if (!item.closest('.message, .ml-item') || item.closest(`#${INLINE_MEDIA_PREVIEW_ID}`)) {
+            if (!item.closest('.message, .ml-item')) {
                 continue;
             }
             const mediaElement = getClickedMediaElement(event, item);
@@ -4660,9 +4079,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     isFileMedia: isFileVideo || isFileImage,
                     source: isFileMessage ? 'file-message' : 'message',
                     openControl: resolvedIsVideo || isFileMessage ? getVideoOpenControl(element) : element,
-                    inlineMedia: resolvedIsVideo || isFileImage
-                        ? createInlineMediaOpenItem(record, inlineElement, elements.indexOf(inlineElement))
-                        : null
+                    inlineMedia: createInlineMediaOpenItem(
+                        record,
+                        inlineElement,
+                        elements.indexOf(inlineElement)
+                    )
                 };
             }
         }
@@ -4718,48 +4139,31 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         event.stopImmediatePropagation?.();
     }
 
-    async function openInlineMediaTarget(target, sourceEvent) {
-        const payload = {
+    async function openToolboxMediaTarget(target, sourceEvent) {
+        let payload = {
             ...target.inlineMedia,
             source: target.source || 'message'
         };
-        if (target.isFileMedia && payload.pendingFile === true) {
-            let opened = false;
-            try {
-                opened = await getBridge()?.openInlineMedia?.(payload) === true;
-            } catch {
+        if (isForwardRecordWindow()) {
+            const gallery = getForwardInlineMediaGallery(payload);
+            if (gallery) {
+                payload = { ...payload, gallery };
             }
-            dispatchNativeMediaOpen(target, sourceEvent);
-            if (!opened) {
-                recordRendererDiagnostic('media.pending-file-preview-failed', {
-                    mediaType: target.isVideo ? 'video' : 'image'
-                }, 'warn');
-            }
-            return;
         }
-        let nativeActivated = false;
-        if (target.isVideo && !target.isFileMedia) {
-            dispatchNativeMediaOpen(target, sourceEvent);
-            nativeActivated = true;
-            await new Promise(resolve => setTimeout(resolve, 0));
-            if (document.getElementById(INLINE_MEDIA_PREVIEW_ID)) {
-                return;
-            }
-            payload.nativeDownloadStarted = true;
-        }
-        let opened = false;
+        let decision = null;
         try {
-            opened = await getBridge()?.openInlineMedia?.(payload) === true;
+            decision = await getBridge()?.openMediaViewer?.(payload);
         } catch {
         }
-        if (!opened && !nativeActivated) {
+        const handled = decision?.handled === true;
+        if (!handled || decision?.activateNative === true) {
             dispatchNativeMediaOpen(target, sourceEvent);
         }
     }
 
     function handleEmojiImageClick(event) {
         if (!isConfigEnabled('interfaceTweaks.openEmojiAsImage') || event.button !== 0 ||
-            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isNativeMediaViewerWindow()) {
+            isNativeMediaViewerWindow()) {
             return;
         }
         const target = getEmojiImageTarget(event);
@@ -4806,58 +4210,25 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         const singleClickEnabled = isConfigEnabled('interfaceTweaks.singleClickMediaViewer');
         const inlineViewerEnabled = isConfigEnabled('interfaceTweaks.inlineMediaViewer');
-        if ((!singleClickEnabled && !inlineViewerEnabled) || event.button !== 0 ||
-            document.getElementById(INLINE_MEDIA_PREVIEW_ID) || isNativeMediaViewerWindow()) {
+        if (!singleClickEnabled || event.button !== 0 ||
+            isNativeMediaViewerWindow()) {
             return;
         }
         const target = getSingleClickMediaTarget(event);
         if (!target) {
             return;
         }
-        const eventPath = event.composedPath?.() || [event.target];
-        const clickedOpenControl = target.isVideo && target.openControl && eventPath.some(item =>
-            item === target.openControl || (item instanceof Node && target.openControl?.contains?.(item))
-        );
-        const openInlineMedia = inlineViewerEnabled && (target.isVideo || target.isFileMedia) &&
-            target.inlineMedia &&
-            (singleClickEnabled || clickedOpenControl || target.isFileMedia);
-        const shouldActivateNative = singleClickEnabled || clickedOpenControl || target.isFileMedia;
-        if (!openInlineMedia && !shouldActivateNative) {
-            return;
-        }
+        const openToolboxViewer = inlineViewerEnabled && Boolean(target.inlineMedia);
         recordRendererDiagnostic('media.open-requested', {
             gesture: 'single-click',
-            viewer: openInlineMedia ? 'inline' : 'native',
+            viewer: openToolboxViewer ? 'telegram' : 'native',
             mediaType: target.isVideo ? 'video' : 'image',
             source: target.source || 'message'
         });
         stopMediaOpenEvent(event);
-        queueMicrotask(() => openInlineMedia
-            ? openInlineMediaTarget(target, event)
+        queueMicrotask(() => openToolboxViewer
+            ? openToolboxMediaTarget(target, event)
             : dispatchNativeMediaOpen(target, event));
-    }
-
-    function handleInlineMediaPreviewKey(event) {
-        const layer = document.getElementById(INLINE_MEDIA_PREVIEW_ID);
-        if (!layer || !['Escape', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
-            return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation?.();
-        if (event.type !== 'keydown') {
-            return;
-        }
-        if (event.key === 'Escape') {
-            closeInlineMediaPreview();
-        } else {
-            layer.qqntToolboxNavigate?.(event.key === 'ArrowLeft' ? -1 : 1);
-        }
-    }
-
-    async function subscribeInlineMediaPreview() {
-        const bridge = await waitForBridge();
-        bridge?.onInlineMediaPreview?.(openInlineMediaPreview);
     }
 
     function isImageAllInViewport() {
@@ -6530,6 +5901,24 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         icon.style.webkitMaskImage = 'none';
     }
 
+    function setNativeMenuItemQrIcon(item) {
+        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
+        if (!icon) {
+            return;
+        }
+        const svg = createQrCodeIcon();
+        svg.style.width = '16px';
+        svg.style.height = '16px';
+        icon.replaceChildren(svg);
+        icon.style.display = icon.style.display || 'flex';
+        icon.style.alignItems = 'center';
+        icon.style.justifyContent = 'center';
+        icon.style.background = 'transparent';
+        icon.style.backgroundImage = 'none';
+        icon.style.maskImage = 'none';
+        icon.style.webkitMaskImage = 'none';
+    }
+
     function setNativeMenuItemPokeIcon(item) {
         const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
         if (!icon) {
@@ -6790,6 +6179,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         };
     }
 
+    function createQrScanContextMenuConfig(payload) {
+        return {
+            type: TOOLBOX_MENU_TYPE_QR_SCAN,
+            text: text('识别二维码'),
+            icon: 'scan',
+            when: () => true,
+            handler: () => requestQrScan(payload),
+            __qqntToolboxDescriptor: {
+                id: 'toolbox:qr-scan',
+                label: text('识别二维码'),
+                toolbox: true
+            },
+            __qqntToolboxInsertAfter: ['qq:识别图中文字', 'qq:提取文字']
+        };
+    }
+
     function createPokeRecallMenuItem(menu, record, messageElement) {
         const template = getNativeMenuItemElements(menu)[0];
         const item = template?.cloneNode(true) || document.createElement('div');
@@ -6877,17 +6282,28 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!isMsgRecord(record)) {
             return [];
         }
-        return shouldUseContextRepeat() && isRepeatableRecord(record)
-            ? [createRepeatContextMenuConfig(record)]
-            : [];
+        const items = [];
+        if (shouldUseContextRepeat() && isRepeatableRecord(record)) {
+            items.push(createRepeatContextMenuConfig(record));
+        }
+        if (isConfigEnabled('interfaceTweaks.activeQrScan')) {
+            const payload = createQrScanPayload(sourceEvent);
+            if (payload) {
+                items.push(createQrScanContextMenuConfig(payload));
+            }
+        }
+        return items;
     }
 
     function decorateToolboxMessageContextMenuItem({ item }) {
-        if (!shouldUseContextRepeat() || compactText(item) !== text('\u590d\u8bfb')) {
-            return;
+        const label = compactText(item);
+        if (shouldUseContextRepeat() && label === text('\u590d\u8bfb')) {
+            item.classList.add('qqnt-toolbox-repeat-menu-item');
+            setNativeMenuItemRepeatIcon(item);
+        } else if (isConfigEnabled('interfaceTweaks.activeQrScan') && label === text('识别二维码')) {
+            item.classList.add('qqnt-toolbox-qr-scan-menu-item');
+            setNativeMenuItemQrIcon(item);
         }
-        item.classList.add('qqnt-toolbox-repeat-menu-item');
-        setNativeMenuItemRepeatIcon(item);
     }
 
     function installMessageContextMenuActions() {
@@ -6948,9 +6364,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             scheduleRepeatEntrypointRefresh();
             scheduleInterfaceTweaksRefresh();
             syncRendererReadyDiagnostic();
-            if (!isConfigEnabled('interfaceTweaks.inlineMediaViewer')) {
-                closeInlineMediaPreview();
-            }
         });
     }
 
@@ -6990,8 +6403,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     initializeToolboxSettings = initSettingWindow;
 
-    document.addEventListener('keydown', handleInlineMediaPreviewKey, true);
-    document.addEventListener('keyup', handleInlineMediaPreviewKey, true);
     document.addEventListener('click', handleEmojiImageClick, true);
     document.addEventListener('click', handleSingleClickMedia, true);
 
@@ -7180,7 +6591,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     loadConfig().then(subscribeConfig).catch(() => {});
     loadUpdateState().then(subscribeUpdateState).catch(() => {});
-    subscribeInlineMediaPreview().catch(() => {});
     installProfileCardHoverBlocker();
     installPokeInteractions();
     installRepeatEntrypoints();

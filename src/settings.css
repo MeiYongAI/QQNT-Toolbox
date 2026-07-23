@@ -248,7 +248,7 @@
 
 #qqnt-toolbox-settings .qqnt-toolbox-swatch[data-value="semi"] .qqnt-toolbox-swatch-sample {
     background:
-        linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.72)),
+        linear-gradient(#222222eb, #222222eb),
         conic-gradient(#b8bcc4 25%, #fff 0 50%, #b8bcc4 0 75%, #fff 0) 0 0 / 8px 8px;
 }
 

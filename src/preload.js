@@ -5,9 +5,9 @@ const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_DIAGNOSTIC_EVENT = 'qqnt-toolbox:diagnostic-event';
 const CHANNEL_DIAGNOSTIC_ACTION = 'qqnt-toolbox:diagnostic-action';
-const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
-const CHANNEL_OPEN_INLINE_MEDIA = 'qqnt-toolbox:open-inline-media';
-const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
+const CHANNEL_OPEN_MEDIA_VIEWER = 'qqnt-toolbox:open-media-viewer';
+const CHANNEL_SCAN_QR_CODE = 'qqnt-toolbox:scan-qr-code';
+const CHANNEL_QR_RESULT_ACTION = 'qqnt-toolbox:qr-result-action';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
@@ -54,14 +54,10 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     checkForUpdates: options => ipcRenderer.invoke(CHANNEL_CHECK_UPDATE, options),
     prepareUpdate: () => ipcRenderer.invoke(CHANNEL_PREPARE_UPDATE),
     restartForUpdate: () => ipcRenderer.invoke(CHANNEL_RESTART_UPDATE),
-    openInlineMedia: payload => ipcRenderer.invoke(CHANNEL_OPEN_INLINE_MEDIA, payload),
-    prepareInlineMedia: payload => ipcRenderer.invoke(CHANNEL_PREPARE_INLINE_MEDIA, payload),
+    openMediaViewer: payload => ipcRenderer.invoke(CHANNEL_OPEN_MEDIA_VIEWER, payload),
+    scanQrCode: payload => ipcRenderer.invoke(CHANNEL_SCAN_QR_CODE, payload),
+    qrResultAction: payload => ipcRenderer.invoke(CHANNEL_QR_RESULT_ACTION, payload),
     openEmojiAsImage: payload => ipcRenderer.invoke(CHANNEL_OPEN_EMOJI_AS_IMAGE, payload),
-    onInlineMediaPreview: callback => {
-        const listener = (_event, payload) => callback(payload);
-        ipcRenderer.on(CHANNEL_INLINE_MEDIA_PREVIEW, listener);
-        return () => ipcRenderer.removeListener(CHANNEL_INLINE_MEDIA_PREVIEW, listener);
-    },
     onConfigChanged: callback => {
         const listener = (_event, config) => callback(config);
         ipcRenderer.on(CHANNEL_CONFIG_CHANGED, listener);

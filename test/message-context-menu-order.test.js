@@ -117,6 +117,7 @@ test('ships both QQ native and Toolbox entries in the initial editor catalog', a
     assert.ok(ids.has('qq:转发'));
     assert.ok(ids.has('toolbox:repeat'));
     assert.ok(ids.has('toolbox:voice-save'));
+    assert.ok(ids.has('toolbox:qr-scan'));
     assert.ok(ids.has('toolbox:poke-recall'));
     assert.ok(ids.has('qq:separator:1'));
 });

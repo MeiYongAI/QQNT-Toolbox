@@ -5,9 +5,17 @@ const CHANNEL_SET_CONFIG = 'qqnt-toolbox:set-config';
 const CHANNEL_CONFIG_CHANGED = 'qqnt-toolbox:config-changed';
 const CHANNEL_DIAGNOSTIC_EVENT = 'qqnt-toolbox:diagnostic-event';
 const CHANNEL_DIAGNOSTIC_ACTION = 'qqnt-toolbox:diagnostic-action';
-const CHANNEL_INLINE_MEDIA_PREVIEW = 'qqnt-toolbox:inline-media-preview';
-const CHANNEL_OPEN_INLINE_MEDIA = 'qqnt-toolbox:open-inline-media';
-const CHANNEL_PREPARE_INLINE_MEDIA = 'qqnt-toolbox:prepare-inline-media';
+const CHANNEL_OPEN_MEDIA_VIEWER = 'qqnt-toolbox:open-media-viewer';
+const CHANNEL_SCAN_QR_CODE = 'qqnt-toolbox:scan-qr-code';
+const CHANNEL_QR_RESULT_ACTION = 'qqnt-toolbox:qr-result-action';
+const CHANNEL_MEDIA_VIEWER_GET_STATE = 'qqnt-toolbox:media-viewer-get-state';
+const CHANNEL_MEDIA_VIEWER_PREPARE = 'qqnt-toolbox:media-viewer-prepare';
+const CHANNEL_MEDIA_VIEWER_ACTION = 'qqnt-toolbox:media-viewer-action';
+const CHANNEL_MEDIA_VIEWER_STATE_CHANGED = 'qqnt-toolbox:media-viewer-state-changed';
+const CHANNEL_MEDIA_PIP_GET_STATE = 'qqnt-toolbox:media-pip-get-state';
+const CHANNEL_MEDIA_PIP_ACTION = 'qqnt-toolbox:media-pip-action';
+const CHANNEL_MEDIA_PIP_DRAG = 'qqnt-toolbox:media-pip-drag';
+const CHANNEL_MEDIA_PIP_STATE_CHANGED = 'qqnt-toolbox:media-pip-state-changed';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
@@ -38,9 +46,17 @@ module.exports = Object.freeze({
     CHANNEL_CONFIG_CHANGED,
     CHANNEL_DIAGNOSTIC_EVENT,
     CHANNEL_DIAGNOSTIC_ACTION,
-    CHANNEL_INLINE_MEDIA_PREVIEW,
-    CHANNEL_OPEN_INLINE_MEDIA,
-    CHANNEL_PREPARE_INLINE_MEDIA,
+    CHANNEL_OPEN_MEDIA_VIEWER,
+    CHANNEL_SCAN_QR_CODE,
+    CHANNEL_QR_RESULT_ACTION,
+    CHANNEL_MEDIA_VIEWER_GET_STATE,
+    CHANNEL_MEDIA_VIEWER_PREPARE,
+    CHANNEL_MEDIA_VIEWER_ACTION,
+    CHANNEL_MEDIA_VIEWER_STATE_CHANGED,
+    CHANNEL_MEDIA_PIP_GET_STATE,
+    CHANNEL_MEDIA_PIP_ACTION,
+    CHANNEL_MEDIA_PIP_DRAG,
+    CHANNEL_MEDIA_PIP_STATE_CHANGED,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,

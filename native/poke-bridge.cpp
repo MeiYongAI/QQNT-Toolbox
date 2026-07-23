@@ -30,6 +30,9 @@ using NapiIsBuffer = napi_status(__cdecl*)(napi_env, napi_value, bool*);
 using NapiGetBufferInfo = napi_status(__cdecl*)(napi_env, napi_value, void**, std::size_t*);
 using NapiCreateStringLatin1 = napi_status(__cdecl*)(
     napi_env, const char*, std::size_t, napi_value*);
+using NapiGetCallbackInfo = napi_status(__cdecl*)(
+    napi_env, napi_callback_info, std::size_t*, napi_value*, napi_value*, void**);
+using NapiGetValueInt32 = napi_status(__cdecl*)(napi_env, napi_value, std::int32_t*);
 
 struct NapiApi {
     NapiCreateFunction createFunction = nullptr;
@@ -38,6 +41,8 @@ struct NapiApi {
     NapiIsBuffer isBuffer = nullptr;
     NapiGetBufferInfo getBufferInfo = nullptr;
     NapiCreateStringLatin1 createStringLatin1 = nullptr;
+    NapiGetCallbackInfo getCallbackInfo = nullptr;
+    NapiGetValueInt32 getValueInt32 = nullptr;
 };
 
 struct InternalString {
@@ -52,6 +57,9 @@ NapiApi g_napi;
 ConvertValue g_originalConvert = nullptr;
 std::uint8_t* g_target = nullptr;
 volatile LONG g_conversionArmed = 0;
+HWND g_moveWindow = nullptr;
+RECT g_moveOrigin = {};
+UINT g_moveDpi = USER_DEFAULT_SCREEN_DPI;
 
 constexpr std::size_t MAX_INTERCEPTED_BUFFER_SIZE = 4096;
 
@@ -82,8 +90,11 @@ bool resolveNapiApi() {
     g_napi.getBufferInfo = resolveNapi<NapiGetBufferInfo>("napi_get_buffer_info");
     g_napi.createStringLatin1 =
         resolveNapi<NapiCreateStringLatin1>("napi_create_string_latin1");
+    g_napi.getCallbackInfo = resolveNapi<NapiGetCallbackInfo>("napi_get_cb_info");
+    g_napi.getValueInt32 = resolveNapi<NapiGetValueInt32>("napi_get_value_int32");
     return g_napi.createFunction && g_napi.setNamedProperty && g_napi.createInt32 && g_napi.isBuffer &&
-        g_napi.getBufferInfo && g_napi.createStringLatin1;
+        g_napi.getBufferInfo && g_napi.createStringLatin1 && g_napi.getCallbackInfo &&
+        g_napi.getValueInt32;
 }
 
 bool getModuleSize(HMODULE module, std::uint32_t& size) {
@@ -344,6 +355,74 @@ napi_value __cdecl disarmConversion(napi_env, napi_callback_info) {
     return nullptr;
 }
 
+napi_value createInt32Result(napi_env env, std::int32_t result) {
+    napi_value value = nullptr;
+    g_napi.createInt32(env, result, &value);
+    return value;
+}
+
+bool readWindowHandle(napi_env env, napi_value value, HWND& window) {
+    void* handleData = nullptr;
+    std::size_t handleLength = 0;
+    if (!getBufferView(env, value, handleData, handleLength) ||
+        !handleData || handleLength < sizeof(HWND)) {
+        return false;
+    }
+    std::memcpy(&window, handleData, sizeof(window));
+    return IsWindow(window) != FALSE;
+}
+
+napi_value __cdecl beginWindowMove(napi_env env, napi_callback_info info) {
+    std::size_t count = 1;
+    napi_value arguments[1] = {};
+    HWND window = nullptr;
+    if (g_napi.getCallbackInfo(env, info, &count, arguments, nullptr, nullptr) != NAPI_OK ||
+        count < 1 || !readWindowHandle(env, arguments[0], window) ||
+        !GetWindowRect(window, &g_moveOrigin)) {
+        g_moveWindow = nullptr;
+        return createInt32Result(env, -1);
+    }
+    g_moveWindow = window;
+    g_moveDpi = GetDpiForWindow(window);
+    if (g_moveDpi == 0) {
+        g_moveDpi = USER_DEFAULT_SCREEN_DPI;
+    }
+    return createInt32Result(env, 1);
+}
+
+napi_value __cdecl moveWindow(napi_env env, napi_callback_info info) {
+    std::size_t count = 3;
+    napi_value arguments[3] = {};
+    if (g_napi.getCallbackInfo(env, info, &count, arguments, nullptr, nullptr) != NAPI_OK ||
+        count < 3) {
+        return createInt32Result(env, -1);
+    }
+    HWND window = nullptr;
+    if (!readWindowHandle(env, arguments[0], window) || window != g_moveWindow) {
+        return createInt32Result(env, -2);
+    }
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    if (g_napi.getValueInt32(env, arguments[1], &x) != NAPI_OK ||
+        g_napi.getValueInt32(env, arguments[2], &y) != NAPI_OK) {
+        return createInt32Result(env, -4);
+    }
+    const auto physicalX = g_moveOrigin.left + MulDiv(x, g_moveDpi, USER_DEFAULT_SCREEN_DPI);
+    const auto physicalY = g_moveOrigin.top + MulDiv(y, g_moveDpi, USER_DEFAULT_SCREEN_DPI);
+    constexpr UINT flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+        SWP_NOOWNERZORDER;
+    return createInt32Result(
+        env,
+        SetWindowPos(window, nullptr, physicalX, physicalY, 0, 0, flags) ? 1 : -5);
+}
+
+napi_value __cdecl endWindowMove(napi_env env, napi_callback_info) {
+    g_moveWindow = nullptr;
+    g_moveOrigin = {};
+    g_moveDpi = USER_DEFAULT_SCREEN_DPI;
+    return createInt32Result(env, 1);
+}
+
 } // namespace
 
 extern "C" __declspec(dllexport) std::int32_t node_api_module_get_api_version_v1() {
@@ -379,6 +458,36 @@ extern "C" __declspec(dllexport) napi_value napi_register_module_v1(
         nullptr,
         &function) == NAPI_OK) {
         g_napi.setNamedProperty(env, exports, "disarmConversion", function);
+    }
+    function = nullptr;
+    if (g_napi.createFunction(
+        env,
+        "beginWindowMove",
+        15,
+        beginWindowMove,
+        nullptr,
+        &function) == NAPI_OK) {
+        g_napi.setNamedProperty(env, exports, "beginWindowMove", function);
+    }
+    function = nullptr;
+    if (g_napi.createFunction(
+        env,
+        "moveWindow",
+        10,
+        moveWindow,
+        nullptr,
+        &function) == NAPI_OK) {
+        g_napi.setNamedProperty(env, exports, "moveWindow", function);
+    }
+    function = nullptr;
+    if (g_napi.createFunction(
+        env,
+        "endWindowMove",
+        13,
+        endWindowMove,
+        nullptr,
+        &function) == NAPI_OK) {
+        g_napi.setNamedProperty(env, exports, "endWindowMove", function);
     }
     return exports;
 }

@@ -9,6 +9,7 @@ const test = require('node:test');
 function loadPreload(relativePath) {
     const exposed = new Map();
     const invocations = [];
+    const sends = [];
     const listeners = [];
     const electron = {
         contextBridge: {
@@ -20,6 +21,9 @@ function loadPreload(relativePath) {
             invoke(channel, payload) {
                 invocations.push([channel, payload]);
                 return Promise.resolve({ channel, payload });
+            },
+            send(channel, payload) {
+                sends.push([channel, payload]);
             },
             on(channel, listener) {
                 listeners.push([channel, listener]);
@@ -52,11 +56,16 @@ function loadPreload(relativePath) {
         Module._load = originalLoad;
         delete require.cache[modulePath];
     }
-    return { exposed, invocations, listeners };
+    return { exposed, invocations, sends, listeners };
 }
 
 test('keeps LiteLoader preload entrypoints self-contained', () => {
-    for (const relativePath of ['src/preload.js', 'src/recall-viewer-preload.js']) {
+    for (const relativePath of [
+        'src/preload.js',
+        'src/recall-viewer-preload.js',
+        'src/media-viewer-preload.js',
+        'src/media-pip-preload.js'
+    ]) {
         const filePath = path.join(__dirname, '..', relativePath);
         const source = fs.readFileSync(filePath, 'utf8');
         const dependencies = Array.from(source.matchAll(/require\(['"]([^'"]+)['"]\)/g), match => match[1]);
@@ -71,8 +80,9 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     assert.ok(api);
     await api.recordDiagnosticEvent({ event: 'renderer.ready' });
     await api.runDiagnosticAction('copy-report');
-    await api.openInlineMedia({ type: 'video' });
-    await api.prepareInlineMedia({ galleryId: 'gallery', index: 1 });
+    await api.openMediaViewer({ type: 'video' });
+    await api.scanQrCode({ type: 'image' });
+    await api.qrResultAction({ type: 'copy', text: 'result' });
     await api.repeatMessage({ id: 'repeat' });
     assert.equal(api.getPathForFile({ mockPath: 'D:\\video.mp4' }), 'D:\\video.mp4');
     await api.stageFakeForwardImage({ name: 'image.png', data: new ArrayBuffer(1) });
@@ -88,11 +98,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.checkForUpdates({ force: true });
     await api.prepareUpdate();
     await api.restartForUpdate();
-    const unsubscribePreview = api.onInlineMediaPreview(() => {});
     const unsubscribeUpdate = api.onUpdateStateChanged(() => {});
     const unsubscribe = api.onConfigChanged(() => {});
-    assert.equal(runtime.listeners.length, 3);
-    unsubscribePreview();
     assert.equal(runtime.listeners.length, 2);
     unsubscribeUpdate();
     assert.equal(runtime.listeners.length, 1);
@@ -101,8 +108,9 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     assert.deepEqual(runtime.invocations.map(item => item[0]), [
         'qqnt-toolbox:diagnostic-event',
         'qqnt-toolbox:diagnostic-action',
-        'qqnt-toolbox:open-inline-media',
-        'qqnt-toolbox:prepare-inline-media',
+        'qqnt-toolbox:open-media-viewer',
+        'qqnt-toolbox:scan-qr-code',
+        'qqnt-toolbox:qr-result-action',
         'qqnt-toolbox:repeat-message',
         'qqnt-toolbox:stage-fake-forward-image',
         'qqnt-toolbox:resolve-fake-forward-sender-name',
@@ -118,6 +126,49 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:prepare-update',
         'qqnt-toolbox:restart-update'
     ]);
+});
+
+test('exposes the standalone media viewer preload API', async () => {
+    const runtime = loadPreload('src/media-viewer-preload.js');
+    const api = runtime.exposed.get('qqntToolboxMediaViewer');
+
+    assert.ok(api);
+    await api.getState();
+    await api.prepare({ galleryId: 'gallery', index: 1 });
+    await api.action({ type: 'select', galleryId: 'gallery', index: 1 });
+    await api.qrResultAction({ type: 'open', url: 'https://example.com' });
+    const unsubscribe = api.onStateChanged(() => {});
+    assert.equal(runtime.listeners.length, 1);
+    unsubscribe();
+    assert.equal(runtime.listeners.length, 0);
+    assert.deepEqual(runtime.invocations.map(item => item[0]), [
+        'qqnt-toolbox:media-viewer-get-state',
+        'qqnt-toolbox:media-viewer-prepare',
+        'qqnt-toolbox:media-viewer-action',
+        'qqnt-toolbox:qr-result-action'
+    ]);
+});
+
+test('exposes the Telegram-style media PiP preload API', async () => {
+    const runtime = loadPreload('src/media-pip-preload.js');
+    const api = runtime.exposed.get('qqntToolboxMediaPip');
+
+    assert.ok(api);
+    await api.getState();
+    await api.action({ type: 'enlarge' });
+    api.drag({ phase: 'move', dx: 100, dy: 200 });
+    const unsubscribe = api.onStateChanged(() => {});
+    assert.equal(runtime.listeners.length, 1);
+    unsubscribe();
+    assert.equal(runtime.listeners.length, 0);
+    assert.deepEqual(runtime.invocations.map(item => item[0]), [
+        'qqnt-toolbox:media-pip-get-state',
+        'qqnt-toolbox:media-pip-action'
+    ]);
+    assert.deepEqual(runtime.sends, [[
+        'qqnt-toolbox:media-pip-drag',
+        { phase: 'move', dx: 100, dy: 200 }
+    ]]);
 });
 
 test('exposes the standalone recall viewer preload API', async () => {
