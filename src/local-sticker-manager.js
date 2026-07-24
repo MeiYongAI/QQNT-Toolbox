@@ -344,12 +344,12 @@ export function createLocalStickerManager(options = {}) {
         testProxy.type = 'button';
         proxyRow.control.append(testProxy);
         const proxyStatus = createElement('div', 'qlsm-status qlsm-proxy-status');
-        const advanced = createElement('details', 'qlsm-advanced');
-        const advancedSummary = createElement('summary', 'qlsm-advanced-summary', '转换工具与网络');
-        const advancedBody = createElement('div', 'qlsm-advanced-body');
-        advancedBody.append(ffmpegRow.row, tgsRow.row, proxyRow.row, proxyStatus);
-        advanced.append(advancedSummary, advancedBody);
-        configSection.append(tokenRow.row, advanced);
+        const toolSection = createElement('section', 'qlsm-tool-section');
+        const toolTitle = createElement('div', 'qlsm-tool-title', '转换工具与网络');
+        const toolBody = createElement('div', 'qlsm-tool-body');
+        toolBody.append(ffmpegRow.row, tgsRow.row, proxyRow.row, proxyStatus);
+        toolSection.append(toolTitle, toolBody);
+        configSection.append(tokenRow.row, toolSection);
         form.append(downloadSection, configSection);
         telegramPane.append(form);
 
@@ -770,12 +770,6 @@ export function createLocalStickerManager(options = {}) {
             });
         }
 
-        advanced.addEventListener('toggle', () => {
-            if (advanced.open) {
-                inspectEnvironment().catch(() => {});
-            }
-        });
-
         configSection.addEventListener('click', async event => {
             const downloadToolButton = event.target.closest?.('.qlsm-secondary[data-download-tool]');
             if (downloadToolButton && !downloadToolButton.disabled) {
@@ -863,6 +857,9 @@ export function createLocalStickerManager(options = {}) {
             }
             activeTab = tab.dataset.tab;
             syncTabs();
+            if (activeTab === 'telegram') {
+                inspectEnvironment().catch(() => {});
+            }
         });
         tabs.addEventListener('keydown', event => {
             const tab = event.target.closest?.('.qlsm-tab[data-tab]');
@@ -894,6 +891,9 @@ export function createLocalStickerManager(options = {}) {
         };
         readConfig();
         syncTabs();
+        if (activeTab === 'telegram') {
+            inspectEnvironment().catch(() => {});
+        }
         loadPacks().catch(() => {});
         layer.focus({ preventScroll: true });
     }

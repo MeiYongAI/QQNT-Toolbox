@@ -489,41 +489,18 @@
     padding-bottom: 18px;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-advanced {
+#qqnt-toolbox-local-sticker-manager .qlsm-tool-section {
     border-bottom: 1px solid var(--qlsm-border);
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-advanced-summary {
-    position: relative;
+#qqnt-toolbox-local-sticker-manager .qlsm-tool-title {
     display: flex;
     align-items: center;
     min-height: 48px;
-    padding-right: 28px;
     font-weight: 500;
-    cursor: pointer;
-    list-style: none;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-advanced-summary::-webkit-details-marker {
-    display: none;
-}
-
-#qqnt-toolbox-local-sticker-manager .qlsm-advanced-summary::after {
-    content: "";
-    position: absolute;
-    right: 7px;
-    width: 7px;
-    height: 7px;
-    border-right: 1.5px solid var(--qlsm-muted);
-    border-bottom: 1.5px solid var(--qlsm-muted);
-    transform: rotate(45deg) translateY(-2px);
-}
-
-#qqnt-toolbox-local-sticker-manager .qlsm-advanced[open] .qlsm-advanced-summary::after {
-    transform: rotate(225deg) translate(-2px, -1px);
-}
-
-#qqnt-toolbox-local-sticker-manager .qlsm-advanced-body {
+#qqnt-toolbox-local-sticker-manager .qlsm-tool-body {
     border-top: 1px solid var(--qlsm-border);
 }
 

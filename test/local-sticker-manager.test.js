@@ -10,7 +10,7 @@ const source = fs.readFileSync(
     'utf8'
 );
 
-test('keeps common sticker management together and advanced download settings available', () => {
+test('keeps common sticker management together and tool settings directly available', () => {
     assert.match(source, /\['packs', '贴纸集'\], \['panel', '面板'\], \['telegram', 'Telegram'\]/);
     assert.match(source, /options\.openDirectory/);
     assert.match(source, /options\.chooseDirectory/);
@@ -20,7 +20,9 @@ test('keeps common sticker management together and advanced download settings av
     assert.match(source, /sendAsImage/);
     assert.match(source, /recentEnabled/);
     assert.match(source, /recentRows/);
-    assert.match(source, /createElement\('details', 'qlsm-advanced'\)/);
+    assert.match(source, /createElement\('section', 'qlsm-tool-section'\)/);
+    assert.match(source, /activeTab === 'telegram'[\s\S]*?inspectEnvironment\(\)/);
+    assert.doesNotMatch(source, /createElement\('details'|advanced\.addEventListener\('toggle'/);
     assert.match(source, /addEventListener\('pointermove'/);
     assert.doesNotMatch(source, /draggable\s*=|dragstart/);
     for (const setting of [
