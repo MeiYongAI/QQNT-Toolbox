@@ -5,8 +5,36 @@ const MARKER_STYLES = new Set(['badge', 'outline']);
 const MAX_FILTER_PEERS = 256;
 const MAX_CONTACTS = 2000;
 
+const RECOVERED_RECORD_ACTIONS = Object.freeze({
+    CACHE: 'cache',
+    PRESERVE: 'preserve',
+    RECOVER: 'recover'
+});
+
 function normalizeText(value) {
     return String(value ?? '').trim();
+}
+
+function getRecallInfo(record) {
+    if (!record || !Array.isArray(record.elements) || record.elements.length !== 1) {
+        return null;
+    }
+    const grayTip = record.elements[0]?.grayTipElement;
+    return grayTip?.subElementType === 1 ? grayTip.revokeElement || null : null;
+}
+
+function getRecoveredRecordAction(record, hasRecoveredRecord = false) {
+    if (getRecallInfo(record)) {
+        return RECOVERED_RECORD_ACTIONS.RECOVER;
+    }
+    if (!hasRecoveredRecord) {
+        return RECOVERED_RECORD_ACTIONS.CACHE;
+    }
+    const elements = Array.isArray(record?.elements) ? record.elements : [];
+    const isGrayTipOnly = elements.length > 0 && elements.every(element => element?.grayTipElement);
+    return elements.length > 0 && !isGrayTipOnly
+        ? RECOVERED_RECORD_ACTIONS.PRESERVE
+        : RECOVERED_RECORD_ACTIONS.RECOVER;
 }
 
 function getRecallPeerDescriptor(value) {
@@ -164,7 +192,10 @@ function shouldHandlePreventRecallRecord(config, record, hasRecoveredRecord = fa
 module.exports = {
     FILTER_MODES,
     MARKER_STYLES,
+    RECOVERED_RECORD_ACTIONS,
     getRecallPeerDescriptor,
+    getRecallInfo,
+    getRecoveredRecordAction,
     normalizeRecallBuddyContacts,
     normalizeRecallGroupContacts,
     normalizePreventRecallConfig,

@@ -6,7 +6,13 @@ import {
 import { matchesControlLabelValue } from './control-label-match.js';
 import { createReactionLimitController } from './reaction-limit.js';
 import { createFakeForwardEditor } from './fake-forward-editor.js';
+import {
+    bindNativeChatToolbarAction,
+    createNativeChatToolbarEntry,
+    findNativeChatToolbar
+} from './chat-toolbar-entry.js';
 import { createRecallFilterEditor } from './recall-filter-editor.js';
+import { createAutoReactionEditor } from './auto-reaction-editor.js';
 import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
@@ -56,6 +62,7 @@ let handleToolboxVueComponentMount = () => {};
     const POKE_FALLBACK_MENU_ID = 'qqnt-toolbox-poke-fallback-menu';
     const REPEAT_FALLBACK_MENU_ID = 'qqnt-toolbox-repeat-fallback-menu';
     const QR_VIEWER_BUTTON_ID = 'qqnt-toolbox-qr-viewer-button';
+    const WINDOW_SHAKE_ENTRY_CLASS = 'qqnt-toolbox-window-shake-entry';
     const POKE_RECALL_NOTICE = '若对方QQ版本过低，可能无法撤回。';
     const STORAGE_KEY = 'qqnt-toolbox-panel-state';
     const ACTIVE_REPEAT_PEER_KEY_PREFIX = 'qqnt-toolbox-active-repeat-peer';
@@ -65,6 +72,7 @@ let handleToolboxVueComponentMount = () => {};
     const TOOLBOX_MENU_TYPE_QR_SCAN = 990102;
     const RECALL_MARKER_STYLE_VALUES = new Set(['badge', 'outline']);
     const RECALL_FILTER_MODE_VALUES = new Set(['all', 'blacklist', 'whitelist']);
+    const MAX_AUTO_REACTION_EMOJIS = 64;
     const TEMP_POKE_CHAT_TYPES = new Set([99, 100, 101, 102, 103, 111, 117, 119]);
     const PROFILE_CARD_HOVER_TRIGGER_SELECTOR = [
         '[class*="avatar"]',
@@ -134,7 +142,16 @@ let handleToolboxVueComponentMount = () => {};
             autoPokeBack: false,
             autoPokeBackLimit: 1,
             doubleClickAvatarPoke: false,
-            rightClickAvatarPoke: false
+            rightClickAvatarPoke: false,
+            sendWindowShake: false,
+            autoReaction: {
+                enabled: false,
+                emojiIds: [],
+                mentionSelf: true,
+                replySelf: true,
+                excludeAtAll: true,
+                selfMessages: false
+            }
         },
         floatingPanel: {
             enabled: true,
@@ -173,6 +190,7 @@ let handleToolboxVueComponentMount = () => {};
             singleMediaViewer: false,
             singleForwardViewer: false,
             singleForwardGroupIsolation: false,
+            blockWindowShake: false,
             goBackMainList: false,
             preventMessageDrag: false,
             preventRecentContactDrag: false,
@@ -205,7 +223,9 @@ let handleToolboxVueComponentMount = () => {};
     let messageContextMenuActionsInstalled = false;
     let reactionLimitController = null;
     let fakeForwardEditor = null;
+    let windowShakeSending = false;
     let recallFilterEditor = null;
+    let autoReactionEditor = null;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let unreadCountObserver = null;
@@ -236,6 +256,8 @@ let handleToolboxVueComponentMount = () => {};
     let labeledHiddenElements = new Set();
     let activeShortcutCapture = null;
     let rendererReadyDiagnosticSent = false;
+    let lastChatScrollInputAt = 0;
+    let lastUnexpectedChatScrollAt = 0;
     let currentUpdateState = {
         status: 'idle',
         supported: true,
@@ -255,6 +277,7 @@ let handleToolboxVueComponentMount = () => {};
     const pokeAvatarAnimations = new WeakMap();
     const recalledPokeMessageIds = new Set();
     const panelActionFeedbackTimers = new WeakMap();
+    const chatScrollDiagnosticSnapshots = new WeakMap();
 
     if (window.__qqntToolboxRendererInstalled) {
         return;
@@ -315,6 +338,16 @@ let handleToolboxVueComponentMount = () => {};
             }
         }
         config.preventRecall.filterPeers = Array.from(peers.values());
+        const emojiIds = new Set();
+        for (const value of Array.isArray(config.entertainment.autoReaction.emojiIds)
+            ? config.entertainment.autoReaction.emojiIds
+            : []) {
+            const id = String(value ?? '').trim();
+            if (/^\d{1,16}$/.test(id) && emojiIds.size < MAX_AUTO_REACTION_EMOJIS) {
+                emojiIds.add(id);
+            }
+        }
+        config.entertainment.autoReaction.emojiIds = Array.from(emojiIds);
         return config;
     }
 
@@ -346,6 +379,77 @@ let handleToolboxVueComponentMount = () => {};
             Promise.resolve(recordEvent({ level, event, details })).catch(() => {});
         } catch {
         }
+    }
+
+    function getChatScrollDiagnosticTarget(value) {
+        const target = value instanceof Element ? value : null;
+        if (!target || target.scrollHeight <= target.clientHeight + 2) {
+            return null;
+        }
+        const chatArea = target.matches('.chat-msg-area')
+            ? target
+            : target.closest('.chat-msg-area');
+        return chatArea && target.querySelector('.message, .ml-item') ? target : null;
+    }
+
+    function noteChatScrollInput(event) {
+        const target = event.target instanceof Element ? event.target : document.activeElement;
+        if (target?.closest?.('.chat-msg-area')) {
+            lastChatScrollInputAt = performance.now();
+        }
+    }
+
+    function noteChatScrollKeyInput(event) {
+        if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key) &&
+            document.querySelector('.chat-msg-area')) {
+            lastChatScrollInputAt = performance.now();
+        }
+    }
+
+    function handleChatScrollDiagnostic(event) {
+        if (!isConfigEnabled('debug.enabled')) {
+            return;
+        }
+        const target = getChatScrollDiagnosticTarget(event.target);
+        if (!target) {
+            return;
+        }
+        const now = performance.now();
+        const previous = chatScrollDiagnosticSnapshots.get(target);
+        if (now - lastChatScrollInputAt < 1000) {
+            chatScrollDiagnosticSnapshots.set(target, {
+                peerSignature: previous?.peerSignature || '',
+                scrollTop: target.scrollTop,
+                scrollHeight: target.scrollHeight,
+                clientHeight: target.clientHeight
+            });
+            return;
+        }
+        const peer = getPeerFromRecord({});
+        const peerSignature = peer
+            ? `${peer.chatType}:${peer.peerUid}:${peer.guildId || ''}`
+            : '';
+        const current = {
+            peerSignature,
+            scrollTop: target.scrollTop,
+            scrollHeight: target.scrollHeight,
+            clientHeight: target.clientHeight
+        };
+        chatScrollDiagnosticSnapshots.set(target, current);
+        const delta = current.scrollTop - Number(previous?.scrollTop || 0);
+        if (!previous || previous.peerSignature !== peerSignature || delta >= -12 ||
+            now - lastUnexpectedChatScrollAt < 2000) {
+            return;
+        }
+        lastUnexpectedChatScrollAt = now;
+        recordRendererDiagnostic('chat-scroll.unexpected-upward', {
+            delta: Math.round(delta),
+            scrollTop: Math.round(current.scrollTop),
+            scrollHeightDelta: Math.round(current.scrollHeight - previous.scrollHeight),
+            clientHeightDelta: Math.round(current.clientHeight - previous.clientHeight),
+            recallMarkers: target.querySelectorAll('.qqnt-toolbox-recall-badge, .qqnt-toolbox-recall-outline').length,
+            repeatControls: target.querySelectorAll('.qqnt-toolbox-repeat-slot').length
+        }, 'warn');
     }
 
     function syncRendererReadyDiagnostic() {
@@ -433,6 +537,20 @@ let handleToolboxVueComponentMount = () => {};
             });
         }
         return recallFilterEditor;
+    }
+
+    function getAutoReactionEditor() {
+        if (!autoReactionEditor) {
+            autoReactionEditor = createAutoReactionEditor({
+                getCatalog: () => getBridge()?.getAutoReactionEmojiCatalog?.() || [],
+                getSelected: () => currentConfig.entertainment.autoReaction.emojiIds,
+                save: emojiIds => setConfigValue(
+                    'entertainment.autoReaction.emojiIds',
+                    emojiIds
+                )
+            });
+        }
+        return autoReactionEditor;
     }
 
     function syncReactionLimitFeature() {
@@ -1580,6 +1698,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function createAutoReactionEmojiItem() {
+        const item = createActionItem(
+            text('回应表情'),
+            text('尚未选择表情'),
+            'editAutoReactionEmojis',
+            {
+                label: text('选择'),
+                requires: 'entertainment.autoReaction.enabled',
+                child: true
+            }
+        );
+        item.dataset.autoReactionSummary = 'true';
+        return item;
+    }
+
     function createColorPairItem(name, meta, lightPath, darkPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.colorItem = 'true';
@@ -1699,6 +1832,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             updateConfigUi(root);
         }
         fakeForwardEditor?.sync();
+        syncWindowShakeToolbarEntry();
         const panel = document.getElementById(PANEL_ID);
         if (panel && !panel.hidden && !isConfigEnabled('floatingPanel.enabled')) {
             setVisible(panel, false);
@@ -1763,6 +1897,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'interfaceTweaks.singleForwardViewer',
                     child: true
                 }),
+                createSwitchItem(text('屏蔽窗口抖动'), text('保留窗口抖动消息，仅阻止窗口移动'), 'interfaceTweaks.blockWindowShake'),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
                 createSwitchItem(text('阻止消息列表拖拽'), text('防止拖出独立聊天窗口'), 'interfaceTweaks.preventRecentContactDrag'),
@@ -1893,6 +2028,25 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             createSection('entertainment', text('娱乐互动'), [
                 createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),
                 createSwitchItem(text('回应后不关闭回应窗口'), text('便于连续添加或取消回应'), 'messageTweaks.keepReactionPanelOpen'),
+                createSwitchItem(text('自动回应表情'), text('按所选条件自动回应群消息'), 'entertainment.autoReaction.enabled'),
+                createAutoReactionEmojiItem(),
+                createSwitchItem(text('@ 自己'), text('消息提到自己时回应'), 'entertainment.autoReaction.mentionSelf', {
+                    requires: 'entertainment.autoReaction.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('回复自己'), text('消息回复自己时回应'), 'entertainment.autoReaction.replySelf', {
+                    requires: 'entertainment.autoReaction.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('排除 @ 全体成员'), text('含 @ 全体成员的消息不回应'), 'entertainment.autoReaction.excludeAtAll', {
+                    requires: 'entertainment.autoReaction.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('自己的每条消息'), text('回应自己发送的每一条群消息'), 'entertainment.autoReaction.selfMessages', {
+                    requires: 'entertainment.autoReaction.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('发送窗口抖动'), text('在好友私聊输入栏显示发送按钮'), 'entertainment.sendWindowShake'),
                 createSwitchItem(text('自动回戳'), text('收到戳戳后自动回戳'), 'entertainment.autoPokeBack'),
                 createNumberItem(text('回戳阈值'), text('0 为无限制'), 'entertainment.autoPokeBackLimit', {
                     min: 0,
@@ -2186,6 +2340,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 button.disabled = disabled || panelActionFeedbackTimers.has(button);
             }
         });
+        panel.querySelectorAll('.qqnt-toolbox-item[data-auto-reaction-summary="true"]').forEach(item => {
+            const count = currentConfig.entertainment.autoReaction.emojiIds.length;
+            const meta = item.querySelector('.qqnt-toolbox-item-meta');
+            if (meta) {
+                meta.textContent = count
+                    ? text(`已选择 ${count} 个`)
+                    : text('尚未选择表情');
+            }
+        });
         updatePluginUpdaterUi(panel);
         updateGroupUi(panel);
     }
@@ -2442,6 +2605,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     async function runPanelAction(action, button = null) {
         const bridge = getBridge();
+        if (action === 'editAutoReactionEmojis') {
+            getAutoReactionEditor().open(button);
+            return;
+        }
         showPanelActionFeedback(button, text('处理中'), 'pending', 0);
         try {
             let result = null;
@@ -3045,6 +3212,100 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         applyFullUnreadCounts();
     }
 
+    function applyWindowShakeEntryGlyph(svg) {
+        const namespace = 'http://www.w3.org/2000/svg';
+        svg.replaceChildren();
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('aria-hidden', 'true');
+        for (const data of ['m2 8 2 2-2 2 2 2-2 2', 'm22 8-2 2 2 2-2 2 2 2']) {
+            const path = document.createElementNS(namespace, 'path');
+            path.setAttribute('d', data);
+            path.setAttribute('stroke', 'currentColor');
+            path.setAttribute('stroke-width', '1.8');
+            path.setAttribute('stroke-linecap', 'round');
+            path.setAttribute('stroke-linejoin', 'round');
+            svg.append(path);
+        }
+        const windowGlyph = document.createElementNS(namespace, 'rect');
+        windowGlyph.setAttribute('x', '7');
+        windowGlyph.setAttribute('y', '5');
+        windowGlyph.setAttribute('width', '10');
+        windowGlyph.setAttribute('height', '14');
+        windowGlyph.setAttribute('rx', '2');
+        windowGlyph.setAttribute('stroke', 'currentColor');
+        windowGlyph.setAttribute('stroke-width', '1.8');
+        svg.append(windowGlyph);
+    }
+
+    function getWindowShakePeer() {
+        const context = getPokeChatContext(null);
+        const peer = getPeerFromRecord(context.record || {});
+        return !context.isTemporary && Number(peer?.chatType) === 1 && peer?.peerUid
+            ? peer
+            : null;
+    }
+
+    function removeWindowShakeToolbarEntries() {
+        document.querySelectorAll('.' + WINDOW_SHAKE_ENTRY_CLASS).forEach(entry => entry.remove());
+    }
+
+    async function sendCurrentWindowShake(entry) {
+        if (windowShakeSending) {
+            return;
+        }
+        const peer = getWindowShakePeer();
+        const sendWindowShake = getBridge()?.sendWindowShake;
+        if (!peer || typeof sendWindowShake !== 'function') {
+            return;
+        }
+        windowShakeSending = true;
+        entry?.setAttribute('aria-disabled', 'true');
+        try {
+            const result = await sendWindowShake({ peer });
+            if (result?.ok !== true) {
+                recordRendererDiagnostic('window-shake.send-failed', {
+                    reason: result?.reason || 'unknown'
+                }, 'warn');
+            }
+        } catch (error) {
+            recordRendererDiagnostic('window-shake.send-failed', {
+                reason: error?.message || String(error)
+            }, 'error');
+        } finally {
+            windowShakeSending = false;
+            entry?.removeAttribute('aria-disabled');
+        }
+    }
+
+    function syncWindowShakeToolbarEntry() {
+        const toolbar = findNativeChatToolbar();
+        const available = configReady &&
+            isConfigEnabled('entertainment.sendWindowShake') &&
+            Boolean(getWindowShakePeer()) &&
+            Boolean(toolbar);
+        if (!available) {
+            removeWindowShakeToolbarEntries();
+            return;
+        }
+        const entries = Array.from(document.querySelectorAll('.' + WINDOW_SHAKE_ENTRY_CLASS));
+        const current = entries.find(entry => entry.parentElement === toolbar);
+        entries.filter(entry => entry !== current).forEach(entry => entry.remove());
+        if (current) {
+            return;
+        }
+        const entry = createNativeChatToolbarEntry(toolbar, {
+            className: WINDOW_SHAKE_ENTRY_CLASS,
+            label: '发送窗口抖动',
+            renderIcon: applyWindowShakeEntryGlyph
+        });
+        if (!entry) {
+            return;
+        }
+        bindNativeChatToolbarAction(entry, () => sendCurrentWindowShake(entry));
+        toolbar.append(entry);
+    }
+
     function applyInterfaceTweaks() {
         if (!document.body) {
             return;
@@ -3081,6 +3342,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         syncUnreadCountObserver();
         syncActiveQrViewerButton();
+        syncWindowShakeToolbarEntry();
         applySimplifyTweaks();
     }
 
@@ -6441,6 +6703,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('click', handleEmojiImageClick, true);
     document.addEventListener('click', handleSingleClickMedia, true);
     document.addEventListener('pointerdown', handleForwardOpenIntent, true);
+    document.addEventListener('pointerdown', noteChatScrollInput, true);
+    document.addEventListener('wheel', noteChatScrollInput, { capture: true, passive: true });
+    document.addEventListener('keydown', noteChatScrollKeyInput, true);
+    document.addEventListener('scroll', handleChatScrollDiagnostic, true);
 
     document.addEventListener('keydown', event => {
         if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {

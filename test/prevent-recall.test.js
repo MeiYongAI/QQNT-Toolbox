@@ -6,6 +6,9 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+    RECOVERED_RECORD_ACTIONS,
+    getRecallInfo,
+    getRecoveredRecordAction,
     getRecallPeerDescriptor,
     normalizePreventRecallConfig,
     normalizeRecallBuddyContacts,
@@ -14,6 +17,28 @@ const {
     shouldHandlePreventRecallRecord,
     shouldPreventRecallForPeer
 } = require('../src/prevent-recall');
+
+test('distinguishes recall tombstones from complete message updates', () => {
+    const normalRecord = { msgId: 'message-1', elements: [{ elementType: 1 }] };
+    const emptyUpdate = { msgId: 'message-1', elements: [] };
+    const grayTipUpdate = { msgId: 'message-1', elements: [{ grayTipElement: { subElementType: 2 } }] };
+    const recallRecord = {
+        msgId: 'message-1',
+        elements: [{
+            grayTipElement: {
+                subElementType: 1,
+                revokeElement: { operatorNick: 'Tester' }
+            }
+        }]
+    };
+
+    assert.deepEqual(getRecallInfo(recallRecord), { operatorNick: 'Tester' });
+    assert.equal(getRecoveredRecordAction(recallRecord, true), RECOVERED_RECORD_ACTIONS.RECOVER);
+    assert.equal(getRecoveredRecordAction(emptyUpdate, true), RECOVERED_RECORD_ACTIONS.RECOVER);
+    assert.equal(getRecoveredRecordAction(grayTipUpdate, true), RECOVERED_RECORD_ACTIONS.RECOVER);
+    assert.equal(getRecoveredRecordAction(normalRecord, true), RECOVERED_RECORD_ACTIONS.PRESERVE);
+    assert.equal(getRecoveredRecordAction(normalRecord, false), RECOVERED_RECORD_ACTIONS.CACHE);
+});
 
 test('normalizes recall marker options and a bounded peer list', () => {
     const peers = normalizeRecallFilterPeers([

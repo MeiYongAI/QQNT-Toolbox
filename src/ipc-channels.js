@@ -23,8 +23,10 @@ const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image'
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
+const CHANNEL_GET_AUTO_REACTION_CATALOG = 'qqnt-toolbox:get-auto-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
+const CHANNEL_SEND_WINDOW_SHAKE = 'qqnt-toolbox:send-window-shake';
 const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
 const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
 const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
@@ -65,8 +67,10 @@ module.exports = Object.freeze({
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
     CHANNEL_GET_REACTION_CATALOG,
+    CHANNEL_GET_AUTO_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,
     CHANNEL_SEND_POKE,
+    CHANNEL_SEND_WINDOW_SHAKE,
     CHANNEL_RECALL_POKE,
     CHANNEL_REGISTER_POKE_ACCOUNT,
     CHANNEL_CLEAR_RECALL_CACHE,

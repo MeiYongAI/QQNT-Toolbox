@@ -14,6 +14,9 @@ const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const {
+    RECOVERED_RECORD_ACTIONS,
+    getRecallInfo,
+    getRecoveredRecordAction,
     normalizePreventRecallConfig,
     normalizeRecallBuddyContacts,
     normalizeRecallGroupContacts,
@@ -37,7 +40,19 @@ const {
     parseFakeForwardSendResponse,
     parseFakeForwardUploadResponse
 } = require('./fake-forward');
-const { loadReactionEmojiCatalog, normalizeReactionRequest } = require('./reaction-catalog');
+const {
+    loadAutoReactionEmojiCatalog,
+    loadReactionEmojiCatalog,
+    normalizeReactionRequest
+} = require('./reaction-catalog');
+const {
+    DEFAULT_AUTO_REACTION_CONFIG,
+    getAutoReactionDecision,
+    getAutoReactionMessageKey,
+    isAutoReactionRecordReady,
+    isRecentAutoReactionRecord,
+    normalizeAutoReactionConfig
+} = require('./auto-reaction');
 const { getTencentFilesRoots } = require('./qq-data-root');
 const {
     classifyMediaFilePath,
@@ -67,6 +82,7 @@ const {
     createSingleForwardWindowController,
     getForwardGroupScope
 } = require('./single-forward-window');
+const { createWindowShakeController, createWindowShakeElement } = require('./window-shake');
 const {
     constrainPipResize,
     fitPipBounds,
@@ -109,8 +125,10 @@ const {
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
     CHANNEL_GET_REACTION_CATALOG,
+    CHANNEL_GET_AUTO_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,
     CHANNEL_SEND_POKE,
+    CHANNEL_SEND_WINDOW_SHAKE,
     CHANNEL_RECALL_POKE,
     CHANNEL_REGISTER_POKE_ACCOUNT,
     CHANNEL_CLEAR_RECALL_CACHE,
@@ -161,6 +179,9 @@ const NUDGE_SEND_COMMAND = 'nodeIKernelMsgService/sendNudge';
 const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
 const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
 const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
+const AUTO_REACTION_EVENT_TTL_MS = 60 * 60 * 1000;
+const AUTO_REACTION_UID_LOOKUP_RETRY_MS = 60 * 1000;
+const MAX_AUTO_REACTION_PROCESSED_MESSAGES = 10000;
 const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
 const POKE_RECALL_COMMAND = 'OidbSvcTrpcTcp.0xF51_1';
 const WINDOWS_NATIVE_BINARY = 'poke-bridge.win32-x64.node';
@@ -230,7 +251,12 @@ const DEFAULT_CONFIG = {
         autoPokeBack: false,
         autoPokeBackLimit: 1,
         doubleClickAvatarPoke: false,
-        rightClickAvatarPoke: false
+        rightClickAvatarPoke: false,
+        sendWindowShake: false,
+        autoReaction: {
+            ...DEFAULT_AUTO_REACTION_CONFIG,
+            emojiIds: []
+        }
     },
     floatingPanel: {
         enabled: true,
@@ -275,6 +301,7 @@ const DEFAULT_CONFIG = {
         singleMediaViewer: false,
         singleForwardViewer: false,
         singleForwardGroupIsolation: false,
+        blockWindowShake: false,
         goBackMainList: false,
         preventMessageDrag: false,
         preventRecentContactDrag: false,
@@ -311,6 +338,9 @@ const pokeState = {
     processedEvents: new Map(),
     autoReplySequences: new Map()
 };
+const autoReactionState = {
+    processedMessages: new Map()
+};
 const recallStates = new Map();
 let configCache = null;
 let recallViewerWindow = null;
@@ -346,12 +376,18 @@ const singleForwardWindowController = createSingleForwardWindowController({
         'info', `forward.single-window-${type}`, details
     )
 });
+const windowShakeController = createWindowShakeController({
+    onBlocked: browserWindow => recordDiagnostic('info', 'window-shake.blocked', {
+        windowId: Number(browserWindow?.id) || 0
+    })
+});
 const mediaPipSession = {
     active: null,
     sticky: false
 };
 const inlineMediaServer = createLocalMediaServer();
 let reactionEmojiCatalog = null;
+let autoReactionEmojiCatalog = null;
 let diagnosticLogger = null;
 let diagnosticActionRunner = null;
 let pluginUpdater = null;
@@ -569,7 +605,17 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         },
         reactions: {
             removeLimit: config.messageTweaks?.removeReactionLimit === true,
-            keepOpen: config.messageTweaks?.keepReactionPanelOpen === true
+            keepOpen: config.messageTweaks?.keepReactionPanelOpen === true,
+            auto: {
+                enabled: config.entertainment?.autoReaction?.enabled === true,
+                selectedCount: Array.isArray(config.entertainment?.autoReaction?.emojiIds)
+                    ? config.entertainment.autoReaction.emojiIds.length
+                    : 0,
+                mentionSelf: config.entertainment?.autoReaction?.mentionSelf !== false,
+                replySelf: config.entertainment?.autoReaction?.replySelf !== false,
+                excludeAtAll: config.entertainment?.autoReaction?.excludeAtAll !== false,
+                selfMessages: config.entertainment?.autoReaction?.selfMessages === true
+            }
         },
         preventRecall: {
             enabled: config.preventRecall?.enabled === true,
@@ -584,7 +630,8 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             autoReply: config.entertainment?.autoPokeBack === true,
             autoReplyLimit: Math.max(0, Number(config.entertainment?.autoPokeBackLimit) || 0),
             doubleClickAvatar: config.entertainment?.doubleClickAvatarPoke === true,
-            contextMenu: config.entertainment?.rightClickAvatarPoke === true
+            contextMenu: config.entertainment?.rightClickAvatarPoke === true,
+            windowShake: config.entertainment?.sendWindowShake === true
         },
         interface: {
             inlineMedia: config.interfaceTweaks?.inlineMediaViewer === true,
@@ -595,6 +642,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             singleForwardWindow: config.interfaceTweaks?.singleForwardViewer === true,
             singleForwardGroupIsolation:
                 config.interfaceTweaks?.singleForwardGroupIsolation === true,
+            blockWindowShake: config.interfaceTweaks?.blockWindowShake === true,
             menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
             preventProfileCard: config.interfaceTweaks?.preventProfileCardHover === true,
             preventRecentDrag: config.interfaceTweaks?.preventRecentContactDrag === true
@@ -735,6 +783,9 @@ function normalizeSimplifyConfig(config) {
     config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
     config.chatFuncBar = normalizeSimplifyItemList(config.chatFuncBar, 'chat-func');
     config.preventRecall = normalizePreventRecallConfig(config.preventRecall);
+    config.entertainment.autoReaction = normalizeAutoReactionConfig(
+        config.entertainment.autoReaction
+    );
     return config;
 }
 
@@ -857,6 +908,9 @@ function registerPokeAccount(browserWindow, value) {
         if (state.selfUin && state.selfUin !== selfUin) {
             state.inlineMediaByPeer.clear();
             state.inlineReplySourcesByPeer.clear();
+            state.selfUid = '';
+            state.selfUidPromise = null;
+            state.selfUidLookupAt = 0;
         }
         state.selfUin = selfUin;
         getRecallState(selfUin);
@@ -1799,6 +1853,40 @@ async function sendPoke(browserWindow, payload) {
     }
 }
 
+async function sendWindowShakeMessage(browserWindow, payload) {
+    if (getEntertainmentConfig().sendWindowShake !== true) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const peer = extractPeerFromRecord(browserWindow, payload?.peer || {});
+    if (Number(peer?.chatType) !== 1) {
+        return { ok: false, reason: 'unsupported-peer' };
+    }
+    try {
+        const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendMsg',
+            [{
+                msgId: '0',
+                peer,
+                msgElements: [createWindowShakeElement()],
+                msgAttributeInfos: makeSendAttributeInfos(attrId)
+            }, null],
+            true,
+            10000
+        );
+        const code = Number(result?.result);
+        if (isNativeFailure(result) || (Number.isFinite(code) && code !== 0)) {
+            return { ok: false, reason: 'native-failure' };
+        }
+        return { ok: true };
+    } catch (error) {
+        warn('window shake send failed:', error?.message || error);
+        return { ok: false, reason: 'send-failed' };
+    }
+}
+
 function broadcastConfigChanged() {
     const config = clonePlain(configCache || DEFAULT_CONFIG);
     for (const browserWindow of BrowserWindow.getAllWindows()) {
@@ -1826,14 +1914,40 @@ function getReactionEmojiCatalog() {
     return reactionEmojiCatalog;
 }
 
-async function setMessageReaction(browserWindow, payload) {
-    const messageTweaks = getConfig().messageTweaks;
-    if (messageTweaks.removeReactionLimit !== true) {
+function getAutoReactionEmojiCatalog() {
+    if (!autoReactionEmojiCatalog) {
+        const catalog = loadAutoReactionEmojiCatalog({
+            defaultEmojiDirectories: [
+                path.join(process.resourcesPath, 'app', 'resource', 'default-emojis'),
+                path.join(process.resourcesPath, 'app.asar.unpacked', 'resource', 'default-emojis')
+            ],
+            tencentFilesRoots: getTencentFilesRoots({
+                documentsPath: app.getPath('documents')
+            })
+        });
+        if (catalog.length) {
+            autoReactionEmojiCatalog = catalog;
+        }
+        return catalog;
+    }
+    return autoReactionEmojiCatalog;
+}
+
+async function setMessageReaction(browserWindow, payload, options = {}) {
+    const source = options.source === 'auto' ? 'auto' : 'manual';
+    const config = getConfig();
+    if (source === 'manual' && config.messageTweaks.removeReactionLimit !== true) {
         return { ok: false, reason: 'disabled' };
     }
     const request = normalizeReactionRequest(payload);
     if (!request) {
         return { ok: false, reason: 'invalid-request' };
+    }
+    if (source === 'auto') {
+        const autoReaction = normalizeAutoReactionConfig(config.entertainment.autoReaction);
+        if (!autoReaction.enabled || !autoReaction.emojiIds.includes(request.emojiId)) {
+            return { ok: false, reason: 'disabled' };
+        }
     }
     try {
         const result = await qqNativeInvoke(
@@ -2043,6 +2157,14 @@ function installConfigIpc() {
             return [];
         }
     });
+    ipcMain.handle(CHANNEL_GET_AUTO_REACTION_CATALOG, () => {
+        try {
+            return getAutoReactionEmojiCatalog();
+        } catch (error) {
+            warn('auto reaction emoji catalog failed:', error?.message || error);
+            return [];
+        }
+    });
     ipcMain.handle(CHANNEL_SET_MESSAGE_REACTION, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         if (!browserWindow) {
@@ -2076,6 +2198,19 @@ function installConfigIpc() {
             method: result?.method || '',
             source,
             chatType: Number(payload?.chatType) || 0
+        });
+        return result;
+    });
+    ipcMain.handle(CHANNEL_SEND_WINDOW_SHAKE, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found' };
+        }
+        const result = await sendWindowShakeMessage(browserWindow, payload);
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'window-shake.send-completed', {
+            ok: result?.ok === true,
+            reason: result?.reason || '',
+            chatType: Number(payload?.peer?.chatType) || 0
         });
         return result;
     });
@@ -2144,6 +2279,9 @@ function getWindowState(browserWindow) {
     if (!state) {
         state = {
             selfUin: '',
+            selfUid: '',
+            selfUidPromise: null,
+            selfUidLookupAt: 0,
             peerUidByUin: new Map(),
             retriedRecords: new Map(),
             inFlightRecords: new Set(),
@@ -4219,8 +4357,20 @@ function resolveUinFromUid(browserWindow, uid) {
 }
 
 function rememberPokeAccountFromRecords(browserWindow, records) {
+    const state = getWindowState(browserWindow);
     for (const record of records) {
-        if (Number(record?.sendType) === 1 && registerPokeAccount(browserWindow, record?.senderUin)) {
+        if (Number(record?.sendType) !== 1) {
+            continue;
+        }
+        const registered = registerPokeAccount(browserWindow, record?.senderUin);
+        const selfUid = normalizeText(record?.senderUid || record?.senderUidStr);
+        if (selfUid) {
+            state.selfUid = selfUid;
+            if (state.selfUin) {
+                state.peerUidByUin.set(state.selfUin, selfUid);
+            }
+        }
+        if (registered || selfUid) {
             return;
         }
     }
@@ -4357,6 +4507,125 @@ function processPokeUpdates(browserWindow, context) {
     }
 }
 
+async function resolveAutoReactionAccountUid(browserWindow) {
+    const state = getWindowState(browserWindow);
+    if (state.selfUid || !state.selfUin) {
+        return state.selfUid;
+    }
+    if (state.selfUidPromise) {
+        return await state.selfUidPromise;
+    }
+    if (Date.now() - state.selfUidLookupAt < AUTO_REACTION_UID_LOOKUP_RETRY_MS) {
+        return '';
+    }
+    state.selfUidLookupAt = Date.now();
+    const accountUin = state.selfUin;
+    const promise = resolveFakeForwardSenderUid(browserWindow, accountUin)
+        .then(uid => {
+            if (uid && state.selfUin === accountUin) {
+                state.selfUid = uid;
+            }
+            return state.selfUid;
+        })
+        .catch(() => '')
+        .finally(() => {
+            if (state.selfUidPromise === promise) {
+                state.selfUidPromise = null;
+            }
+        });
+    state.selfUidPromise = promise;
+    return await promise;
+}
+
+function pruneAutoReactionState(now = Date.now()) {
+    const cutoff = now - AUTO_REACTION_EVENT_TTL_MS;
+    for (const [key, timestamp] of autoReactionState.processedMessages) {
+        if (timestamp < cutoff) {
+            autoReactionState.processedMessages.delete(key);
+        }
+    }
+    while (autoReactionState.processedMessages.size > MAX_AUTO_REACTION_PROCESSED_MESSAGES) {
+        const oldest = autoReactionState.processedMessages.keys().next().value;
+        autoReactionState.processedMessages.delete(oldest);
+    }
+}
+
+async function processAutoReactionUpdates(browserWindow, context) {
+    const events = {
+        received: context.commandNames.has(POKE_RECEIVE_CMD),
+        sendComplete: context.commandNames.has(MSG_UPDATE_CMD)
+    };
+    if (!events.received && !events.sendComplete) {
+        return;
+    }
+    const config = normalizeAutoReactionConfig(getEntertainmentConfig().autoReaction);
+    if (!config.enabled || !config.emojiIds.length) {
+        return;
+    }
+    const records = Array.from(new Set(context.records));
+    rememberPokeAccountFromRecords(browserWindow, records);
+    const state = getWindowState(browserWindow);
+    if ((config.mentionSelf || config.replySelf) && state.selfUin && !state.selfUid) {
+        await resolveAutoReactionAccountUid(browserWindow);
+    }
+    pruneAutoReactionState();
+
+    for (const record of records) {
+        if (browserWindow.isDestroyed() || Number(record?.chatType || record?.peer?.chatType) !== 2 ||
+            !/^\d+$/.test(normalizeText(record?.msgSeq)) || !isRecentAutoReactionRecord(record)) {
+            continue;
+        }
+        const peerUid = normalizeText(
+            record?.peerUid || record?.peerUin || record?.peer?.peerUid || record?.peer?.peerUin
+        );
+        if (!peerUid) {
+            continue;
+        }
+        const key = getAutoReactionMessageKey(
+            record,
+            state.selfUin || `window-${Number(browserWindow.id) || 0}`
+        );
+        if (!key || autoReactionState.processedMessages.has(key)) {
+            continue;
+        }
+        const decision = getAutoReactionDecision(record, {
+            selfUin: state.selfUin,
+            selfUid: state.selfUid
+        }, config);
+        if (!decision.matched || !isAutoReactionRecordReady(record, decision, events)) {
+            continue;
+        }
+        autoReactionState.processedMessages.set(key, Date.now());
+        const peer = {
+            chatType: 2,
+            peerUid,
+            guildId: normalizeText(record?.guildId || record?.peer?.guildId)
+        };
+        const failures = [];
+        let successCount = 0;
+        for (const emojiId of config.emojiIds) {
+            const result = await setMessageReaction(browserWindow, {
+                peer,
+                msgSeq: normalizeText(record.msgSeq),
+                emojiId,
+                setEmoji: true
+            }, { source: 'auto' });
+            if (result?.ok) {
+                successCount += 1;
+            } else {
+                failures.push(result?.reason || 'unknown');
+            }
+        }
+        recordDiagnostic(failures.length ? 'warn' : 'info', 'auto-reaction.completed', {
+            ok: failures.length === 0,
+            reason: Array.from(new Set(failures)).join(','),
+            trigger: decision.reasons.join(','),
+            selectedCount: config.emojiIds.length,
+            successCount
+        });
+    }
+}
+
 function isMsgRecord(value) {
     return Boolean(value && typeof value === 'object' && (value.msgId !== undefined || value.msgSeq !== undefined) && Array.isArray(value.elements));
 }
@@ -4399,14 +4668,6 @@ function processDeleteBubbleSkin(context) {
 function shouldBlockUpdateNotice(context) {
     return getConfig().interfaceTweaks.hiddenUpdateBtnAndNotice === true &&
         context.hasUnitedConfigGroup;
-}
-
-function getRecallInfo(record) {
-    if (!record || !Array.isArray(record.elements) || record.elements.length !== 1) {
-        return null;
-    }
-    const grayTip = record.elements[0]?.grayTipElement;
-    return grayTip?.subElementType === 1 ? grayTip.revokeElement || null : null;
 }
 
 function createRecallMark(record) {
@@ -4881,6 +5142,17 @@ function getRecoveredRecallRecord(recallState, record) {
     return recovered;
 }
 
+function preserveRecoveredRecallMetadata(recallState, record) {
+    const stored = recallState?.recalledMessages.get(getRecallKey(record));
+    const mark = stored?.qqnt_toolbox_recall;
+    if (!stored || !mark) {
+        return false;
+    }
+    record.qqnt_toolbox_recall ||= deepCloneForSend(mark);
+    record.qqnt_toolbox_account_uin = recallState.accountUin;
+    return true;
+}
+
 function processPreventRecall(browserWindow, context) {
     rememberPokeAccountFromRecords(browserWindow, context.records);
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
@@ -4888,6 +5160,8 @@ function processPreventRecall(browserWindow, context) {
         return;
     }
     const config = getPreventRecallConfig();
+    const recoveredKinds = { recall: 0, empty: 0 };
+    let preservedUpdates = 0;
     for (const record of context.records) {
         const msgId = getRecallKey(record);
         const hasRecoveredRecord = recallState.recalledMessages.has(msgId);
@@ -4897,16 +5171,33 @@ function processPreventRecall(browserWindow, context) {
             }
             continue;
         }
+        const action = getRecoveredRecordAction(record, hasRecoveredRecord);
+        if (action === RECOVERED_RECORD_ACTIONS.PRESERVE) {
+            if (preserveRecoveredRecallMetadata(recallState, record)) {
+                preservedUpdates += 1;
+            }
+            continue;
+        }
+        if (action === RECOVERED_RECORD_ACTIONS.CACHE) {
+            cacheRecallCandidate(recallState, record);
+            continue;
+        }
+        const isRecallRecord = Boolean(getRecallInfo(record));
         const recovered = getRecoveredRecallRecord(recallState, record);
         if (!recovered) {
-            cacheRecallCandidate(recallState, record);
             continue;
         }
         Object.keys(record).forEach(key => delete record[key]);
         Object.assign(record, recovered);
+        recoveredKinds[isRecallRecord ? 'recall' : 'empty'] += 1;
+    }
+    const recoveredCount = recoveredKinds.recall + recoveredKinds.empty;
+    if (recoveredCount) {
         recordDiagnostic('info', 'recall.recovered', {
-            chatType: Number(recovered?.chatType) || 0,
-            elementTypes: (recovered?.elements || []).map(element => Number(element?.elementType) || 0),
+            count: recoveredCount,
+            kinds: recoveredKinds,
+            preservedUpdates,
+            commands: Array.from(context.commandNames).slice(0, 8),
             persisted: getConfig().preventRecall.persistedFiles === true
         });
     }
@@ -7233,6 +7524,21 @@ function handleNativeSend(browserWindow, channel, args) {
     rememberInlineMediaRecords(browserWindow, context);
     processPokeUpdates(browserWindow, context);
     Promise.resolve()
+        .then(() => processAutoReactionUpdates(browserWindow, context))
+        .catch(error => warn('auto reaction processing failed:', error?.message || error));
+    const windowShakeArmed = windowShakeController.arm(
+        browserWindow,
+        context,
+        getConfig().interfaceTweaks.blockWindowShake
+    );
+    if (windowShakeArmed) {
+        recordDiagnostic('info', 'window-shake.armed', {
+            recordCount: context.records.filter(record =>
+                Number(record?.chatType) === 1
+            ).length
+        });
+    }
+    Promise.resolve()
         .then(() => processMessageUpdates(browserWindow, context))
         .catch(error => warn('message update processing failed:', error?.message || error));
     return false;
@@ -7263,6 +7569,7 @@ function installNativeRequestHandler(browserWindow) {
 function installForAllWindows() {
     for (const browserWindow of BrowserWindow.getAllWindows()) {
         singleForwardWindowController.install(browserWindow);
+        windowShakeController.install(browserWindow);
         installNativeSendHandler(browserWindow);
         installNativeRequestHandler(browserWindow);
     }
@@ -7289,6 +7596,7 @@ function start() {
     cleanupOldRepairFiles(true).catch(() => {});
     app?.on?.('browser-window-created', (_event, browserWindow) => {
         singleForwardWindowController.install(browserWindow);
+        windowShakeController.install(browserWindow);
         installNativeSendHandler(browserWindow);
         installNativeRequestHandler(browserWindow);
         if (isVoiceMessageEnabled()) {

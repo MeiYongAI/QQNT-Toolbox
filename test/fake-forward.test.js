@@ -43,6 +43,24 @@ function composerElement(tagName, childNodes = [], options = {}) {
     };
 }
 
+let fakeForwardEditorModule;
+
+function loadFakeForwardEditor() {
+    if (!fakeForwardEditorModule) {
+        const sourcePath = path.join(__dirname, '..', 'src', 'fake-forward-editor.js');
+        const source = fs.readFileSync(sourcePath, 'utf8');
+        const isolatedSource = source.replace(
+            /import\s*\{[^}]+\}\s*from\s*['"]\.\/chat-toolbar-entry\.js['"];?\s*/,
+            ''
+        );
+        assert.notEqual(isolatedSource, source, 'expected the editor toolbar import');
+        fakeForwardEditorModule = import(
+            `data:text/javascript;base64,${Buffer.from(isolatedSource).toString('base64')}`
+        );
+    }
+    return fakeForwardEditorModule;
+}
+
 test('builds the QQ native image upload parameters without an unsupported transfer id', () => {
     assert.deepEqual(buildFakeForwardImageUploadParams({
         chatType: 2,
@@ -115,8 +133,7 @@ test('normalizes fake forward entries without changing multiline text', () => {
 });
 
 test('reads native contenteditable block lines without joining the first two lines', async () => {
-    const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'fake-forward-editor.js'), 'utf8');
-    const editor = await import(`data:text/javascript;base64,${Buffer.from(editorSource).toString('base64')}`);
+    const editor = await loadFakeForwardEditor();
     const root = composerElement('DIV', [
         composerText('今'),
         composerElement('DIV', [composerText('天')]),
@@ -133,8 +150,7 @@ test('reads native contenteditable block lines without joining the first two lin
 });
 
 test('drops only the browser placeholder break after a compound image', async () => {
-    const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'fake-forward-editor.js'), 'utf8');
-    const editor = await import(`data:text/javascript;base64,${Buffer.from(editorSource).toString('base64')}`);
+    const editor = await loadFakeForwardEditor();
     const root = composerElement('DIV', [
         composerText('我喜欢这个'),
         composerElement('SPAN', [], {
@@ -151,8 +167,7 @@ test('drops only the browser placeholder break after a compound image', async ()
 });
 
 test('reads a standalone video card without keeping the contenteditable placeholder', async () => {
-    const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'fake-forward-editor.js'), 'utf8');
-    const editor = await import(`data:text/javascript;base64,${Buffer.from(editorSource).toString('base64')}`);
+    const editor = await loadFakeForwardEditor();
     const root = composerElement('DIV', [
         composerElement('SPAN', [], {
             classNames: ['qff-composer-attachment'],
@@ -489,6 +504,7 @@ test('wires the editor through local IPC without the retired third-party builder
     const mainSource = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
     const rendererSource = fs.readFileSync(path.join(root, 'src', 'renderer.js'), 'utf8');
     const editorSource = fs.readFileSync(path.join(root, 'src', 'fake-forward-editor.js'), 'utf8');
+    const toolbarSource = fs.readFileSync(path.join(root, 'src', 'chat-toolbar-entry.js'), 'utf8');
     const editorStyle = fs.readFileSync(path.join(root, 'src', 'fake-forward-editor.css'), 'utf8');
 
     assert.match(mainSource, /sendFakeForwardFromRenderer/);
@@ -521,14 +537,16 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(editorSource, /addEventListener\(['"]drop['"]/);
     assert.match(editorSource, /VIDEO_FILE_PATTERN/);
     assert.match(editorSource, /视频或文件必须单独作为一条消息/);
-    assert.match(editorSource, /template\.cloneNode\(true\)/);
-    assert.match(editorSource, /applyEntryGlyph\(glyph\)/);
-    assert.match(editorSource, /entries\.find\(element => element\.querySelector\(['"]svg['"]\)\)/);
-    assert.match(editorSource, /setAttribute\(['"]role['"], ['"]button['"]\)/);
-    assert.match(editorSource, /\.icon-item\[aria-label\], \[aria-label\], \[data-title\]/);
-    assert.match(editorSource, /labelTarget\.setAttribute\(['"]aria-label['"], ['"]伪造转发['"]\)/);
-    assert.match(editorSource, /q-tooltips-v2 q-tooltips-v2--pos-bottom q-tooltips-v2--small q-float-card/);
-    assert.match(editorSource, /tooltip\.style\.top\s*=\s*\(-tooltipRect\.height - 4\)/);
+    assert.match(editorSource, /createNativeChatToolbarEntry\(toolbar/);
+    assert.match(editorSource, /renderIcon:\s*applyEntryGlyph/);
+    assert.match(editorSource, /bindNativeChatToolbarAction\(entry, open\)/);
+    assert.match(toolbarSource, /template\.cloneNode\(true\)/);
+    assert.match(toolbarSource, /entries\.find\(element => element\.querySelector\(['"]svg['"]\)\)/);
+    assert.match(toolbarSource, /setAttribute\(['"]role['"], ['"]button['"]\)/);
+    assert.match(toolbarSource, /\.icon-item\[aria-label\], \[aria-label\], \[data-title\]/);
+    assert.match(toolbarSource, /labelTarget\.setAttribute\(['"]aria-label['"], String\(options\.label/);
+    assert.match(toolbarSource, /q-tooltips-v2 q-tooltips-v2--pos-bottom q-tooltips-v2--small q-float-card/);
+    assert.match(toolbarSource, /tooltip\.style\.top\s*=\s*\(-tooltipRect\.height - 4\)/);
     assert.doesNotMatch(editorSource, /qff-entry-native-tooltip|qff-entry-tooltip|showEntryTooltip|entryTooltip/);
     assert.doesNotMatch(editorSource, /添加图片|selectImages/);
     assert.doesNotMatch(editorSource, /createButton\(['"]qff-entry-button/);

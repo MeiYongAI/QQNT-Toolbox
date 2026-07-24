@@ -15,8 +15,10 @@ const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image'
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
+const CHANNEL_GET_AUTO_REACTION_CATALOG = 'qqnt-toolbox:get-auto-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
 const CHANNEL_SEND_POKE = 'qqnt-toolbox:send-poke';
+const CHANNEL_SEND_WINDOW_SHAKE = 'qqnt-toolbox:send-window-shake';
 const CHANNEL_RECALL_POKE = 'qqnt-toolbox:recall-poke';
 const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
 const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
@@ -43,8 +45,10 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
         ipcRenderer.invoke(CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME, senderUin),
     sendFakeForward: payload => ipcRenderer.invoke(CHANNEL_SEND_FAKE_FORWARD, payload),
     getReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_REACTION_CATALOG),
+    getAutoReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_AUTO_REACTION_CATALOG),
     setMessageReaction: payload => ipcRenderer.invoke(CHANNEL_SET_MESSAGE_REACTION, payload),
     sendPoke: payload => ipcRenderer.invoke(CHANNEL_SEND_POKE, payload),
+    sendWindowShake: payload => ipcRenderer.invoke(CHANNEL_SEND_WINDOW_SHAKE, payload),
     recallPoke: payload => ipcRenderer.invoke(CHANNEL_RECALL_POKE, payload),
     registerPokeAccount: selfUin => ipcRenderer.invoke(CHANNEL_REGISTER_POKE_ACCOUNT, selfUin),
     clearRecallCache: () => ipcRenderer.invoke(CHANNEL_CLEAR_RECALL_CACHE),

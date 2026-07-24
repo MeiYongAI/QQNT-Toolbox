@@ -90,8 +90,10 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.resolveFakeForwardSenderName('12345678');
     await api.sendFakeForward({ messages: [] });
     await api.getReactionEmojiCatalog();
+    await api.getAutoReactionEmojiCatalog();
     await api.setMessageReaction({ emojiId: '14' });
     await api.sendPoke({ id: 'poke' });
+    await api.sendWindowShake({ id: 'window-shake' });
     await api.recallPoke({ id: 'recall-poke' });
     await api.viewRecallMessages();
     await api.getRecallContacts();
@@ -117,8 +119,10 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:resolve-fake-forward-sender-name',
         'qqnt-toolbox:send-fake-forward',
         'qqnt-toolbox:get-reaction-catalog',
+        'qqnt-toolbox:get-auto-reaction-catalog',
         'qqnt-toolbox:set-message-reaction',
         'qqnt-toolbox:send-poke',
+        'qqnt-toolbox:send-window-shake',
         'qqnt-toolbox:recall-poke',
         'qqnt-toolbox:view-recall-messages',
         'qqnt-toolbox:get-recall-contacts',

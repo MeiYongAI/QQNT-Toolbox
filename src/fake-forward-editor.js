@@ -1,20 +1,20 @@
+import {
+    bindNativeChatToolbarAction,
+    createNativeChatToolbarEntry,
+    findNativeChatToolbar
+} from './chat-toolbar-entry.js';
+
 const ROOT_ID = 'qqnt-toolbox-fake-forward-editor';
 const STYLE_ID = 'qqnt-toolbox-fake-forward-style';
 const ENTRY_CLASS = 'qqnt-toolbox-fake-forward-entry';
 const MAX_MESSAGES = 100;
 const MAX_TEXT_LENGTH = 10000;
 const MAX_IMAGES_PER_MESSAGE = 20;
-const NATIVE_TOOLTIP_DELAY = 500;
 const IMAGE_FILE_PATTERN = /\.(?:apng|bmp|gif|jfif|jpe?g|png|webp)$/i;
 const VIDEO_FILE_PATTERN = /\.(?:3g2|3gp|asf|avi|flv|m2ts|m4v|mkv|mov|mp4|mpeg|mpg|mts|ogv|ts|vob|webm|wmv)$/i;
 const IMAGE_TOKEN_CLASS = 'qff-composer-image';
 const ATTACHMENT_TOKEN_CLASS = 'qff-composer-attachment';
 const COMPOSER_BLOCK_TAGS = new Set(['DIV', 'P', 'LI']);
-const TOOLBAR_SELECTORS = [
-    '.chat-func-bar .func-bar-native',
-    '.chat-func-bar__left .func-bar-native',
-    '[class*="chat-func-bar"] [class*="func-bar-native"]'
-];
 
 function createElement(tag, className = '', text = '') {
     const element = document.createElement(tag);
@@ -1127,95 +1127,6 @@ export function createFakeForwardEditor(options = {}) {
         state.fields.senderUin.focus();
     }
 
-    function findToolbar() {
-        for (const selector of TOOLBAR_SELECTORS) {
-            const toolbar = document.querySelector(selector);
-            if (toolbar) {
-                return toolbar;
-            }
-        }
-        return null;
-    }
-
-    function findNativeEntryTemplate(toolbar) {
-        const entries = Array.from(toolbar?.children || []).filter(element =>
-            !element.classList.contains(ENTRY_CLASS) &&
-            element.getAttribute('aria-hidden') !== 'true' &&
-            element.style?.display !== 'none'
-        );
-        return entries.find(element => element.querySelector('svg')) || null;
-    }
-
-    function attachNativeTooltip(entry, labelTarget) {
-        let timer = 0;
-        let tooltip = null;
-        const hide = () => {
-            window.clearTimeout(timer);
-            timer = 0;
-            tooltip?.remove();
-            tooltip = null;
-        };
-        const show = () => {
-            hide();
-            timer = window.setTimeout(() => {
-                if (!entry.isConnected || !entry.matches(':hover')) {
-                    return;
-                }
-                tooltip = createElement(
-                    'div',
-                    'q-tooltips-v2 q-tooltips-v2--pos-bottom q-tooltips-v2--small q-float-card',
-                    labelTarget.getAttribute('aria-label') || ''
-                );
-                tooltip.style.zIndex = '2000';
-                entry.append(tooltip);
-                const entryRect = entry.getBoundingClientRect();
-                const tooltipRect = tooltip.getBoundingClientRect();
-                const centeredLeft = (entryRect.width - tooltipRect.width) / 2;
-                const minLeft = 4 - entryRect.left;
-                const maxLeft = window.innerWidth - entryRect.left - tooltipRect.width - 4;
-                tooltip.style.left = Math.min(maxLeft, Math.max(minLeft, centeredLeft)) + 'px';
-                tooltip.style.top = (-tooltipRect.height - 4) + 'px';
-            }, NATIVE_TOOLTIP_DELAY);
-        };
-        entry.addEventListener('pointerenter', show);
-        entry.addEventListener('pointerleave', hide);
-        entry.addEventListener('blur', hide, true);
-        return hide;
-    }
-
-    function cloneNativeEntry(template) {
-        const entry = template.cloneNode(true);
-        const legacyTooltip = entry.querySelector('.q-tooltips__content');
-        const nativeTooltip = entry.querySelector(':scope > .q-tooltips-v2');
-        const labelTarget = entry.querySelector('.icon-item[aria-label], [aria-label], [data-title]') || entry;
-        const usesDataTitle = labelTarget.hasAttribute('data-title');
-        const glyph = Array.from(entry.querySelectorAll('svg')).find(svg => !legacyTooltip?.contains(svg));
-        if (!glyph) {
-            return null;
-        }
-        legacyTooltip?.remove();
-        nativeTooltip?.remove();
-        for (const element of [entry, ...entry.querySelectorAll('*')]) {
-            element.removeAttribute('id');
-            element.removeAttribute('title');
-            element.removeAttribute('aria-label');
-            element.removeAttribute('aria-pressed');
-            element.removeAttribute('aria-expanded');
-            element.removeAttribute('aria-disabled');
-            element.removeAttribute('disabled');
-        }
-        entry.classList.add(ENTRY_CLASS);
-        entry.setAttribute('role', 'button');
-        entry.tabIndex = 0;
-        labelTarget.setAttribute('aria-label', '伪造转发');
-        if (usesDataTitle) {
-            labelTarget.setAttribute('data-title', '伪造转发');
-        }
-        applyEntryGlyph(glyph);
-        attachNativeTooltip(entry, labelTarget);
-        return entry;
-    }
-
     function removeEntries() {
         document.querySelectorAll('.' + ENTRY_CLASS).forEach(element => element.remove());
     }
@@ -1243,11 +1154,9 @@ export function createFakeForwardEditor(options = {}) {
         }
         ensureStylesheet();
         connectObserver();
-        const toolbar = findToolbar();
-        const template = findNativeEntryTemplate(toolbar);
+        const toolbar = findNativeChatToolbar();
         const available = isSupportedPeer(options.getPeer?.()) &&
-            Boolean(toolbar) &&
-            Boolean(template);
+            Boolean(toolbar);
         if (!available) {
             removeEntries();
             close();
@@ -1257,28 +1166,15 @@ export function createFakeForwardEditor(options = {}) {
             return;
         }
         removeEntries();
-        const entry = cloneNativeEntry(template);
+        const entry = createNativeChatToolbarEntry(toolbar, {
+            className: ENTRY_CLASS,
+            label: '伪造转发',
+            renderIcon: applyEntryGlyph
+        });
         if (!entry) {
             return;
         }
-        entry.addEventListener('pointerdown', event => {
-            if (event.pointerType !== 'touch') {
-                event.preventDefault();
-            }
-        });
-        entry.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            open();
-        });
-        entry.addEventListener('keydown', event => {
-            if (event.key !== 'Enter' && event.key !== ' ') {
-                return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            open();
-        });
+        bindNativeChatToolbarAction(entry, open);
         toolbar.append(entry);
     }
 
