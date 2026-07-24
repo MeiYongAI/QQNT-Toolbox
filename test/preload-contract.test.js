@@ -89,6 +89,17 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.stageFakeForwardImage({ name: 'image.png', data: new ArrayBuffer(1) });
     await api.resolveFakeForwardSenderName('12345678');
     await api.sendFakeForward({ messages: [] });
+    await api.chooseLocalStickerDirectory();
+    await api.getLocalStickers({ force: true });
+    await api.rememberLocalSticker('D:\\stickers\\one.png');
+    await api.sendLocalSticker({ path: 'D:\\stickers\\one.png' });
+    await api.openLocalStickerDirectory();
+    await api.updateLocalStickerPackOrder(['D:\\stickers\\pack']);
+    await api.chooseLocalStickerTool('ffmpeg');
+    await api.getLocalStickerEnvironment();
+    await api.openLocalStickerToolDownload('tgsToGif');
+    await api.testLocalStickerProxy('http://127.0.0.1:7890');
+    await api.downloadTelegramStickers('https://t.me/addstickers/example');
     await api.getReactionEmojiCatalog();
     await api.getAutoReactionEmojiCatalog();
     await api.setMessageReaction({ emojiId: '14' });
@@ -118,6 +129,17 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:stage-fake-forward-image',
         'qqnt-toolbox:resolve-fake-forward-sender-name',
         'qqnt-toolbox:send-fake-forward',
+        'qqnt-toolbox:choose-local-sticker-directory',
+        'qqnt-toolbox:get-local-stickers',
+        'qqnt-toolbox:remember-local-sticker',
+        'qqnt-toolbox:send-local-sticker',
+        'qqnt-toolbox:open-local-sticker-directory',
+        'qqnt-toolbox:update-local-sticker-pack-order',
+        'qqnt-toolbox:choose-local-sticker-tool',
+        'qqnt-toolbox:get-local-sticker-environment',
+        'qqnt-toolbox:open-local-sticker-tool-download',
+        'qqnt-toolbox:test-local-sticker-proxy',
+        'qqnt-toolbox:download-telegram-stickers',
         'qqnt-toolbox:get-reaction-catalog',
         'qqnt-toolbox:get-auto-reaction-catalog',
         'qqnt-toolbox:set-message-reaction',

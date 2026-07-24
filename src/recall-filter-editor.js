@@ -92,6 +92,7 @@ function injectStyle() {
     position: fixed;
     inset: 0;
     z-index: 2147483647;
+    -webkit-app-region: no-drag;
     display: grid;
     place-items: center;
     padding: 20px;

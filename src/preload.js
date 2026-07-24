@@ -14,6 +14,17 @@ const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
+const CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:choose-local-sticker-directory';
+const CHANNEL_GET_LOCAL_STICKERS = 'qqnt-toolbox:get-local-stickers';
+const CHANNEL_REMEMBER_LOCAL_STICKER = 'qqnt-toolbox:remember-local-sticker';
+const CHANNEL_SEND_LOCAL_STICKER = 'qqnt-toolbox:send-local-sticker';
+const CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:open-local-sticker-directory';
+const CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER = 'qqnt-toolbox:update-local-sticker-pack-order';
+const CHANNEL_CHOOSE_LOCAL_STICKER_TOOL = 'qqnt-toolbox:choose-local-sticker-tool';
+const CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT = 'qqnt-toolbox:get-local-sticker-environment';
+const CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD = 'qqnt-toolbox:open-local-sticker-tool-download';
+const CHANNEL_TEST_LOCAL_STICKER_PROXY = 'qqnt-toolbox:test-local-sticker-proxy';
+const CHANNEL_DOWNLOAD_TELEGRAM_STICKERS = 'qqnt-toolbox:download-telegram-stickers';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_GET_AUTO_REACTION_CATALOG = 'qqnt-toolbox:get-auto-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -44,6 +55,19 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     resolveFakeForwardSenderName: senderUin =>
         ipcRenderer.invoke(CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME, senderUin),
     sendFakeForward: payload => ipcRenderer.invoke(CHANNEL_SEND_FAKE_FORWARD, payload),
+    chooseLocalStickerDirectory: () => ipcRenderer.invoke(CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY),
+    getLocalStickers: options => ipcRenderer.invoke(CHANNEL_GET_LOCAL_STICKERS, options),
+    rememberLocalSticker: filePath => ipcRenderer.invoke(CHANNEL_REMEMBER_LOCAL_STICKER, filePath),
+    sendLocalSticker: payload => ipcRenderer.invoke(CHANNEL_SEND_LOCAL_STICKER, payload),
+    openLocalStickerDirectory: () => ipcRenderer.invoke(CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY),
+    updateLocalStickerPackOrder: packPaths =>
+        ipcRenderer.invoke(CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER, packPaths),
+    chooseLocalStickerTool: tool => ipcRenderer.invoke(CHANNEL_CHOOSE_LOCAL_STICKER_TOOL, tool),
+    getLocalStickerEnvironment: () => ipcRenderer.invoke(CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT),
+    openLocalStickerToolDownload: tool =>
+        ipcRenderer.invoke(CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD, tool),
+    testLocalStickerProxy: proxyUrl => ipcRenderer.invoke(CHANNEL_TEST_LOCAL_STICKER_PROXY, proxyUrl),
+    downloadTelegramStickers: url => ipcRenderer.invoke(CHANNEL_DOWNLOAD_TELEGRAM_STICKERS, url),
     getReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_REACTION_CATALOG),
     getAutoReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_AUTO_REACTION_CATALOG),
     setMessageReaction: payload => ipcRenderer.invoke(CHANNEL_SET_MESSAGE_REACTION, payload),

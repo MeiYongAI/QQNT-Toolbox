@@ -22,6 +22,17 @@ const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
+const CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:choose-local-sticker-directory';
+const CHANNEL_GET_LOCAL_STICKERS = 'qqnt-toolbox:get-local-stickers';
+const CHANNEL_REMEMBER_LOCAL_STICKER = 'qqnt-toolbox:remember-local-sticker';
+const CHANNEL_SEND_LOCAL_STICKER = 'qqnt-toolbox:send-local-sticker';
+const CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:open-local-sticker-directory';
+const CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER = 'qqnt-toolbox:update-local-sticker-pack-order';
+const CHANNEL_CHOOSE_LOCAL_STICKER_TOOL = 'qqnt-toolbox:choose-local-sticker-tool';
+const CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT = 'qqnt-toolbox:get-local-sticker-environment';
+const CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD = 'qqnt-toolbox:open-local-sticker-tool-download';
+const CHANNEL_TEST_LOCAL_STICKER_PROXY = 'qqnt-toolbox:test-local-sticker-proxy';
+const CHANNEL_DOWNLOAD_TELEGRAM_STICKERS = 'qqnt-toolbox:download-telegram-stickers';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_GET_AUTO_REACTION_CATALOG = 'qqnt-toolbox:get-auto-reaction-catalog';
 const CHANNEL_SET_MESSAGE_REACTION = 'qqnt-toolbox:set-message-reaction';
@@ -66,6 +77,17 @@ module.exports = Object.freeze({
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
+    CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY,
+    CHANNEL_GET_LOCAL_STICKERS,
+    CHANNEL_REMEMBER_LOCAL_STICKER,
+    CHANNEL_SEND_LOCAL_STICKER,
+    CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY,
+    CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER,
+    CHANNEL_CHOOSE_LOCAL_STICKER_TOOL,
+    CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT,
+    CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD,
+    CHANNEL_TEST_LOCAL_STICKER_PROXY,
+    CHANNEL_DOWNLOAD_TELEGRAM_STICKERS,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_GET_AUTO_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, session, shell } = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const os = require('os');
@@ -40,6 +40,21 @@ const {
     parseFakeForwardSendResponse,
     parseFakeForwardUploadResponse
 } = require('./fake-forward');
+const {
+    buildLocalStickerStore,
+    normalizeLocalStickerConfig,
+    readRecentStickerPaths,
+    rememberRecentSticker,
+    resolveLocalStickerPath,
+    scanLocalStickerPacks,
+    updateLocalStickerPackOrder
+} = require('./local-stickers');
+const {
+    downloadTelegramStickerPack,
+    getEnvironmentHttpProxy,
+    inspectLocalStickerTools,
+    normalizeHttpProxyUrl
+} = require('./local-sticker-downloader');
 const {
     loadAutoReactionEmojiCatalog,
     loadReactionEmojiCatalog,
@@ -124,6 +139,17 @@ const {
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
+    CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY,
+    CHANNEL_GET_LOCAL_STICKERS,
+    CHANNEL_REMEMBER_LOCAL_STICKER,
+    CHANNEL_SEND_LOCAL_STICKER,
+    CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY,
+    CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER,
+    CHANNEL_CHOOSE_LOCAL_STICKER_TOOL,
+    CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT,
+    CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD,
+    CHANNEL_TEST_LOCAL_STICKER_PROXY,
+    CHANNEL_DOWNLOAD_TELEGRAM_STICKERS,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_GET_AUTO_REACTION_CATALOG,
     CHANNEL_SET_MESSAGE_REACTION,
@@ -182,6 +208,7 @@ const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
 const AUTO_REACTION_EVENT_TTL_MS = 60 * 60 * 1000;
 const AUTO_REACTION_UID_LOOKUP_RETRY_MS = 60 * 1000;
 const MAX_AUTO_REACTION_PROCESSED_MESSAGES = 10000;
+const LOCAL_STICKER_CACHE_TTL_MS = 5000;
 const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
 const POKE_RECALL_COMMAND = 'OidbSvcTrpcTcp.0xF51_1';
 const WINDOWS_NATIVE_BINARY = 'poke-bridge.win32-x64.node';
@@ -231,6 +258,22 @@ const DEFAULT_CONFIG = {
     },
     fakeForward: {
         enabled: false
+    },
+    localStickers: {
+        enabled: false,
+        path: '',
+        entryMode: 'contextmenu',
+        iconOnLeft: false,
+        stickersPerRow: 6,
+        panelWidth: 350,
+        panelHeight: 420,
+        sendAsImage: false,
+        recentEnabled: true,
+        recentRows: 2,
+        telegramBotToken: '',
+        ffmpegPath: '',
+        tgsToGifPath: '',
+        httpProxy: ''
     },
     voiceMessage: {
         enabled: false,
@@ -301,6 +344,7 @@ const DEFAULT_CONFIG = {
         singleMediaViewer: false,
         singleForwardViewer: false,
         singleForwardGroupIsolation: false,
+        preserveChatScrollPosition: false,
         blockWindowShake: false,
         goBackMainList: false,
         preventMessageDrag: false,
@@ -341,6 +385,17 @@ const pokeState = {
 const autoReactionState = {
     processedMessages: new Map()
 };
+const localStickerCache = {
+    signature: '',
+    scannedAt: 0,
+    scanResult: null,
+    store: null,
+    promise: null,
+    promiseSignature: '',
+    revision: 0
+};
+const localStickerNetworkSessions = new Map();
+let localStickerDownloadPromise = null;
 const recallStates = new Map();
 let configCache = null;
 let recallViewerWindow = null;
@@ -483,6 +538,27 @@ function getPluginDataDir() {
     return getLiteLoaderPluginDataDir() || path.join(os.homedir(), 'Documents', 'LiteLoaderQQNT', 'data', PLUGIN_SLUG);
 }
 
+function getDefaultLocalStickerDirectory() {
+    return path.join(getPluginDataDir(), 'stickers');
+}
+
+function ensureDefaultLocalStickerDirectorySync(config) {
+    if (!config?.path) {
+        return;
+    }
+    const configuredPath = path.resolve(String(config?.path || ''));
+    const defaultPath = path.resolve(getDefaultLocalStickerDirectory());
+    if (process.platform === 'win32'
+        ? configuredPath.toLowerCase() === defaultPath.toLowerCase()
+        : configuredPath === defaultPath) {
+        try {
+            fsSync.mkdirSync(defaultPath, { recursive: true });
+        } catch (error) {
+            warn('local sticker default directory create failed:', error?.message || error);
+        }
+    }
+}
+
 function getDebugDirectory() {
     return path.join(getPluginDataDir(), 'debug');
 }
@@ -592,6 +668,13 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         fakeForward: {
             enabled: config.fakeForward?.enabled === true
         },
+        localStickers: {
+            enabled: config.localStickers?.enabled === true,
+            entryMode: normalizeLocalStickerConfig(config.localStickers).entryMode,
+            iconOnLeft: config.localStickers?.iconOnLeft === true,
+            sendAsImage: config.localStickers?.sendAsImage === true,
+            recent: config.localStickers?.recentEnabled !== false
+        },
         voice: {
             enabled: config.voiceMessage?.enabled === true,
             saveContextMenu: config.voiceMessage?.saveInContextMenu === true,
@@ -642,6 +725,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             singleForwardWindow: config.interfaceTweaks?.singleForwardViewer === true,
             singleForwardGroupIsolation:
                 config.interfaceTweaks?.singleForwardGroupIsolation === true,
+            preserveChatScrollPosition: config.interfaceTweaks?.preserveChatScrollPosition === true,
             blockWindowShake: config.interfaceTweaks?.blockWindowShake === true,
             menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
             preventProfileCard: config.interfaceTweaks?.preventProfileCardHover === true,
@@ -786,6 +870,9 @@ function normalizeSimplifyConfig(config) {
     config.entertainment.autoReaction = normalizeAutoReactionConfig(
         config.entertainment.autoReaction
     );
+    config.localStickers = normalizeLocalStickerConfig(config.localStickers, {
+        defaultPath: getDefaultLocalStickerDirectory()
+    });
     return config;
 }
 
@@ -797,18 +884,20 @@ function loadConfig() {
     try {
         fsSync.mkdirSync(path.dirname(configPath), { recursive: true });
         if (!fsSync.existsSync(configPath)) {
-            configCache = clonePlain(DEFAULT_CONFIG);
+            configCache = normalizeSimplifyConfig(clonePlain(DEFAULT_CONFIG));
+            ensureDefaultLocalStickerDirectorySync(configCache.localStickers);
             fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
             return clonePlain(configCache);
         }
         configCache = normalizeSimplifyConfig(mergeConfig(migrateQrScanConfig(
             JSON.parse(fsSync.readFileSync(configPath, 'utf8'))
         )));
+        ensureDefaultLocalStickerDirectorySync(configCache.localStickers);
         fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
         return clonePlain(configCache);
     } catch (error) {
         warn('config load failed:', error?.message || error);
-        configCache = clonePlain(DEFAULT_CONFIG);
+        configCache = normalizeSimplifyConfig(clonePlain(DEFAULT_CONFIG));
         return clonePlain(configCache);
     }
 }
@@ -825,6 +914,7 @@ async function saveConfig(nextConfig) {
         recordDiagnostic('info', 'diagnostics.disabled');
     }
     configCache = normalizedConfig;
+    ensureDefaultLocalStickerDirectorySync(configCache.localStickers);
     await fs.mkdir(path.dirname(configPath), { recursive: true });
     await fs.writeFile(configPath, JSON.stringify(configCache, null, 2), 'utf8');
     if (!wasDebugEnabled && willDebugBeEnabled) {
@@ -1967,6 +2057,427 @@ async function setMessageReaction(browserWindow, payload, options = {}) {
     }
 }
 
+function getLocalStickerConfigSignature(config) {
+    return [
+        config.enabled,
+        path.resolve(config.path || '.'),
+        config.stickersPerRow,
+        config.recentEnabled,
+        config.recentRows
+    ].join('|');
+}
+
+function invalidateLocalStickerCache() {
+    localStickerCache.signature = '';
+    localStickerCache.scannedAt = 0;
+    localStickerCache.scanResult = null;
+    localStickerCache.store = null;
+    localStickerCache.promise = null;
+    localStickerCache.promiseSignature = '';
+    localStickerCache.revision += 1;
+}
+
+async function loadLocalStickerStore(options = {}) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled) {
+        return { status: 'failed', msg: '本地贴纸功能未启用' };
+    }
+    if (!config.path) {
+        return { status: 'failed', msg: '请选择本地贴纸目录' };
+    }
+    ensureDefaultLocalStickerDirectorySync(config);
+    const signature = getLocalStickerConfigSignature(config);
+    const force = options?.force === true;
+    const fresh = localStickerCache.signature === signature &&
+        localStickerCache.store &&
+        Date.now() - localStickerCache.scannedAt < LOCAL_STICKER_CACHE_TTL_MS;
+    if (!force && fresh) {
+        return clonePlain(localStickerCache.store);
+    }
+    if (!force && localStickerCache.promise && localStickerCache.promiseSignature === signature) {
+        return clonePlain(await localStickerCache.promise);
+    }
+
+    const revision = localStickerCache.revision;
+    const task = (async () => {
+        const scanResult = await scanLocalStickerPacks(config.path);
+        const recentPaths = scanResult.status === 'success' && config.recentEnabled
+            ? await readRecentStickerPaths(scanResult.rootPath)
+            : [];
+        const store = buildLocalStickerStore(scanResult, recentPaths, config);
+        if (localStickerCache.revision === revision) {
+            localStickerCache.signature = signature;
+            localStickerCache.scannedAt = Date.now();
+            localStickerCache.scanResult = scanResult;
+            localStickerCache.store = store;
+        }
+        return store;
+    })();
+    localStickerCache.promise = task;
+    localStickerCache.promiseSignature = signature;
+    try {
+        return clonePlain(await task);
+    } finally {
+        if (localStickerCache.promise === task) {
+            localStickerCache.promise = null;
+            localStickerCache.promiseSignature = '';
+        }
+    }
+}
+
+async function rememberLocalSticker(filePath) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled || !config.recentEnabled || !config.path) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const maximum = config.stickersPerRow * config.recentRows;
+    const result = await rememberRecentSticker(config.path, filePath, maximum);
+    const signature = getLocalStickerConfigSignature(config);
+    if (localStickerCache.signature === signature && localStickerCache.scanResult?.status === 'success') {
+        localStickerCache.store = buildLocalStickerStore(
+            localStickerCache.scanResult,
+            result.paths || await readRecentStickerPaths(localStickerCache.scanResult.rootPath),
+            config
+        );
+        localStickerCache.scannedAt = Date.now();
+        return { ...result, store: clonePlain(localStickerCache.store) };
+    }
+    return result;
+}
+
+async function chooseLocalStickerDirectory(browserWindow) {
+    const currentPath = normalizeLocalStickerConfig(getConfig().localStickers, {
+        defaultPath: getDefaultLocalStickerDirectory()
+    }).path;
+    const result = await dialog.showOpenDialog(browserWindow || undefined, {
+        title: '选择本地贴纸目录',
+        defaultPath: currentPath,
+        properties: ['openDirectory']
+    });
+    const directory = normalizePathText(result.filePaths?.[0]);
+    return result.canceled || !directory
+        ? { ok: false, canceled: true, path: '' }
+        : { ok: true, path: directory };
+}
+
+async function openLocalStickerDirectory() {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.path) {
+        return { ok: false, reason: 'path-not-configured' };
+    }
+    ensureDefaultLocalStickerDirectorySync(config);
+    try {
+        const directory = await fs.realpath(path.resolve(config.path));
+        const stat = await fs.stat(directory);
+        if (!stat.isDirectory()) {
+            return { ok: false, reason: 'path-invalid' };
+        }
+        const error = await shell.openPath(directory);
+        return error ? { ok: false, reason: error } : { ok: true };
+    } catch {
+        return { ok: false, reason: 'path-invalid' };
+    }
+}
+
+async function chooseLocalStickerTool(browserWindow, tool) {
+    const kind = tool === 'ffmpeg' ? 'ffmpeg' : tool === 'tgsToGif' ? 'tgsToGif' : '';
+    if (!kind) {
+        return { ok: false, reason: 'invalid-tool' };
+    }
+    const result = await dialog.showOpenDialog(browserWindow || undefined, {
+        title: kind === 'ffmpeg' ? '选择 FFmpeg 可执行文件' : '选择 tgsToGif 可执行文件',
+        properties: ['openFile', 'dontAddToRecent']
+    });
+    const filePath = normalizePathText(result.filePaths?.[0]);
+    return result.canceled || !filePath
+        ? { ok: false, canceled: true, path: '' }
+        : { ok: true, path: filePath };
+}
+
+const LOCAL_STICKER_TOOL_DOWNLOAD_URLS = Object.freeze({
+    ffmpeg: 'https://ffmpeg.org/download.html',
+    tgsToGif: 'https://github.com/jiongjiongJOJO/tgs_to_gif/releases/latest'
+});
+
+async function openLocalStickerToolDownload(tool) {
+    const url = LOCAL_STICKER_TOOL_DOWNLOAD_URLS[tool];
+    if (!url) {
+        return { ok: false, reason: 'invalid-tool' };
+    }
+    try {
+        await shell.openExternal(url);
+        return { ok: true };
+    } catch {
+        return { ok: false, reason: 'open-failed' };
+    }
+}
+
+function resolveLocalStickerNetworkMode(proxyUrl = '') {
+    const input = String(proxyUrl || '').trim();
+    if (input) {
+        const normalizedProxy = normalizeHttpProxyUrl(input);
+        if (!normalizedProxy) {
+            throw Object.assign(new Error('仅支持 http://主机:端口 格式的代理'), {
+                code: 'invalid-http-proxy'
+            });
+        }
+        return {
+            source: 'configured',
+            sourceName: '',
+            proxyUrl: normalizedProxy
+        };
+    }
+    const environmentProxy = getEnvironmentHttpProxy(process.env);
+    if (environmentProxy.url) {
+        return {
+            source: 'environment',
+            sourceName: environmentProxy.source,
+            proxyUrl: environmentProxy.url
+        };
+    }
+    return {
+        source: 'system',
+        sourceName: '',
+        proxyUrl: ''
+    };
+}
+
+async function getLocalStickerNetworkSession(proxyUrl = '') {
+    const network = resolveLocalStickerNetworkMode(proxyUrl);
+    if (!session?.fromPartition) {
+        throw Object.assign(new Error('当前 QQ 版本不支持独立网络会话'), {
+            code: 'session-unavailable'
+        });
+    }
+    const key = network.proxyUrl ? `proxy:${network.proxyUrl}` : 'system';
+    let entry = localStickerNetworkSessions.get(key);
+    if (!entry) {
+        const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+        const scopedSession = session.fromPartition(`qqnt-toolbox-stickers-${hash}`, {
+            cache: false
+        });
+        const ready = scopedSession.setProxy(network.proxyUrl
+            ? {
+                mode: 'fixed_servers',
+                proxyRules: network.proxyUrl,
+                proxyBypassRules: '<-loopback>'
+            }
+            : { mode: 'system' });
+        entry = { session: scopedSession, ready };
+        localStickerNetworkSessions.set(key, entry);
+    }
+    await entry.ready;
+    if (typeof entry.session.fetch !== 'function') {
+        throw Object.assign(new Error('当前 QQ 版本不支持独立网络请求'), {
+            code: 'session-fetch-unavailable'
+        });
+    }
+    return entry.session;
+}
+
+async function getLocalStickerEnvironment() {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    const tools = await inspectLocalStickerTools({
+        ffmpegPath: config.ffmpegPath || process.env.FFMPEG_PATH || '',
+        tgsToGifPath: config.tgsToGifPath || process.env.TGS_TO_GIF_PATH || ''
+    });
+    let network;
+    let route = '';
+    try {
+        network = resolveLocalStickerNetworkMode(config.httpProxy);
+        const scopedSession = await getLocalStickerNetworkSession(config.httpProxy);
+        route = typeof scopedSession.resolveProxy === 'function'
+            ? String(await scopedSession.resolveProxy('https://api.telegram.org') || '')
+            : '';
+    } catch (error) {
+        network = {
+            source: config.httpProxy ? 'configured' : 'system',
+            sourceName: '',
+            proxyUrl: '',
+            reason: error?.code || 'proxy-inspection-failed'
+        };
+    }
+    return {
+        ok: true,
+        tools,
+        network: {
+            ...network,
+            route: route.slice(0, 240)
+        }
+    };
+}
+
+async function testLocalStickerProxy(proxyUrl) {
+    const input = String(proxyUrl || '').trim();
+    let network;
+    try {
+        network = resolveLocalStickerNetworkMode(input);
+    } catch {
+        return { ok: false, reason: 'invalid-http-proxy', msg: '代理格式应为 http://主机:端口' };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const startedAt = Date.now();
+    try {
+        const scopedSession = await getLocalStickerNetworkSession(input);
+        const route = typeof scopedSession.resolveProxy === 'function'
+            ? String(await scopedSession.resolveProxy('https://api.telegram.org') || '')
+            : '';
+        const response = await scopedSession.fetch('https://api.telegram.org', {
+            method: 'GET',
+            redirect: 'follow',
+            signal: controller.signal,
+            bypassCustomProtocolHandlers: true
+        });
+        try {
+            await response.body?.cancel?.();
+        } catch {
+        }
+        if (response.status === 407 || response.status >= 500) {
+            return {
+                ok: false,
+                reason: response.status === 407 ? 'proxy-auth-required' : 'proxy-upstream-error',
+                msg: response.status === 407 ? '代理需要身份验证' : '代理无法连接 Telegram'
+            };
+        }
+        const latencyMs = Date.now() - startedAt;
+        const connection = network.source === 'configured'
+            ? '手动代理'
+            : network.source === 'environment'
+                ? network.sourceName
+                : route && route !== 'DIRECT'
+                    ? '系统代理'
+                    : '直连';
+        return {
+            ok: true,
+            latencyMs,
+            source: network.source,
+            route: route.slice(0, 240),
+            msg: `${connection}可用，连接耗时 ${latencyMs} ms`
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            reason: error?.name === 'AbortError' ? 'proxy-timeout' : error?.code || 'proxy-unreachable',
+            msg: error?.name === 'AbortError' ? '连接 Telegram 超时' : '当前网络无法连接 Telegram'
+        };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function updateConfiguredLocalStickerPackOrder(packPaths) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled || !config.path) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const result = await updateLocalStickerPackOrder(config.path, packPaths);
+    if (!result.ok) {
+        return result;
+    }
+    invalidateLocalStickerCache();
+    return {
+        ...result,
+        store: await loadLocalStickerStore({ force: true })
+    };
+}
+
+async function downloadConfiguredTelegramStickers(url) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled || !config.path) {
+        return { ok: false, reason: 'disabled', msg: '请先启用本地贴纸并选择目录' };
+    }
+    if (localStickerDownloadPromise) {
+        return { ok: false, reason: 'download-in-progress', msg: '已有贴纸包正在下载' };
+    }
+    const task = (async () => {
+        try {
+            const scopedSession = await getLocalStickerNetworkSession(config.httpProxy);
+            const result = await downloadTelegramStickerPack({
+                url,
+                rootPath: config.path,
+                botToken: config.telegramBotToken,
+                ffmpegPath: config.ffmpegPath || process.env.FFMPEG_PATH || '',
+                tgsToGifPath: config.tgsToGifPath || process.env.TGS_TO_GIF_PATH || '',
+                fetch: (requestUrl, options) => scopedSession.fetch(requestUrl, {
+                    ...options,
+                    bypassCustomProtocolHandlers: true
+                })
+            });
+            invalidateLocalStickerCache();
+            return {
+                ...result,
+                store: await loadLocalStickerStore({ force: true })
+            };
+        } catch (error) {
+            return {
+                ok: false,
+                reason: error?.code || 'telegram-download-failed',
+                msg: String(error?.message || 'Telegram 贴纸下载失败').slice(0, 240)
+            };
+        }
+    })();
+    localStickerDownloadPromise = task;
+    try {
+        return await task;
+    } finally {
+        if (localStickerDownloadPromise === task) {
+            localStickerDownloadPromise = null;
+        }
+    }
+}
+
+async function sendLocalSticker(browserWindow, payload) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled || !config.path) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const peer = payload?.peer;
+    const chatType = Number(peer?.chatType) || 0;
+    const peerUid = normalizeText(peer?.peerUid);
+    if (!chatType || !peerUid) {
+        return { ok: false, reason: 'invalid-peer' };
+    }
+    const stickerPath = await resolveLocalStickerPath(config.path, payload?.path);
+    if (!stickerPath) {
+        return { ok: false, reason: 'invalid-sticker-path' };
+    }
+    try {
+        const picSubType = config.sendAsImage ? 0 : 1;
+        const imageElement = await createPicElement(browserWindow, stickerPath, {
+            picSubType,
+            summary: ''
+        }, {
+            allowOriginalHash: true
+        });
+        const attrId = await generateMsgUniqueId(browserWindow, chatType);
+        const result = await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/sendMsg',
+            [{
+                msgId: '0',
+                peer: {
+                    ...peer,
+                    chatType,
+                    peerUid,
+                    peerUin: normalizeUin(peer?.peerUin),
+                    guildId: normalizeText(peer?.guildId)
+                },
+                msgElements: [imageElement],
+                msgAttributeInfos: makeSendAttributeInfos(attrId)
+            }, null],
+            false
+        );
+        return isNativeFailure(result)
+            ? { ok: false, reason: 'native-failure' }
+            : { ok: true };
+    } catch (error) {
+        warn('local sticker send failed:', error?.message || error);
+        return { ok: false, reason: 'send-failed' };
+    }
+}
+
 async function runDiagnosticAction(action) {
     return await getDiagnosticActionRunner().run(action);
 }
@@ -2149,6 +2660,49 @@ function installConfigIpc() {
             throw error;
         }
     });
+    ipcMain.handle(CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY, event =>
+        chooseLocalStickerDirectory(BrowserWindow.fromWebContents(event.sender))
+    );
+    ipcMain.handle(CHANNEL_GET_LOCAL_STICKERS, (_event, options) =>
+        loadLocalStickerStore(options)
+    );
+    ipcMain.handle(CHANNEL_REMEMBER_LOCAL_STICKER, (_event, filePath) =>
+        rememberLocalSticker(filePath)
+    );
+    ipcMain.handle(CHANNEL_SEND_LOCAL_STICKER, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found' };
+        }
+        const result = await sendLocalSticker(browserWindow, payload);
+        recordDiagnostic(result.ok ? 'info' : 'warn', 'local-sticker.send-completed', {
+            ok: result.ok === true,
+            reason: result.reason || '',
+            chatType: Number(payload?.peer?.chatType) || 0
+        });
+        return result;
+    });
+    ipcMain.handle(CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY, () =>
+        openLocalStickerDirectory()
+    );
+    ipcMain.handle(CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER, (_event, packPaths) =>
+        updateConfiguredLocalStickerPackOrder(packPaths)
+    );
+    ipcMain.handle(CHANNEL_CHOOSE_LOCAL_STICKER_TOOL, (event, tool) =>
+        chooseLocalStickerTool(BrowserWindow.fromWebContents(event.sender), tool)
+    );
+    ipcMain.handle(CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT, () =>
+        getLocalStickerEnvironment()
+    );
+    ipcMain.handle(CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD, (_event, tool) =>
+        openLocalStickerToolDownload(tool)
+    );
+    ipcMain.handle(CHANNEL_TEST_LOCAL_STICKER_PROXY, (_event, proxyUrl) =>
+        testLocalStickerProxy(proxyUrl)
+    );
+    ipcMain.handle(CHANNEL_DOWNLOAD_TELEGRAM_STICKERS, (_event, url) =>
+        downloadConfiguredTelegramStickers(url)
+    );
     ipcMain.handle(CHANNEL_GET_REACTION_CATALOG, () => {
         try {
             return getReactionEmojiCatalog();

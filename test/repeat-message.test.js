@@ -20,12 +20,37 @@ test('mounts stable side repeat controls lazily without a body-wide repeat obser
     assert.match(source, /repeatResizeObserver\s*=\s*new ResizeObserver/);
     assert.match(source, /addEventListener\('pointerover',\s*handleRepeatMessagePointerOver/);
     assert.doesNotMatch(source, /handleRepeatMessagePointerOut|addEventListener\('pointerout'/);
-    assert.match(source, /qqnt-toolbox-repeat-slot[\s\S]*overflow-anchor:\s*none/);
-    assert.match(source, /qqnt-toolbox-status-badge[\s\S]*overflow-anchor:\s*none/);
+    assert.doesNotMatch(source, /overflow-anchor/);
     assert.match(source, /getMessageContextTargetFromEvent\(sourceEvent\)/);
     assert.match(source, /!isSearchChatRecordWindow\(\)[\s\S]*repeatMessage\.showInContextMenu/);
     assert.match(source, /isForwardRecordWindow\(\)[\s\S]*elementType\) === 16[\s\S]*showFallbackRepeatMenu/);
     assert.doesNotMatch(source, /openFromElement/);
+});
+
+test('guards chat scroll only around message menus and window focus', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+
+    assert.match(source, /preserveChatScrollPosition:\s*false/);
+    assert.match(mainSource, /preserveChatScrollPosition:\s*false/);
+    assert.match(source, /保持聊天页浏览位置[\s\S]*interfaceTweaks\.preserveChatScrollPosition/);
+    assert.match(source, /interfaceTweaks\.preserveChatScrollPosition !== true/);
+    assert.match(source, /captureChatScrollGuard\('context-menu',\s*messageTarget\)/);
+    assert.match(source, /window\.addEventListener\('blur',\s*handleChatWindowBlur\)/);
+    assert.match(source, /window\.addEventListener\('focus',\s*handleChatWindowFocus\)/);
+    assert.match(source, /current\.peerSignature !== guard\.peerSignature/);
+    assert.match(source, /current\.scrollHeight !== guard\.scrollHeight/);
+    assert.match(source, /current\.clientHeight !== guard\.clientHeight/);
+    assert.match(source, /Math\.abs\(current\.scrollTop - guard\.scrollTop\) > 12/);
+    assert.match(source, /function rememberChatScrollInputTarget[\s\S]*?findChatScrollTarget\(target\);[\s\S]*?return target;/);
+    assert.match(source, /function noteChatPointerInput[\s\S]*?target\?\.closest\?\.\('\.v-scrollbar-track'\)[\s\S]*?clearChatScrollGuardForUserInput\(\);/);
+    assert.match(source, /addEventListener\('pointerdown',\s*noteChatPointerInput/);
+    assert.match(source, /addEventListener\('wheel',\s*noteChatScrollInput/);
+    assert.match(source, /function noteChatScrollInput[\s\S]*?clearChatScrollGuardForUserInput\(\);/);
+    assert.match(source, /function noteChatScrollKeyInput[\s\S]*?clearChatScrollGuardForUserInput\(\);/);
+    assert.match(source, /function clearChatScrollGuardForUserInput[\s\S]*?chatScrollGuard = null;/);
+    assert.match(source, /chat-scroll\.restored/);
+    assert.doesNotMatch(source, /recallMarkers:|repeatControls:/);
 });
 
 test('maps repeat resources with bounded concurrency while preserving order', async () => {

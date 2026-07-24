@@ -13,6 +13,7 @@
     position: fixed;
     inset: 0;
     z-index: 7200;
+    -webkit-app-region: no-drag;
     display: grid;
     place-items: center;
     padding: 24px;

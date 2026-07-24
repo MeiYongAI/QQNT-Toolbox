@@ -1,0 +1,588 @@
+#qqnt-toolbox-local-sticker-manager {
+    --qlsm-surface: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    --qlsm-text: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    --qlsm-muted: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    --qlsm-border: var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
+    --qlsm-fill: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .10)));
+    --qlsm-hover: var(--overlay_hover, rgba(127, 127, 127, .10));
+    --qlsm-accent: var(--brand_standard, var(--brand-primary, #2f6bff));
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    -webkit-app-region: no-drag;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    box-sizing: border-box;
+    color: var(--qlsm-text);
+    background: rgba(0, 0, 0, .38);
+    font: 13px/1.45 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    letter-spacing: 0;
+}
+
+#qqnt-toolbox-local-sticker-manager *,
+#qqnt-toolbox-local-sticker-manager *::before,
+#qqnt-toolbox-local-sticker-manager *::after {
+    box-sizing: border-box;
+    letter-spacing: 0;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-page {
+    display: grid;
+    grid-template-rows: 52px 42px minmax(0, 1fr);
+    width: min(620px, calc(100vw - 32px));
+    height: min(700px, calc(100vh - 32px));
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--qlsm-border);
+    border-radius: 8px;
+    background: var(--qlsm-surface);
+    box-shadow: var(--shadow-bg-middle-primary, 0 14px 42px rgba(0, 0, 0, .24));
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-header {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    padding: 0 52px;
+    border-bottom: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-title {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    font-size: 15px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-close {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    color: var(--qlsm-muted);
+    background: transparent;
+    font: 22px/1 sans-serif;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-close:hover {
+    color: var(--qlsm-text);
+    background: var(--qlsm-hover);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-tabs {
+    display: flex;
+    align-items: end;
+    gap: 20px;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-tab {
+    position: relative;
+    height: 41px;
+    padding: 0 2px;
+    border: 0;
+    outline: 0;
+    color: var(--qlsm-muted);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-tab[data-active="true"] {
+    color: var(--qlsm-text);
+    font-weight: 600;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-tab[data-active="true"]::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: -1px;
+    left: 0;
+    height: 2px;
+    background: var(--qlsm-accent);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-tab:focus-visible,
+#qqnt-toolbox-local-sticker-manager button:focus-visible,
+#qqnt-toolbox-local-sticker-manager input:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--qlsm-accent) 45%, transparent);
+    outline-offset: 1px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-content,
+#qqnt-toolbox-local-sticker-manager .qlsm-pane {
+    min-width: 0;
+    min-height: 0;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pane[hidden] {
+    display: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-pane {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr) 54px;
+    height: 100%;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-directory-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    gap: 16px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-directory-main {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-directory-path {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--qlsm-muted);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-directory-actions {
+    display: flex;
+    flex: none;
+    gap: 6px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pane-intro,
+#qqnt-toolbox-local-sticker-manager .qlsm-form-section {
+    padding: 16px 18px 12px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pane-title,
+#qqnt-toolbox-local-sticker-manager .qlsm-form-title {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pane-meta,
+#qqnt-toolbox-local-sticker-manager .qlsm-form-meta,
+#qqnt-toolbox-local-sticker-manager .qlsm-config-meta,
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-meta,
+#qqnt-toolbox-local-sticker-manager .qlsm-status {
+    color: var(--qlsm-muted);
+    font-size: 12px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-list {
+    min-height: 0;
+    margin: 0 18px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-row {
+    display: grid;
+    grid-template-columns: 30px 42px minmax(0, 1fr);
+    align-items: center;
+    min-height: 62px;
+    gap: 10px;
+    border-bottom: 1px solid var(--qlsm-border);
+    background: var(--qlsm-surface);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-row[data-dragging="true"] {
+    opacity: .22;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-drag-handle {
+    position: relative;
+    width: 28px;
+    height: 34px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    cursor: grab;
+    touch-action: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-drag-handle::before {
+    content: "";
+    position: absolute;
+    inset: 10px 8px;
+    opacity: .62;
+    background: radial-gradient(circle, var(--qlsm-muted) 1.5px, transparent 1.7px) 0 0 / 6px 6px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-drag-handle:hover {
+    background: var(--qlsm-hover);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-image {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-image[data-error="true"] {
+    visibility: hidden;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-details {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-name,
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pane-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    gap: 12px;
+    padding: 0 18px;
+    border-top: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-status {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-status[data-state="success"] {
+    color: var(--qlsm-accent);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-status[data-state="error"] {
+    color: var(--text_error, #e5484d);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-status[data-state="pending"] {
+    color: var(--qlsm-text);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-primary,
+#qqnt-toolbox-local-sticker-manager .qlsm-secondary {
+    flex: none;
+    height: 32px;
+    padding: 0 14px;
+    border: 1px solid var(--qlsm-border);
+    border-radius: 6px;
+    color: var(--qlsm-text);
+    background: var(--qlsm-fill);
+    font: inherit;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-primary {
+    border-color: var(--qlsm-accent);
+    color: var(--on_brand_primary, #fff);
+    background: var(--qlsm-accent);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-primary:hover:not(:disabled) {
+    filter: brightness(.96);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-secondary:hover:not(:disabled) {
+    background: var(--qlsm-hover);
+}
+
+#qqnt-toolbox-local-sticker-manager button:disabled {
+    cursor: default;
+    opacity: .52;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-empty {
+    display: grid;
+    place-items: center;
+    min-height: 160px;
+    padding: 32px;
+    color: var(--qlsm-muted);
+    text-align: center;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-drag-ghost {
+    position: fixed;
+    z-index: 2;
+    padding: 0 10px;
+    border: 1px solid var(--qlsm-border);
+    border-radius: 6px;
+    background: var(--qlsm-surface);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+    pointer-events: none;
+    will-change: transform;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-form {
+    height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-form-section + .qlsm-form-section {
+    border-top: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-download-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-download-status,
+#qqnt-toolbox-local-sticker-manager .qlsm-proxy-status {
+    min-height: 18px;
+    margin-top: 8px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-input {
+    min-width: 0;
+    width: 100%;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--qlsm-border);
+    border-radius: 6px;
+    outline: 0;
+    color: var(--qlsm-text);
+    -webkit-text-fill-color: var(--qlsm-text);
+    caret-color: var(--qlsm-text);
+    background: var(--qlsm-fill);
+    font: inherit;
+    user-select: text;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-input:focus {
+    border-color: var(--qlsm-accent);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-panel-form {
+    padding-bottom: 10px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-number-control {
+    display: grid;
+    grid-template-columns: 74px auto;
+    align-items: center;
+    gap: 8px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-number-input {
+    text-align: center;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-number-input::-webkit-inner-spin-button,
+#qqnt-toolbox-local-sticker-manager .qlsm-number-input::-webkit-outer-spin-button {
+    opacity: .72;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-number-suffix {
+    color: var(--qlsm-muted);
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-segmented {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(64px, 1fr));
+    width: 176px;
+    padding: 2px;
+    border-radius: 6px;
+    background: var(--qlsm-fill);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-segment {
+    height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 4px;
+    color: var(--qlsm-muted);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-segment[data-active="true"] {
+    color: var(--qlsm-text);
+    background: var(--qlsm-surface);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-segment:hover:not([data-active="true"]) {
+    color: var(--qlsm-text);
+    background: var(--qlsm-hover);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-toggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: var(--qlsm-fill);
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-toggle::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--qlsm-surface);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .2);
+    transition: transform .16s ease;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-toggle[data-checked="true"] {
+    background: var(--qlsm-accent);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-toggle[data-checked="true"]::after {
+    transform: translateX(16px);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-config-row[data-disabled="true"] {
+    opacity: .48;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-panel-status {
+    min-height: 18px;
+    margin-top: 8px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-config-section {
+    padding-bottom: 18px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-advanced {
+    border-bottom: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-advanced-summary {
+    position: relative;
+    display: flex;
+    align-items: center;
+    min-height: 48px;
+    padding-right: 28px;
+    font-weight: 500;
+    cursor: pointer;
+    list-style: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-advanced-summary::-webkit-details-marker {
+    display: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-advanced-summary::after {
+    content: "";
+    position: absolute;
+    right: 7px;
+    width: 7px;
+    height: 7px;
+    border-right: 1.5px solid var(--qlsm-muted);
+    border-bottom: 1.5px solid var(--qlsm-muted);
+    transform: rotate(45deg) translateY(-2px);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-advanced[open] .qlsm-advanced-summary::after {
+    transform: rotate(225deg) translate(-2px, -1px);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-advanced-body {
+    border-top: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-config-row {
+    display: grid;
+    grid-template-columns: minmax(160px, .8fr) minmax(260px, 1.2fr);
+    align-items: center;
+    min-height: 62px;
+    gap: 16px;
+    border-bottom: 1px solid var(--qlsm-border);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-config-main {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-config-name {
+    font-weight: 500;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-config-control {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+}
+
+@media (max-width: 560px) {
+    #qqnt-toolbox-local-sticker-manager {
+        padding: 10px;
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-page {
+        width: calc(100vw - 20px);
+        height: calc(100vh - 20px);
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-config-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+        padding: 12px 0;
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-directory-row {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-directory-actions {
+        justify-content: flex-end;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #qqnt-toolbox-local-sticker-manager * {
+        scroll-behavior: auto !important;
+        transition: none !important;
+    }
+}

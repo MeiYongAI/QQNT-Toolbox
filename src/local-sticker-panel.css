@@ -1,0 +1,331 @@
+#qqnt-toolbox-local-sticker-panel {
+    --qls-width: 350px;
+    --qls-height: 420px;
+    --qls-columns: 6;
+    --qls-bg: var(--bg_top_light, var(--background-05, var(--background-01, #ffffff)));
+    --qls-layer: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, 0.08)));
+    --qls-hover: var(--overlay_hover, rgba(127, 127, 127, 0.12));
+    --qls-pressed: var(--overlay_pressed, rgba(127, 127, 127, 0.18));
+    --qls-border: var(--border-level-1-color, var(--divider, rgba(127, 127, 127, 0.18)));
+    --qls-text: var(--text-primary, var(--text-01, #1f2329));
+    --qls-muted: var(--text-secondary, var(--text-02, #6b7280));
+    --qls-accent: var(--brand_standard, var(--theme-color, #0099ff));
+    position: fixed;
+    z-index: 6800;
+    -webkit-app-region: no-drag;
+    display: grid;
+    grid-template-rows: 42px minmax(0, 1fr) 42px;
+    width: min(var(--qls-width), calc(100vw - 16px));
+    height: min(var(--qls-height), calc(100vh - 16px));
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    box-sizing: border-box;
+    border: 1px solid var(--qls-border);
+    border-radius: 8px;
+    color: var(--qls-text);
+    background: var(--qls-bg);
+    box-shadow: var(--shadow-bg-middle-primary, 0 12px 36px rgba(0, 0, 0, 0.2));
+    font: 13px/1.4 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    letter-spacing: 0;
+    user-select: none;
+}
+
+#qqnt-toolbox-local-sticker-panel[hidden] {
+    display: none;
+}
+
+#qqnt-toolbox-local-sticker-panel * {
+    box-sizing: border-box;
+    letter-spacing: 0;
+}
+
+.qls-header {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding: 0 13px;
+    border-bottom: 1px solid var(--qls-border);
+}
+
+.qls-title {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.qls-title[data-notice="success"] {
+    color: var(--qls-accent);
+}
+
+.qls-title[data-notice="error"] {
+    color: var(--text_error, #e5484d);
+}
+
+.qls-pack-count {
+    margin-left: 7px;
+    color: var(--qls-muted);
+    font-size: 11px;
+    font-weight: 400;
+}
+
+.qls-content {
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+}
+
+#qqnt-toolbox-local-sticker-panel:hover .qls-content {
+    scrollbar-color: var(--fill_standard_secondary, rgba(127, 127, 127, 0.3)) transparent;
+}
+
+.qls-content::-webkit-scrollbar {
+    width: 6px;
+}
+
+.qls-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.qls-content::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: transparent;
+}
+
+#qqnt-toolbox-local-sticker-panel:hover .qls-content::-webkit-scrollbar-thumb {
+    background: var(--fill_standard_secondary, rgba(127, 127, 127, 0.3));
+}
+
+.qls-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--qls-columns), minmax(0, 1fr));
+    gap: 7px;
+    width: 100%;
+    padding: 10px;
+}
+
+.qls-sticker {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    min-width: 0;
+    aspect-ratio: 1;
+    padding: 4px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 6px;
+    outline: 0;
+    color: var(--qls-muted);
+    background: transparent;
+    cursor: pointer;
+}
+
+.qls-sticker:hover {
+    background: var(--qls-hover);
+}
+
+.qls-sticker:active {
+    background: var(--qls-pressed);
+}
+
+.qls-sticker:focus-visible,
+.qls-pack:focus-visible,
+.qls-tool:focus-visible,
+.qls-empty-action:focus-visible {
+    outline: 2px solid var(--qls-accent);
+    outline-offset: -2px;
+}
+
+.qls-sticker img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+.qls-sticker[data-loaded="true"] img {
+    opacity: 1;
+}
+
+.qls-sticker[data-error="true"]::after {
+    content: "?";
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--qls-border);
+    border-radius: 6px;
+    color: var(--qls-muted);
+}
+
+.qls-sticker[data-error="true"] img {
+    display: none;
+}
+
+.qls-empty {
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    min-height: 100%;
+    gap: 12px;
+    padding: 24px;
+    color: var(--qls-muted);
+    text-align: center;
+}
+
+.qls-empty-text {
+    max-width: 260px;
+    overflow-wrap: anywhere;
+}
+
+.qls-empty-action {
+    min-width: 76px;
+    height: 30px;
+    padding: 0 13px;
+    border: 1px solid var(--qls-border);
+    border-radius: 6px;
+    color: var(--qls-text);
+    background: var(--qls-layer);
+    font: inherit;
+    cursor: pointer;
+}
+
+.qls-empty-action:hover {
+    background: var(--qls-hover);
+}
+
+#qqnt-toolbox-local-sticker-panel[data-loading="true"] .qls-empty-text::before {
+    content: "";
+    display: block;
+    width: 20px;
+    height: 20px;
+    margin: 0 auto 12px;
+    border: 2px solid color-mix(in srgb, var(--qls-muted) 25%, transparent);
+    border-top-color: var(--qls-muted);
+    border-radius: 50%;
+    animation: qls-spin 700ms linear infinite;
+}
+
+.qls-bar {
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+    border-top: 1px solid var(--qls-border);
+    background: color-mix(in srgb, var(--qls-layer) 55%, var(--qls-bg));
+}
+
+.qls-pack-list {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    gap: 2px;
+    padding: 4px 5px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+}
+
+.qls-pack-list::-webkit-scrollbar {
+    display: none;
+}
+
+.qls-pack,
+.qls-tool {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 32px;
+    height: 32px;
+    padding: 4px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 6px;
+    outline: 0;
+    color: var(--qls-muted);
+    background: transparent;
+    cursor: pointer;
+}
+
+.qls-pack:hover,
+.qls-tool:hover {
+    color: var(--qls-text);
+    background: var(--qls-hover);
+}
+
+.qls-pack[data-active="true"] {
+    color: var(--qls-accent);
+    background: color-mix(in srgb, var(--qls-accent) 12%, transparent);
+}
+
+.qls-pack[data-active="true"]::after {
+    content: "";
+    position: absolute;
+    right: 5px;
+    bottom: 2px;
+    left: 5px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--qls-accent);
+}
+
+.qls-pack img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+.qls-pack:not(:has(img))::before {
+    content: attr(data-fallback);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.qls-actions {
+    display: flex;
+    align-items: center;
+    flex: none;
+    gap: 1px;
+    padding: 4px 5px;
+    border-left: 1px solid var(--qls-border);
+}
+
+.qls-tool svg {
+    width: 18px;
+    height: 18px;
+    pointer-events: none;
+}
+
+#qqnt-toolbox-local-sticker-panel[data-busy="true"] {
+    pointer-events: none;
+}
+
+@keyframes qls-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .qls-sticker img {
+        transition: none;
+    }
+
+    #qqnt-toolbox-local-sticker-panel[data-loading="true"] .qls-empty-text::before {
+        animation-duration: 1.4s;
+    }
+}

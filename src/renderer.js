@@ -13,6 +13,8 @@ import {
 } from './chat-toolbar-entry.js';
 import { createRecallFilterEditor } from './recall-filter-editor.js';
 import { createAutoReactionEditor } from './auto-reaction-editor.js';
+import { createLocalStickerController } from './local-sticker-panel.js';
+import { createLocalStickerManager } from './local-sticker-manager.js';
 import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
@@ -95,6 +97,7 @@ let handleToolboxVueComponentMount = () => {};
         groups: {
             interface: false,
             messages: false,
+            localStickers: false,
             preventRecall: false,
             entertainment: false,
             updater: false,
@@ -122,6 +125,22 @@ let handleToolboxVueComponentMount = () => {};
         },
         fakeForward: {
             enabled: false
+        },
+        localStickers: {
+            enabled: false,
+            path: '',
+            entryMode: 'contextmenu',
+            iconOnLeft: false,
+            stickersPerRow: 6,
+            panelWidth: 350,
+            panelHeight: 420,
+            sendAsImage: false,
+            recentEnabled: true,
+            recentRows: 2,
+            telegramBotToken: '',
+            ffmpegPath: '',
+            tgsToGifPath: '',
+            httpProxy: ''
         },
         voiceMessage: {
             enabled: false,
@@ -190,6 +209,7 @@ let handleToolboxVueComponentMount = () => {};
             singleMediaViewer: false,
             singleForwardViewer: false,
             singleForwardGroupIsolation: false,
+            preserveChatScrollPosition: false,
             blockWindowShake: false,
             goBackMainList: false,
             preventMessageDrag: false,
@@ -226,6 +246,8 @@ let handleToolboxVueComponentMount = () => {};
     let windowShakeSending = false;
     let recallFilterEditor = null;
     let autoReactionEditor = null;
+    let localStickerController = null;
+    let localStickerManager = null;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let unreadCountObserver = null;
@@ -258,6 +280,8 @@ let handleToolboxVueComponentMount = () => {};
     let rendererReadyDiagnosticSent = false;
     let lastChatScrollInputAt = 0;
     let lastUnexpectedChatScrollAt = 0;
+    let activeChatScrollTarget = null;
+    let chatScrollGuard = null;
     let currentUpdateState = {
         status: 'idle',
         supported: true,
@@ -381,7 +405,14 @@ let handleToolboxVueComponentMount = () => {};
         }
     }
 
-    function getChatScrollDiagnosticTarget(value) {
+    function getChatPeerSignature() {
+        const peer = getPeerFromRecord({});
+        return peer
+            ? `${peer.chatType}:${peer.peerUid}:${peer.guildId || ''}`
+            : '';
+    }
+
+    function getChatScrollTarget(value) {
         const target = value instanceof Element ? value : null;
         if (!target || target.scrollHeight <= target.clientHeight + 2) {
             return null;
@@ -392,50 +423,136 @@ let handleToolboxVueComponentMount = () => {};
         return chatArea && target.querySelector('.message, .ml-item') ? target : null;
     }
 
-    function noteChatScrollInput(event) {
+    function findChatScrollTarget(value = null) {
+        const origin = value instanceof Element ? value : null;
+        const chatArea = origin?.matches('.chat-msg-area')
+            ? origin
+            : origin?.closest?.('.chat-msg-area');
+        for (let candidate = origin; candidate; candidate = candidate.parentElement) {
+            const target = getChatScrollTarget(candidate);
+            if (target) {
+                activeChatScrollTarget = target;
+                return target;
+            }
+            if (candidate === chatArea) {
+                break;
+            }
+        }
+        return null;
+    }
+
+    function captureChatScrollGuard(reason, value = null, waitingForFocus = false) {
+        if (currentConfig.interfaceTweaks.preserveChatScrollPosition !== true ||
+            isForwardRecordWindow() || isSearchChatRecordWindow()) {
+            chatScrollGuard = null;
+            return;
+        }
+        const target = findChatScrollTarget(value);
+        const peerSignature = getChatPeerSignature();
+        if (!target || !peerSignature) {
+            chatScrollGuard = null;
+            return;
+        }
+        chatScrollGuard = {
+            target,
+            reason,
+            peerSignature,
+            scrollTop: target.scrollTop,
+            scrollHeight: target.scrollHeight,
+            clientHeight: target.clientHeight,
+            waitingForFocus,
+            expiresAt: waitingForFocus ? Number.POSITIVE_INFINITY : performance.now() + 2500
+        };
+    }
+
+    function rememberChatScrollInputTarget(event) {
         const target = event.target instanceof Element ? event.target : document.activeElement;
-        if (target?.closest?.('.chat-msg-area')) {
-            lastChatScrollInputAt = performance.now();
+        if (!target?.closest?.('.chat-msg-area')) {
+            return null;
+        }
+        findChatScrollTarget(target);
+        return target;
+    }
+
+    function clearChatScrollGuardForUserInput() {
+        lastChatScrollInputAt = performance.now();
+        chatScrollGuard = null;
+    }
+
+    function noteChatPointerInput(event) {
+        const target = rememberChatScrollInputTarget(event);
+        if (target?.closest?.('.v-scrollbar-track')) {
+            clearChatScrollGuardForUserInput();
+        }
+    }
+
+    function noteChatScrollInput(event) {
+        if (rememberChatScrollInputTarget(event)) {
+            clearChatScrollGuardForUserInput();
         }
     }
 
     function noteChatScrollKeyInput(event) {
         if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key) &&
             document.querySelector('.chat-msg-area')) {
-            lastChatScrollInputAt = performance.now();
+            clearChatScrollGuardForUserInput();
         }
     }
 
-    function handleChatScrollDiagnostic(event) {
-        if (!isConfigEnabled('debug.enabled')) {
-            return;
-        }
-        const target = getChatScrollDiagnosticTarget(event.target);
+    function handleChatScroll(event) {
+        const target = getChatScrollTarget(event.target);
         if (!target) {
             return;
         }
+        activeChatScrollTarget = target;
         const now = performance.now();
-        const previous = chatScrollDiagnosticSnapshots.get(target);
-        if (now - lastChatScrollInputAt < 1000) {
-            chatScrollDiagnosticSnapshots.set(target, {
-                peerSignature: previous?.peerSignature || '',
-                scrollTop: target.scrollTop,
-                scrollHeight: target.scrollHeight,
-                clientHeight: target.clientHeight
-            });
-            return;
-        }
-        const peer = getPeerFromRecord({});
-        const peerSignature = peer
-            ? `${peer.chatType}:${peer.peerUid}:${peer.guildId || ''}`
-            : '';
+        const peerSignature = getChatPeerSignature();
         const current = {
             peerSignature,
             scrollTop: target.scrollTop,
             scrollHeight: target.scrollHeight,
             clientHeight: target.clientHeight
         };
+
+        if (currentConfig.interfaceTweaks.preserveChatScrollPosition !== true) {
+            chatScrollGuard = null;
+        }
+        const guard = chatScrollGuard;
+        if (guard) {
+            const invalid = guard.target !== target ||
+                !target.isConnected ||
+                current.peerSignature !== guard.peerSignature ||
+                current.scrollHeight !== guard.scrollHeight ||
+                current.clientHeight !== guard.clientHeight ||
+                (!guard.waitingForFocus && now > guard.expiresAt);
+            if (invalid) {
+                chatScrollGuard = null;
+            } else if (Math.abs(current.scrollTop - guard.scrollTop) > 12) {
+                const attemptedScrollTop = current.scrollTop;
+                chatScrollGuard = null;
+                target.scrollTop = guard.scrollTop;
+                chatScrollDiagnosticSnapshots.set(target, {
+                    ...current,
+                    scrollTop: guard.scrollTop
+                });
+                recordRendererDiagnostic('chat-scroll.restored', {
+                    reason: guard.reason,
+                    delta: Math.round(attemptedScrollTop - guard.scrollTop),
+                    scrollTop: Math.round(guard.scrollTop),
+                    focused: document.hasFocus()
+                });
+                return;
+            }
+        }
+
+        if (!isConfigEnabled('debug.enabled')) {
+            return;
+        }
+        const previous = chatScrollDiagnosticSnapshots.get(target);
         chatScrollDiagnosticSnapshots.set(target, current);
+        if (now - lastChatScrollInputAt < 1000) {
+            return;
+        }
         const delta = current.scrollTop - Number(previous?.scrollTop || 0);
         if (!previous || previous.peerSignature !== peerSignature || delta >= -12 ||
             now - lastUnexpectedChatScrollAt < 2000) {
@@ -447,9 +564,31 @@ let handleToolboxVueComponentMount = () => {};
             scrollTop: Math.round(current.scrollTop),
             scrollHeightDelta: Math.round(current.scrollHeight - previous.scrollHeight),
             clientHeightDelta: Math.round(current.clientHeight - previous.clientHeight),
-            recallMarkers: target.querySelectorAll('.qqnt-toolbox-recall-badge, .qqnt-toolbox-recall-outline').length,
-            repeatControls: target.querySelectorAll('.qqnt-toolbox-repeat-slot').length
+            focused: document.hasFocus(),
+            guardReason: chatScrollGuard?.reason || ''
         }, 'warn');
+    }
+
+    function handleChatWindowBlur() {
+        captureChatScrollGuard('window-focus', activeChatScrollTarget, true);
+    }
+
+    function handleChatWindowFocus() {
+        rememberActiveRepeatPeer();
+        if (currentConfig.interfaceTweaks.preserveChatScrollPosition !== true) {
+            chatScrollGuard = null;
+            return;
+        }
+        if (!chatScrollGuard?.waitingForFocus) {
+            return;
+        }
+        if (chatScrollGuard.target?.isConnected &&
+            chatScrollGuard.peerSignature === getChatPeerSignature()) {
+            chatScrollGuard.waitingForFocus = false;
+            chatScrollGuard.expiresAt = performance.now() + 2500;
+        } else {
+            chatScrollGuard = null;
+        }
     }
 
     function syncRendererReadyDiagnostic() {
@@ -553,6 +692,40 @@ let handleToolboxVueComponentMount = () => {};
         return autoReactionEditor;
     }
 
+    function getLocalStickerManager() {
+        if (!localStickerManager) {
+            localStickerManager = createLocalStickerManager({
+                getConfig: () => currentConfig.localStickers,
+                getStore: options => getBridge()?.getLocalStickers?.(options),
+                saveSettings: patch => setConfigValue('localStickers', {
+                    ...currentConfig.localStickers,
+                    ...(patch && typeof patch === 'object' ? patch : {})
+                }),
+                chooseDirectory: () => getBridge()?.chooseLocalStickerDirectory?.(),
+                openDirectory: () => getBridge()?.openLocalStickerDirectory?.(),
+                saveOrder: async packPaths => {
+                    const result = await getBridge()?.updateLocalStickerPackOrder?.(packPaths);
+                    if (result?.ok) {
+                        localStickerController?.refresh(false).catch(() => {});
+                    }
+                    return result;
+                },
+                chooseTool: tool => getBridge()?.chooseLocalStickerTool?.(tool),
+                inspectEnvironment: () => getBridge()?.getLocalStickerEnvironment?.(),
+                openToolDownload: tool => getBridge()?.openLocalStickerToolDownload?.(tool),
+                testProxy: proxyUrl => getBridge()?.testLocalStickerProxy?.(proxyUrl),
+                download: async url => {
+                    const result = await getBridge()?.downloadTelegramStickers?.(url);
+                    if (result?.ok) {
+                        localStickerController?.refresh(false).catch(() => {});
+                    }
+                    return result;
+                }
+            });
+        }
+        return localStickerManager;
+    }
+
     function syncReactionLimitFeature() {
         getReactionLimitController().sync({
             removeLimit: isConfigEnabled('messageTweaks.removeReactionLimit'),
@@ -646,6 +819,7 @@ let handleToolboxVueComponentMount = () => {};
 #${PANEL_ID} {
     position: fixed;
     z-index: 2147483000;
+    -webkit-app-region: no-drag;
     width: min(360px, calc(100vw - 16px));
     height: clamp(400px, 68vh, 560px);
     max-height: calc(100vh - 16px);
@@ -1232,7 +1406,6 @@ body.qqnt-toolbox-side-repeat .ml-item .qqnt-toolbox-repeat-slot.plus-one-btn {
     pointer-events: none !important;
     cursor: pointer;
     transform: translateY(-50%) !important;
-    overflow-anchor: none;
 }
 body.qqnt-toolbox-side-repeat .qqnt-toolbox-repeat-slot.plus-one-btn > svg {
     display: block !important;
@@ -1322,7 +1495,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     pointer-events: auto;
     transition: opacity .15s ease, transform .15s ease;
     transform: scale(.92);
-    overflow-anchor: none;
 }
 .qqnt-toolbox-recall-badge {
     color: var(--qqnt-toolbox-recall-color, var(--text-secondary, var(--text-02, #8a8f99)));
@@ -1345,7 +1517,6 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     opacity: .78;
     user-select: none;
     pointer-events: none;
-    overflow-anchor: none;
 }
 .qqnt-toolbox-noseq-badge {
     color: var(--warning-color, var(--warning-text-color, #d97706));
@@ -1713,6 +1884,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function createLocalStickerManagerItem() {
+        const item = createActionItem(
+            text('管理本地贴纸'),
+            text('贴纸目录、面板显示与 Telegram 下载'),
+            'manageLocalStickers',
+            {
+                label: text('管理'),
+                requires: 'localStickers.enabled',
+                child: true
+            }
+        );
+        item.dataset.localStickerPathSummary = 'true';
+        return item;
+    }
+
     function createColorPairItem(name, meta, lightPath, darkPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.colorItem = 'true';
@@ -1832,6 +2018,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             updateConfigUi(root);
         }
         fakeForwardEditor?.sync();
+        localStickerController?.sync();
         syncWindowShakeToolbarEntry();
         const panel = document.getElementById(PANEL_ID);
         if (panel && !panel.hidden && !isConfigEnabled('floatingPanel.enabled')) {
@@ -1897,6 +2084,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     requires: 'interfaceTweaks.singleForwardViewer',
                     child: true
                 }),
+                createSwitchItem(text('保持聊天页浏览位置'), text('右键菜单或切换窗口后保持当前消息浏览位置'), 'interfaceTweaks.preserveChatScrollPosition'),
                 createSwitchItem(text('屏蔽窗口抖动'), text('保留窗口抖动消息，仅阻止窗口移动'), 'interfaceTweaks.blockWindowShake'),
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
@@ -1910,6 +2098,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('隐藏退出账号按钮'), '', 'interfaceTweaks.hiddenLogoutBtn'),
                 createSwitchItem(text('隐藏检查更新按钮和更新通知'), '', 'interfaceTweaks.hiddenUpdateBtnAndNotice'),
                 createSwitchItem(text('隐藏 VIP 彩色昵称'), '', 'interfaceTweaks.removeVipColor')
+            ]),
+            createSection('localStickers', text('本地贴纸'), [
+                createSwitchItem(text('启用本地贴纸面板'), text('使用本地目录中的图片作为贴纸'), 'localStickers.enabled'),
+                createChoiceItem(text('入口方式'), text('原表情右键、替换原入口或显示独立按钮'), 'localStickers.entryMode', [
+                    { value: 'contextmenu', label: text('右键') },
+                    { value: 'replace', label: text('替换') },
+                    { value: 'separate', label: text('独立') }
+                ], {
+                    requires: 'localStickers.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('入口移动到左侧'), text('仅作用于独立入口'), 'localStickers.iconOnLeft', {
+                    requires: 'localStickers.enabled',
+                    child: true
+                }),
+                createLocalStickerManagerItem()
             ]),
             createSection('messages', text('消息相关'), [
                 createSwitchItem(text('文件发送修复'), 'Failed / NoSeq', 'fileRetryFixer.enabled'),
@@ -2226,6 +2430,19 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
     }
 
+    function summarizeLocalStickerPath(value) {
+        const filePath = String(value || '').trim();
+        if (!filePath) {
+            return text('尚未选择目录');
+        }
+        if (filePath.length <= 42) {
+            return filePath;
+        }
+        const parts = filePath.replace(/\\/g, '/').split('/').filter(Boolean);
+        const tail = parts.slice(-2).join('\\');
+        return tail ? `…\\${tail}` : `…${filePath.slice(-38)}`;
+    }
+
     function updateConfigUi(panel = document.getElementById(PANEL_ID)) {
         if (!panel) {
             return;
@@ -2347,6 +2564,14 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 meta.textContent = count
                     ? text(`已选择 ${count} 个`)
                     : text('尚未选择表情');
+            }
+        });
+        panel.querySelectorAll('.qqnt-toolbox-item[data-local-sticker-path-summary="true"]').forEach(item => {
+            const filePath = String(currentConfig.localStickers.path || '').trim();
+            const meta = item.querySelector('.qqnt-toolbox-item-meta');
+            if (meta) {
+                meta.textContent = summarizeLocalStickerPath(filePath);
+                meta.title = filePath;
             }
         });
         updatePluginUpdaterUi(panel);
@@ -2607,6 +2832,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const bridge = getBridge();
         if (action === 'editAutoReactionEmojis') {
             getAutoReactionEditor().open(button);
+            return;
+        }
+        if (action === 'manageLocalStickers') {
+            getLocalStickerManager().open('packs', button);
             return;
         }
         showPanelActionFeedback(button, text('处理中'), 'pending', 0);
@@ -3343,6 +3572,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         syncUnreadCountObserver();
         syncActiveQrViewerButton();
         syncWindowShakeToolbarEntry();
+        localStickerController?.sync();
         applySimplifyTweaks();
     }
 
@@ -6703,10 +6933,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('click', handleEmojiImageClick, true);
     document.addEventListener('click', handleSingleClickMedia, true);
     document.addEventListener('pointerdown', handleForwardOpenIntent, true);
-    document.addEventListener('pointerdown', noteChatScrollInput, true);
+    document.addEventListener('pointerdown', noteChatPointerInput, true);
     document.addEventListener('wheel', noteChatScrollInput, { capture: true, passive: true });
     document.addEventListener('keydown', noteChatScrollKeyInput, true);
-    document.addEventListener('scroll', handleChatScrollDiagnostic, true);
+    document.addEventListener('scroll', handleChatScroll, true);
 
     document.addEventListener('keydown', event => {
         if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {
@@ -6760,6 +6990,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         document.querySelectorAll('.qqnt-toolbox-poke-menu-item').forEach(item => item.remove());
         const avatar = getPokeAvatarFromEvent(event);
         const messageTarget = avatar ? null : getMessageContextTargetFromEvent(event);
+        if (messageTarget) {
+            captureChatScrollGuard('context-menu', messageTarget);
+        }
         const directRecord = messageTarget ? findMessageRecordFromElement(messageTarget) : null;
         const pokeRecord = !avatar && getPokeRecordEvent(directRecord) ? directRecord : null;
         const contextRecord = pokeRecord || directRecord;
@@ -6854,7 +7087,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     });
 
     window.addEventListener('hashchange', scheduleRepeatEntrypointRefresh);
-    window.addEventListener('focus', rememberActiveRepeatPeer);
+    window.addEventListener('blur', handleChatWindowBlur);
+    window.addEventListener('focus', handleChatWindowFocus);
 
     fakeForwardEditor = createFakeForwardEditor({
         getEnabled: () => isConfigEnabled('fakeForward.enabled'),
@@ -6890,6 +7124,17 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }, 'error')
     });
     fakeForwardEditor.install();
+
+    localStickerController = createLocalStickerController({
+        getConfig: () => currentConfig,
+        getBridge,
+        getPeer: () => getPeerFromRecord({}),
+        setConfigValue,
+        onError: error => recordRendererDiagnostic('local-sticker.failed', {
+            reason: error?.message || String(error)
+        }, 'warn')
+    });
+    localStickerController.install();
 
     loadConfig().then(subscribeConfig).catch(() => {});
     loadUpdateState().then(subscribeUpdateState).catch(() => {});

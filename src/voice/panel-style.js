@@ -15,6 +15,7 @@ const VOICE_LIBRARY_PANEL_CSS = String.raw`
     position: fixed;
     inset: 0;
     z-index: 2147483000;
+    -webkit-app-region: no-drag;
     color: var(--voice-text);
     background: rgba(0, 0, 0, .28);
     font: 13px/1.45 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
