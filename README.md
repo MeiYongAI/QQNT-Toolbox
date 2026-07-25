@@ -1,18 +1,36 @@
 # QQNT Toolbox
 
-适用于 LiteLoaderQQNT 的 QQNT 工具箱插件，集成文件发送修复、消息复读、本地贴纸、语音消息与语音库、阻止撤回、表情回应、戳戳、界面调整和功能精简。
+面向 LiteLoaderQQNT 的 QQNT 功能扩展，集中提供消息处理、本地贴纸、媒体预览、语音工具、阻止撤回、互动功能和界面调整。
 
-可以在 QQ“设置”中打开 `QQNT Toolbox` 设置页。首次安装时除悬浮工具箱入口外，所有会修改消息、菜单或界面的功能均为关闭状态。默认使用键盘右侧的 `Ctrl`（RCtrl）打开或关闭悬浮工具箱；面板第一次打开时位于 QQ 窗口中央，可拖动标题栏调整位置。
+**[下载最新版本](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) · [安装与更新](#安装与更新) · [功能概览](#功能概览) · [问题反馈](https://github.com/MeiYongAI/QQNT-Toolbox/issues)**
 
-“其他 > 悬浮窗”中可以关闭悬浮工具箱，或点击“唤出快捷键”后直接按下新的按键组合完成绑定；按 `Esc` 取消本次绑定。
+> [!CAUTION]
+> **传播与官方渠道**
+>
+> - 不要在国内平台宣传、推荐或传播本插件。
+> - 不要在 QQ 官方群聊中发送任何能明显看出你使用了第三方插件的截图、录屏或其他内容，也不要将此类材料提交到 QQ 官方客服与反馈渠道。
+> - 插件问题请仅通过本仓库的 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 反馈，不要将第三方插件导致的现象提交给 QQ 官方渠道。
 
-## 使用要求
+> [!WARNING]
+> **第三方插件风险**
+>
+> QQNT Toolbox 是非官方项目，与腾讯、QQ 和 LiteLoaderQQNT 项目方不存在隶属或担保关系。使用第三方插件可能带来账号、隐私、数据和兼容性风险，请自行判断并承担后果。请勿利用伪造合并转发、自定义图片外显、自动回应等功能冒充他人、实施欺诈、骚扰他人或制造误导内容。
+
+## 使用须知
+
+- 首次安装时，除悬浮工具箱入口外，所有会修改消息、菜单或界面的功能均为关闭状态。
+- 插件依赖 QQNT 内部接口和页面结构，QQ 更新可能造成部分功能临时失效；更新 QQ 前建议确认最新 Release 和 Issues。
+- 当前主要在 Windows QQNT 上开发和测试。插件清单同时声明支持 Linux 和 macOS，但部分功能及自动更新存在平台限制。
+- 仅从本仓库 [Releases](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) 获取安装包；更新或排查问题前建议备份 `LiteLoaderQQNT/data/qqnt_toolbox`。
+- 不要同时启用多个插件中的同类功能，重复注入消息菜单、阻止撤回、复读或界面精简可能造成冲突。
+
+## 安装与更新
+
+### 环境要求
 
 - 使用 QQNT 客户端，并已正确安装支持 Manifest V4 插件的 LiteLoaderQQNT。
 - 语音发送、音视频转换、音视频发送修复和部分语音预览需要 [FFmpeg](https://ffmpeg.org/)。
 - Release 压缩包已经包含 `silk-wasm` 和加密 ZIP 组件，普通用户不需要安装 Node.js，也不需要执行 `npm install`。
-- 当前主要在 Windows QQNT 上开发和测试。插件清单同时声明支持 Linux 和 macOS，但不同系统、QQ 版本之间可能存在兼容性差异。
-- 插件依赖 QQNT 内部接口和页面结构。QQ 大版本更新后如果功能失效，请先确认是否已有新版插件。
 
 ### 检查 FFmpeg
 
@@ -30,7 +48,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 
 设置环境变量后需要完全退出并重新启动 QQ。
 
-## 安装
+### 手动安装
 
 1. 完全退出 QQ。
 2. 从 [Releases](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) 下载最新的 `QQNT-Toolbox-v*.zip`。
@@ -47,7 +65,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 
 ### 插件内更新
 
-“其它 > 插件更新”提供手动检查与重启安装：
+“其他 > 插件更新”提供手动检查与重启安装：
 
 - “启动时检查更新”默认关闭；开启后每 12 小时最多读取一次最新 Release 中的 `update.json`。
 - 手动点击“检查更新”会立即刷新版本状态，不受上述时间间隔限制。
@@ -56,16 +74,29 @@ C:\ffmpeg\bin\ffmpeg.exe
 - 点击“重启安装”后，新版会复制到独立插件目录；LiteLoaderQQNT 在下一次启动时加载新版，确认加载成功后再清理旧版目录。
 - 自动安装目前仅支持 Windows；Linux 和 macOS 仍可按上面的手动方式更新。
 
-## 工具箱面板
+## 快速开始
 
-- 首次安装后可以按 RCtrl 打开工具箱并按需开启功能；插件不会默认修改消息、菜单或界面。
-- 按右侧 `Ctrl` 打开或关闭面板。
+- 在 QQ“设置”中打开 `QQNT Toolbox` 设置页，按需启用功能。
+- 默认按键盘右侧的 `Ctrl`（RCtrl）打开或关闭悬浮工具箱。
 - 拖动标题栏可以在当前 QQ 窗口内移动面板。
 - 点击右上角关闭按钮只会隐藏面板，不会退出插件。
 - 分组标题可以展开或折叠，面板内容区域支持滚动。
 - 大多数开关会立即生效；依赖消息重新渲染的选项可能需要切换一次会话或重启 QQ。
+- “其他 > 悬浮窗”可以关闭悬浮工具箱或重新绑定唤出快捷键；绑定过程中按 `Esc` 取消。
 
-## 功能说明
+## 功能概览
+
+| 类别 | 主要功能 |
+| --- | --- |
+| 消息与发送 | 文件发送修复、NoSeq 提示、消息复读、伪造合并转发、移除回复 @、自定义图片外显 |
+| 本地贴纸 | 本地贴纸包、最近使用、入口替换、点击直发、Telegram 贴纸下载 |
+| 媒体与语音 | TG 样式媒体预览、语音消息发送、语音库、语音保存与转发 |
+| 阻止撤回 | 消息保留、可选标记、黑白名单、撤回记录持久化与独立查看器 |
+| 娱乐互动 | 表情回应解限、回应面板保持、自动回应、戳戳、窗口抖动 |
+| 界面与菜单 | 消息菜单排序、完整未读数、二维码识别、单窗口预览、界面精简 |
+| 维护与诊断 | 插件内更新、配置持久化、诊断报告、日志轮转与隐私脱敏 |
+
+## 详细功能
 
 ### 文件发送修复
 
@@ -142,7 +173,7 @@ NoSeq 通常表示消息在弱网环境下可能没有成功发送，或者被�
 
 “贴纸集排序”会打开独立管理页，可拖动贴纸集调整顺序；保存后只更新各目录的 `sticker.json.index`，不会移动或重命名图片。“Telegram 贴纸”页支持填写 `t.me/addstickers/...` 链接下载普通贴纸包，并提供以下配置：
 
-- `Telegram Bot Token`：通过 Telegram 的 `@BotFather` 机器人创建 Bot 后获取，只保存在 Toolbox 本地配置中。
+- `Telegram Bot Token`：在 Telegram 中通过 `@BotFather` 获取，只保存在 Toolbox 本地配置中。
 - `FFmpeg`：用于把 Telegram 视频贴纸转换为 GIF；路径留空时自动从 `PATH` 查找，普通静态 WebP 贴纸不依赖 FFmpeg。
 - `tgsToGif`：用于把 TGS 动画贴纸转换为 GIF；路径留空时自动从 `PATH` 查找，可从 [tgs_to_gif Releases](https://github.com/jiongjiongJOJO/tgs_to_gif/releases/latest) 下载，未找到时会跳过 TGS。
 - `HTTP 代理`：手填时仅支持 `http://主机:端口`；留空时依次使用 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 中可用的 HTTP 代理，再回退到 Chromium 的系统代理/PAC。管理页可直接检测到 Telegram 的连通性；该代理只作用于贴纸下载，不会修改 QQ 的网络设置。
@@ -284,7 +315,7 @@ QQ `9.9.32-50969` 及更新实现优先调用 QQ 自带的戳戳和撤回接口�
 
 单份日志最多约 1 MiB。诊断内容不会保存消息正文、压缩密码、令牌、完整 QQ/群标识、绝对路径或二进制内容。日常使用建议保持关闭。
 
-## 数据目录
+## 数据与隐私
 
 插件数据统一存放在：
 
@@ -297,6 +328,9 @@ LiteLoaderQQNT\data\qqnt_toolbox
 ```text
 qqnt_toolbox
 ├─ config.json                 # 工具箱设置
+├─ stickers                    # 默认本地贴纸目录及最近使用记录
+├─ debug                       # 启用诊断记录后按需创建
+├─ updater                     # 下载并校验通过的待安装更新
 ├─ file-retry                  # 发生文件发送修复时按需创建，临时变体 24 小时后清理
 ├─ prevent-recall
 │  └─ <QQ号>                  # 该账号的撤回记录和被撤回图片
@@ -304,6 +338,8 @@ qqnt_toolbox
 ```
 
 可以直接在 `voices` 目录中手动整理音频、视频和子文件夹，完成后重新打开语音库或刷新列表。
+
+`config.json` 可能包含其他文件的加密 ZIP 密码和 Telegram Bot Token，请勿上传或发给他人。内置诊断报告会主动隐藏密码、令牌、完整账号标识和绝对路径，但公开提交前仍建议检查一次导出内容。
 
 ## 常见问题
 
@@ -329,6 +365,13 @@ qqnt_toolbox
 ### QQ 更新后部分功能失效
 
 本插件使用 QQNT 内部接口和 DOM 结构，QQ 更新可能改变这些实现。请查看 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 或最新 Release；反馈问题时可以临时开启诊断记录，并附上导出的诊断报告。
+
+### 如何安全反馈问题
+
+- 只在本仓库 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 反馈插件问题，不要前往 QQ 官方群聊、客服或反馈渠道提交第三方插件相关材料。
+- 写明操作系统、QQ 版本、LiteLoaderQQNT 版本、Toolbox 版本、复现步骤和相关功能开关。
+- 优先附上内置“导出诊断报告”的结果，不要上传 `config.json`、整个数据目录或包含账号、群号、好友信息的未处理截图。
+- 截图和录屏前请遮挡账号、群聊、联系人、文件路径及其他隐私信息。
 
 ## 致谢
 
