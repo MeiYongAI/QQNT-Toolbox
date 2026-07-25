@@ -57,6 +57,9 @@ $runtimeFiles = @(
     'node_modules/@zip.js/zip.js/LICENSE',
     'node_modules/@zip.js/zip.js/index.cjs',
     'node_modules/@zip.js/zip.js/package.json',
+    'node_modules/html2canvas/LICENSE',
+    'node_modules/html2canvas/package.json',
+    'node_modules/html2canvas/dist/html2canvas.min.js',
     'node_modules/silk-wasm/LICENSE',
     'node_modules/silk-wasm/package.json',
     'node_modules/silk-wasm/lib/index.cjs',
@@ -143,6 +146,8 @@ try {
         'QQNT-Toolbox/src/auto-reaction.js',
         'QQNT-Toolbox/src/auto-reaction-editor.js',
         'QQNT-Toolbox/src/repeat-message.js',
+        'QQNT-Toolbox/src/message-image.js',
+        'QQNT-Toolbox/src/message-to-image.js',
         'QQNT-Toolbox/src/single-forward-window.js',
         'QQNT-Toolbox/src/settings.css',
         'QQNT-Toolbox/src/window-shake.js',
@@ -152,6 +157,9 @@ try {
         'QQNT-Toolbox/native/poke-bridge.win32-x64.node',
         'QQNT-Toolbox/node_modules/@saltify/typeproto/package.json',
         'QQNT-Toolbox/node_modules/@saltify/typeproto/dist/index.mjs',
+        'QQNT-Toolbox/node_modules/html2canvas/LICENSE',
+        'QQNT-Toolbox/node_modules/html2canvas/package.json',
+        'QQNT-Toolbox/node_modules/html2canvas/dist/html2canvas.min.js',
         'QQNT-Toolbox/node_modules/silk-wasm/lib/silk_wasm.wasm'
     )) {
         if ($required -notin $entries) {

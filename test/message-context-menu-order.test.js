@@ -33,7 +33,14 @@ test('uses pointer sorting instead of native HTML drag and drop', () => {
 test('normalizes persisted message menu order without duplicates', async () => {
     const { normalizeContextMenuOrder } = await modulePromise;
     assert.deepEqual(
-        normalizeContextMenuOrder(['qq:复制', '', 'qq:转发', 'qq:复制', null]),
+        normalizeContextMenuOrder([
+            'qq:复制',
+            '',
+            'toolbox:multi-message-to-image',
+            'qq:转发',
+            'qq:复制',
+            null
+        ]),
         ['qq:复制', 'qq:转发']
     );
 });
@@ -116,6 +123,7 @@ test('ships both QQ native and Toolbox entries in the initial editor catalog', a
     assert.ok(ids.has('qq:复制'));
     assert.ok(ids.has('qq:转发'));
     assert.ok(ids.has('toolbox:repeat'));
+    assert.ok(ids.has('toolbox:message-to-image'));
     assert.ok(ids.has('toolbox:voice-save'));
     assert.ok(ids.has('toolbox:qr-scan'));
     assert.ok(ids.has('toolbox:poke-recall'));

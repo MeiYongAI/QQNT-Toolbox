@@ -88,7 +88,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 
 | 类别 | 主要功能 |
 | --- | --- |
-| 消息与发送 | 文件发送修复、NoSeq 提示、消息复读、伪造合并转发、移除回复 @、自定义图片外显 |
+| 消息与发送 | 文件发送修复、NoSeq 提示、消息转图片、消息复读、伪造合并转发、移除回复 @、自定义图片外显 |
 | 本地贴纸 | 本地贴纸包、最近使用、入口替换、点击直发、Telegram 贴纸下载 |
 | 媒体与语音 | TG 样式媒体预览、语音消息发送、语音库、语音保存与转发 |
 | 阻止撤回 | 消息保留、可选标记、黑白名单、撤回记录持久化与独立查看器 |
@@ -117,6 +117,12 @@ C:\ffmpeg\bin\ffmpeg.exe
 开启“消息相关 > 提示 NoSeq 消息”后，插件会给 `sendStatus` 为 NoSeq 的非灰条消息添加一个小型感叹号标记。鼠标悬停标记时会显示“这条消息可能未成功发送（NoSeq）”。
 
 NoSeq 通常表示消息在弱网环境下可能没有成功发送，或者被服务器拦截。这个功能只负责提示，不会自动修改或重发消息；文件消息的自动重试由上面的“文件发送修复”单独控制。
+
+### 消息转图片
+
+开启“消息相关 > 消息转图片”后，消息右键菜单会增加“转图”。如需批量转换，先使用 QQ 原生“多选”勾选消息，再点击底部操作栏中的“转图”；所选消息会按聊天顺序合成为一张 PNG。
+
+该功能会在离屏区域复制、清理并重新排版 QQ 已渲染的消息 DOM，而不是截取当前窗口。它可覆盖文本、图片、视频缩略图、文件、语音、回复、卡片及混合消息，并会排除 QQ 多选灰层、`+1`、回应条和 Toolbox 控件。尚未加载完成的媒体会按当时界面中的加载状态输出。
 
 ### 自定义图片外显
 
@@ -377,6 +383,8 @@ qqnt_toolbox
 
 - [QAuxiliary](https://github.com/cinit/QAuxiliary)：参考 NoSeq 消息提示、图片修复、自定义图片外显、消息复读与伪装语音时长的行为设计。
 - [lite-tools](https://github.com/xiyuesaves/lite-tools)：参考阻止撤回持久化、界面调整、撤回查看器及本地贴纸包设计。
+- [qwqnt-message-to-image](https://github.com/LeakDog/qwqnt-message-to-image)：参考消息右键转图片的功能入口。
+- [html2canvas](https://html2canvas.hertzen.com/)：用于将清理后的消息 DOM 绘制为 PNG，遵循 MIT License。
 - [LiteLoaderQQNT-Media-Local-View](https://github.com/xh321/LiteLoaderQQNT-Media-Local-View)：参考 `openMediaViewer` 拦截方式。
 - [LiteLoaderQQNT-Audio-Sender](https://github.com/xtaw/LiteLoaderQQNT-Audio-Sender)：原始语音文件发送思路及早期实现参考。
 - [silk-wasm](https://www.npmjs.com/package/silk-wasm)：Release 中包含的 Silk 编解码运行库，遵循其自身许可证。

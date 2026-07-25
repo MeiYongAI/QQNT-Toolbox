@@ -83,6 +83,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.openMediaViewer({ type: 'video' });
     await api.scanQrCode({ type: 'image' });
     await api.qrResultAction({ type: 'copy', text: 'result' });
+    await api.loadMessageImageRenderer();
+    await api.saveMessageImage({ data: new Uint8Array(8), count: 1 });
     api.markForwardOpenIntent();
     await api.repeatMessage({ id: 'repeat' });
     assert.equal(api.getPathForFile({ mockPath: 'D:\\video.mp4' }), 'D:\\video.mp4');
@@ -125,6 +127,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:open-media-viewer',
         'qqnt-toolbox:scan-qr-code',
         'qqnt-toolbox:qr-result-action',
+        'qqnt-toolbox:load-message-image-renderer',
+        'qqnt-toolbox:save-message-image',
         'qqnt-toolbox:repeat-message',
         'qqnt-toolbox:stage-fake-forward-image',
         'qqnt-toolbox:resolve-fake-forward-sender-name',

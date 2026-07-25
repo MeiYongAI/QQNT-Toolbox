@@ -328,7 +328,7 @@ async function convertMediaToPcm24k(mediaPath) {
     const filters = [
         'aresample=out_chlayout=mono',
         `volume=${gain.toFixed(2)}dB`,
-        `aresample=${TARGET_SILK_SAMPLE_RATE}:resampler=soxr:precision=28`
+        `aresample=${TARGET_SILK_SAMPLE_RATE}`
     ];
     const { stdout } = await runTool('ffmpeg', [
         '-v', 'error',

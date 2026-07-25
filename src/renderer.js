@@ -15,6 +15,7 @@ import { createRecallFilterEditor } from './recall-filter-editor.js';
 import { createAutoReactionEditor } from './auto-reaction-editor.js';
 import { createLocalStickerController } from './local-sticker-panel.js';
 import { createLocalStickerManager } from './local-sticker-manager.js';
+import { createMessageImageController } from './message-to-image.js';
 import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
@@ -72,6 +73,7 @@ let handleToolboxVueComponentMount = () => {};
     const SEND_STATUS_SUCCESS_NO_SEQ = 3;
     const TOOLBOX_MENU_TYPE_REPEAT = 990101;
     const TOOLBOX_MENU_TYPE_QR_SCAN = 990102;
+    const TOOLBOX_MENU_TYPE_MESSAGE_TO_IMAGE = 990103;
     const RECALL_MARKER_STYLE_VALUES = new Set(['badge', 'outline']);
     const RECALL_FILTER_MODE_VALUES = new Set(['all', 'blacklist', 'whitelist']);
     const MAX_AUTO_REACTION_EMOJIS = 64;
@@ -152,6 +154,8 @@ let handleToolboxVueComponentMount = () => {};
         },
         messageTweaks: {
             promptNoSeq: false,
+            messageToImage: false,
+            messageToImageIncludeBackground: false,
             customImageSummaryEnabled: false,
             customImageSummary: '',
             removeReactionLimit: false,
@@ -242,6 +246,7 @@ let handleToolboxVueComponentMount = () => {};
     let pokeMenuRequestId = 0;
     let messageContextMenuOrderController = null;
     let messageContextMenuActionsInstalled = false;
+    let messageImageController = null;
     let reactionLimitController = null;
     let fakeForwardEditor = null;
     let windowShakeSending = false;
@@ -2148,6 +2153,20 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     child: true
                 }),
                 createSwitchItem(text('提示 NoSeq 消息'), text('标记可能未成功发送的消息'), 'messageTweaks.promptNoSeq'),
+                createSwitchItem(
+                    text('消息转图片'),
+                    text('右键转换单条消息，QQ 原生多选可批量转换'),
+                    'messageTweaks.messageToImage'
+                ),
+                createSwitchItem(
+                    text('包含聊天背景'),
+                    text('导出时保留当前会话背景'),
+                    'messageTweaks.messageToImageIncludeBackground',
+                    {
+                        requires: 'messageTweaks.messageToImage',
+                        child: true
+                    }
+                ),
                 createSwitchItem(text('语音消息'), text('拖拽发送与语音库'), 'voiceMessage.enabled'),
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
                     requires: 'voiceMessage.enabled',
@@ -3812,6 +3831,31 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             const element = document.createElementNS(namespace, value[0]);
             for (const [name, attribute] of Object.entries(value[1])) {
                 element.setAttribute(name, attribute);
+            }
+            svg.append(element);
+        }
+        return svg;
+    }
+
+    function createMessageImageIcon() {
+        const namespace = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(namespace, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '1.7');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        svg.setAttribute('aria-hidden', 'true');
+        const paths = [
+            ['rect', { x: '3', y: '4', width: '18', height: '16', rx: '2' }],
+            ['circle', { cx: '8.5', cy: '9.5', r: '1.5' }],
+            ['path', { d: 'm3 17 5-5 4 4 2.5-2.5L21 20' }]
+        ];
+        for (const [tag, attributes] of paths) {
+            const element = document.createElementNS(namespace, tag);
+            for (const [name, value] of Object.entries(attributes)) {
+                element.setAttribute(name, value);
             }
             svg.append(element);
         }
@@ -6042,6 +6086,55 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return null;
     }
 
+    function getMessageImageScope(element) {
+        const selector = [
+            '.chat-msg-area',
+            '.chat-record-list',
+            '.msg-record-container',
+            '.record-msg-panel',
+            '.message-panel'
+        ].join(',');
+        const direct = element?.closest?.(selector);
+        if (direct) {
+            return direct;
+        }
+
+        const anchorRect = element?.getBoundingClientRect?.();
+        for (let ancestor = element?.parentElement, depth = 0;
+            ancestor && ancestor !== document.body && depth < 10;
+            ancestor = ancestor.parentElement, depth += 1) {
+            const candidates = Array.from(ancestor.querySelectorAll?.(selector) || [])
+                .filter(candidate => {
+                    const rect = candidate.getBoundingClientRect();
+                    return rect.width > 120 && rect.height > 80;
+                });
+            if (!candidates.length) {
+                continue;
+            }
+            candidates.sort((left, right) => {
+                const leftRect = left.getBoundingClientRect();
+                const rightRect = right.getBoundingClientRect();
+                const score = rect => anchorRect
+                    ? Math.abs(rect.bottom - anchorRect.top) -
+                        Math.max(0, Math.min(rect.right, anchorRect.right) - Math.max(rect.left, anchorRect.left))
+                    : -rect.width * rect.height;
+                return score(leftRect) - score(rightRect);
+            });
+            return candidates[0];
+        }
+        return document;
+    }
+
+    function getMessageImageRecordKey(record) {
+        return normalizeText(record?.msgId) || [
+            record?.chatType,
+            record?.peerUid,
+            record?.msgSeq,
+            record?.msgTime,
+            record?.senderUid
+        ].map(normalizeText).join(':');
+    }
+
     function getVisibleMessageElements() {
         const seen = new Set();
         const messages = [];
@@ -6054,6 +6147,64 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             messages.push(messageElement);
         });
         return messages;
+    }
+
+    function getMessageImageController() {
+        if (!messageImageController) {
+            messageImageController = createMessageImageController({
+                isEnabled: () => isConfigEnabled('messageTweaks.messageToImage'),
+                includeBackground: () => isConfigEnabled('messageTweaks.messageToImageIncludeBackground'),
+                getMessageElement: getMessageElementFromElement,
+                getMessageRecord: findMessageRecordFromElement,
+                getRecordKey: getMessageImageRecordKey,
+                getMessageScope: getMessageImageScope,
+                loadRenderer: async () => {
+                    if (typeof window.html2canvas === 'function') {
+                        return window.html2canvas;
+                    }
+                    const bridge = getBridge();
+                    if (typeof bridge?.loadMessageImageRenderer !== 'function') {
+                        throw new Error('消息转图片加载接口不可用');
+                    }
+                    const result = await bridge.loadMessageImageRenderer();
+                    if (!result?.ok) {
+                        throw new Error(result?.message || '消息转图片组件加载失败');
+                    }
+                    if (typeof window.html2canvas !== 'function') {
+                        throw new Error('消息转图片组件未正确加载');
+                    }
+                    return window.html2canvas;
+                },
+                save: async payload => {
+                    const bridge = getBridge();
+                    if (typeof bridge?.saveMessageImage !== 'function') {
+                        return { ok: false, reason: 'bridge-unavailable', message: '消息转图片接口不可用' };
+                    }
+                    const result = await bridge.saveMessageImage(payload);
+                    recordRendererDiagnostic('message-image.completed', {
+                        ok: result?.ok === true,
+                        canceled: result?.canceled === true,
+                        count: Number(payload?.count) || 0,
+                        reason: result?.reason || ''
+                    }, result?.ok || result?.canceled ? 'info' : 'warn');
+                    return result;
+                },
+                onDiagnostic: (event, details) => recordRendererDiagnostic(event, details, 'info'),
+                onError: error => {
+                    recordRendererDiagnostic('message-image.failed', {
+                        reason: error?.message || String(error)
+                    }, 'error');
+                    if (isConfigEnabled('debug.enabled')) {
+                        console.warn('[QQNT Toolbox] Message image failed:', error);
+                    }
+                }
+            });
+        }
+        return messageImageController;
+    }
+
+    function renderSingleMessageImage(messageElement) {
+        return getMessageImageController().renderSingle(messageElement);
     }
 
     function removeRepeatSlot(slot) {
@@ -6474,6 +6625,24 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         icon.style.webkitMaskImage = 'none';
     }
 
+    function setNativeMenuItemMessageImageIcon(item) {
+        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
+        if (!icon) {
+            return;
+        }
+        const svg = createMessageImageIcon();
+        svg.style.width = '16px';
+        svg.style.height = '16px';
+        icon.replaceChildren(svg);
+        icon.style.display = icon.style.display || 'flex';
+        icon.style.alignItems = 'center';
+        icon.style.justifyContent = 'center';
+        icon.style.background = 'transparent';
+        icon.style.backgroundImage = 'none';
+        icon.style.maskImage = 'none';
+        icon.style.webkitMaskImage = 'none';
+    }
+
     function setNativeMenuItemPokeIcon(item) {
         const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
         if (!icon) {
@@ -6750,6 +6919,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         };
     }
 
+    function createMessageImageContextMenuConfig(messageElement) {
+        return {
+            type: TOOLBOX_MENU_TYPE_MESSAGE_TO_IMAGE,
+            text: text('转图'),
+            icon: 'image',
+            when: () => true,
+            handler: () => window.setTimeout(() => renderSingleMessageImage(messageElement), 0),
+            __qqntToolboxDescriptor: {
+                id: 'toolbox:message-to-image',
+                label: text('转图'),
+                toolbox: true
+            },
+            __qqntToolboxInsertAfter: ['qq:复制']
+        };
+    }
+
     function createPokeRecallMenuItem(menu, record, messageElement) {
         const template = getNativeMenuItemElements(menu)[0];
         const item = template?.cloneNode(true) || document.createElement('div');
@@ -6847,6 +7032,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 items.push(createQrScanContextMenuConfig(payload));
             }
         }
+        if (isConfigEnabled('messageTweaks.messageToImage') &&
+            messageElement && isMsgRecord(findMessageRecordFromElement(messageElement))) {
+            items.push(createMessageImageContextMenuConfig(messageElement));
+        }
         return items;
     }
 
@@ -6858,6 +7047,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } else if (isConfigEnabled('interfaceTweaks.activeQrScan') && label === text('识别二维码')) {
             item.classList.add('qqnt-toolbox-qr-scan-menu-item');
             setNativeMenuItemQrIcon(item);
+        } else if (isConfigEnabled('messageTweaks.messageToImage') && label === text('转图')) {
+            item.classList.add('qqnt-toolbox-message-to-image-menu-item');
+            setNativeMenuItemMessageImageIcon(item);
         }
     }
 
@@ -6893,6 +7085,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } catch {
         } finally {
             configReady = true;
+            messageImageController?.sync();
             getMessageContextMenuOrderController().syncConfig();
             syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
@@ -6912,6 +7105,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         bridge.onConfigChanged(config => {
             currentConfig = normalizeRendererConfig(config);
             configReady = true;
+            messageImageController?.sync();
             getMessageContextMenuOrderController().syncConfig();
             syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
@@ -7164,6 +7358,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }, 'warn')
     });
     localStickerController.install();
+    getMessageImageController().install();
 
     loadConfig().then(subscribeConfig).catch(() => {});
     loadUpdateState().then(subscribeUpdateState).catch(() => {});

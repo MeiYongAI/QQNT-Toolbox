@@ -1,9 +1,11 @@
 const EDITOR_ID = 'qqnt-toolbox-message-menu-order-editor';
 const STYLE_ID = 'qqnt-toolbox-message-menu-order-style';
 const SEPARATOR_ID_PREFIX = 'qq:separator:';
+const OBSOLETE_MESSAGE_CONTEXT_MENU_IDS = new Set(['toolbox:multi-message-to-image']);
 
 export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:复制', label: '复制' },
+    { id: 'toolbox:message-to-image', label: '转图', toolbox: true },
     { id: 'qq:转发', label: '转发' },
     { id: 'toolbox:repeat', label: '复读', toolbox: true },
     { id: 'qq:回复', label: '回复' },
@@ -29,7 +31,8 @@ export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
 const TOOLBOX_ITEM_CLASSES = new Set([
     'qqnt-toolbox-repeat-menu-item',
     'qqnt-toolbox-poke-menu-item',
-    'qqnt-toolbox-qr-scan-menu-item'
+    'qqnt-toolbox-qr-scan-menu-item',
+    'qqnt-toolbox-message-to-image-menu-item'
 ]);
 
 function normalizeText(value) {
@@ -104,7 +107,7 @@ export function normalizeContextMenuOrder(values) {
     const result = [];
     for (const value of Array.isArray(values) ? values : []) {
         const id = normalizeText(value);
-        if (id && !seen.has(id)) {
+        if (id && !OBSOLETE_MESSAGE_CONTEXT_MENU_IDS.has(id) && !seen.has(id)) {
             seen.add(id);
             result.push(id);
         }
@@ -488,7 +491,8 @@ export function createMessageContextMenuOrderController(options) {
     function syncConfig() {
         for (const value of Array.isArray(getConfig().catalog) ? getConfig().catalog : []) {
             const item = normalizeCatalogItem(value);
-            if (item && !discoveredItems.has(item.id)) {
+            if (item && !OBSOLETE_MESSAGE_CONTEXT_MENU_IDS.has(item.id) &&
+                !discoveredItems.has(item.id)) {
                 discoveredItems.set(item.id, item);
             }
         }

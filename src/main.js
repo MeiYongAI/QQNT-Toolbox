@@ -108,6 +108,7 @@ const {
 } = require('./media-pip-window');
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
 const { createPluginUpdater } = require('./plugin-updater');
+const { saveMessageImage } = require('./message-image');
 const {
     expandQrScanPathCandidates,
     getOpenableQrUrl,
@@ -134,6 +135,8 @@ const {
     CHANNEL_MEDIA_PIP_DRAG,
     CHANNEL_MEDIA_PIP_STATE_CHANGED,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
+    CHANNEL_LOAD_MESSAGE_IMAGE_RENDERER,
+    CHANNEL_SAVE_MESSAGE_IMAGE,
     CHANNEL_FORWARD_OPEN_INTENT,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
@@ -285,6 +288,8 @@ const DEFAULT_CONFIG = {
     },
     messageTweaks: {
         promptNoSeq: false,
+        messageToImage: false,
+        messageToImageIncludeBackground: false,
         customImageSummaryEnabled: false,
         customImageSummary: '',
         removeReactionLimit: false,
@@ -448,6 +453,7 @@ let diagnosticLogger = null;
 let diagnosticActionRunner = null;
 let pluginUpdater = null;
 let automaticUpdateTimer = null;
+let messageImageRendererScriptPromise = null;
 
 function isDebugEnabled() {
     return process.env.QQNT_TOOLBOX_DEBUG === '1' || configCache?.debug?.enabled === true;
@@ -2484,6 +2490,56 @@ async function runDiagnosticAction(action) {
     return await getDiagnosticActionRunner().run(action);
 }
 
+function getMessageImageRendererScript() {
+    if (!messageImageRendererScriptPromise) {
+        const rendererPath = path.resolve(
+            __dirname,
+            '..',
+            'node_modules',
+            'html2canvas',
+            'dist',
+            'html2canvas.min.js'
+        );
+        messageImageRendererScriptPromise = fs.readFile(rendererPath, 'utf8')
+            .then(source => `(() => {
+                if (typeof globalThis.html2canvas === 'function') {
+                    return true;
+                }
+                return (function(module, exports, define) {
+                    ${source}
+                    return typeof globalThis.html2canvas === 'function';
+                }).call(globalThis, undefined, undefined, undefined);
+            })()`)
+            .catch(error => {
+                messageImageRendererScriptPromise = null;
+                throw error;
+            });
+    }
+    return messageImageRendererScriptPromise;
+}
+
+async function loadMessageImageRenderer(webContents) {
+    if (!webContents || webContents.isDestroyed?.()) {
+        return { ok: false, reason: 'renderer-unavailable', message: '消息转图片窗口不可用' };
+    }
+    try {
+        const loaded = await webContents.executeJavaScript(
+            await getMessageImageRendererScript(),
+            true
+        );
+        return loaded === true
+            ? { ok: true }
+            : { ok: false, reason: 'renderer-missing', message: '消息转图片组件未正确加载' };
+    } catch (error) {
+        recordDiagnostic('error', 'message-image.renderer-load-failed', { error });
+        return {
+            ok: false,
+            reason: 'renderer-load-failed',
+            message: error?.message || '消息转图片组件加载失败'
+        };
+    }
+}
+
 function installConfigIpc() {
     if (globalThis.__qqntToolboxConfigIpcInstalled) {
         return;
@@ -2613,6 +2669,32 @@ function installConfigIpc() {
             recordDiagnostic('error', 'emoji-image.open-failed', { error });
             return false;
         }
+    });
+    ipcMain.handle(CHANNEL_LOAD_MESSAGE_IMAGE_RENDERER, async event => {
+        const result = await loadMessageImageRenderer(event.sender);
+        recordDiagnostic(result.ok ? 'info' : 'warn', 'message-image.renderer-load', {
+            ok: result.ok === true,
+            reason: result.reason || ''
+        });
+        return result;
+    });
+    ipcMain.handle(CHANNEL_SAVE_MESSAGE_IMAGE, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        const result = await saveMessageImage({
+            browserWindow,
+            payload,
+            dialog,
+            fs,
+            app,
+            path
+        });
+        recordDiagnostic(result?.ok || result?.canceled ? 'info' : 'warn', 'message-image.save', {
+            ok: result?.ok === true,
+            canceled: result?.canceled === true,
+            count: Number(result?.count) || 0,
+            reason: result?.reason || ''
+        });
+        return result;
     });
     ipcMain.handle(CHANNEL_REPEAT_MESSAGE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);

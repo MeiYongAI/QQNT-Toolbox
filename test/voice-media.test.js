@@ -24,6 +24,13 @@ test('does not retain unused voice send waiters or delayed Silk cleanup timers',
     assert.match(source, /await fs\.unlink\(silkPath\)\.catch/);
 });
 
+test('uses the built-in FFmpeg resampler without requiring optional libsoxr', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice', 'media.js'), 'utf8');
+
+    assert.match(source, /`aresample=\$\{TARGET_SILK_SAMPLE_RATE\}`/);
+    assert.doesNotMatch(source, /resampler=soxr|precision=28/);
+});
+
 test('estimates Silk duration from complete frames', () => {
     const makeFrame = payload => {
         const size = Buffer.alloc(2);
