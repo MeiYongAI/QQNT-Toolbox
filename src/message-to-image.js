@@ -1,6 +1,8 @@
 const STYLE_ID = 'qqnt-toolbox-message-to-image-style';
 const ROOT_ID = 'qqnt-toolbox-message-to-image-render-root';
+const TOAST_ID = 'qqnt-toolbox-message-image-toast';
 const TOOLBAR_BUTTON_CLASS = 'qqnt-toolbox-message-to-image-toolbar-button';
+const INCLUDE_REACTIONS_CLASS = 'qqnt-toolbox-message-image-include-reactions';
 const MAX_RENDER_MESSAGES = 50;
 const NATIVE_TOOLBAR_LABELS = new Set(['逐条转发', '合并转发', '保存至电脑', '收藏', '删除', '复制']);
 const HTML2CANVAS_COLOR_PROPERTIES = [
@@ -16,6 +18,17 @@ const HTML2CANVAS_COLOR_PROPERTIES = [
 
 function compactText(value) {
     return String(value?.textContent ?? value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+export function getMessageImageToastPresentation(result = {}) {
+    const fileName = String(result.filePath || '').split(/[\\/]/).pop() || '消息图片';
+    if (result.copyError) {
+        return { message: `已保存，但复制失败：${fileName}`, error: true };
+    }
+    return {
+        message: result.copied ? `已保存并复制：${fileName}` : `已保存：${fileName}`,
+        error: false
+    };
 }
 
 function isRenderableElement(value) {
@@ -329,10 +342,47 @@ function ensureStyle(documentRef) {
 #${ROOT_ID} [role="checkbox"],
 #${ROOT_ID} input[type="checkbox"],
 #${ROOT_ID} .plus-one-btn,
-#${ROOT_ID} [class*="qqnt-toolbox" i]:not(.qqnt-toolbox-message-image-row):not(.qqnt-toolbox-message-image-source),
-#${ROOT_ID} [class*="reaction" i],
-#${ROOT_ID} .emoji-like {
+#${ROOT_ID} [class*="qqnt-toolbox" i]:not(.qqnt-toolbox-message-image-row):not(.qqnt-toolbox-message-image-source) {
     display: none !important;
+}
+#${ROOT_ID}:not(.${INCLUDE_REACTIONS_CLASS}) [class*="reaction" i],
+#${ROOT_ID}:not(.${INCLUDE_REACTIONS_CLASS}) .emoji-like {
+    display: none !important;
+}
+#${TOAST_ID} {
+    position: fixed;
+    z-index: 2147483647;
+    top: 68px;
+    left: 50%;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 8px 13px;
+    overflow: hidden;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .2)));
+    border-radius: 6px;
+    color: var(--text-primary, var(--text-01, #1f2329));
+    background: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    box-shadow: var(--shadow-bg-middle-primary, 0 8px 24px rgba(0, 0, 0, .2));
+    font-size: 12px;
+    line-height: 20px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -6px);
+    transition: opacity .14s ease, transform .14s ease;
+}
+#${TOAST_ID}[data-visible="true"] {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+#${TOAST_ID}[data-error="true"] {
+    color: var(--text_error, #e5484d);
+    border-color: color-mix(in srgb, var(--text_error, #e5484d) 48%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+    #${TOAST_ID} {
+        transition: none;
+    }
 }
 `;
     documentRef.head?.append(style);
@@ -394,7 +444,7 @@ function copyDynamicMedia(original, clone, documentRef) {
     });
 }
 
-function sanitizeMessageClone(original, clone, documentRef) {
+function sanitizeMessageClone(original, clone, documentRef, includeReactions = false) {
     copyDynamicMedia(original, clone, documentRef);
     clone.classList.add('qqnt-toolbox-message-image-source');
     for (const element of [clone, ...clone.querySelectorAll('*')]) {
@@ -410,7 +460,7 @@ function sanitizeMessageClone(original, clone, documentRef) {
     clone.removeAttribute('id');
     clone.hidden = false;
     clone.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
-    clone.querySelectorAll([
+    const removableSelectors = [
         '.plus-one-btn',
         '[class*="qqnt-toolbox" i]',
         '[class*="select-mask" i]',
@@ -418,10 +468,12 @@ function sanitizeMessageClone(original, clone, documentRef) {
         '[class*="checkbox" i]',
         '[role="checkbox"]',
         'input[type="checkbox"]',
-        '[class*="reaction" i]',
-        '.emoji-like',
         '.q-context-menu'
-    ].join(',')).forEach(element => element.remove());
+    ];
+    if (!includeReactions) {
+        removableSelectors.push('[class*="reaction" i]', '.emoji-like');
+    }
+    clone.querySelectorAll(removableSelectors.join(',')).forEach(element => element.remove());
     clone.querySelectorAll('button, [role="button"]').forEach(element => {
         const className = String(element.className?.baseVal ?? element.className ?? '').toLowerCase();
         if (compactText(element) === '+1' || /repeat|plus-one/.test(className)) {
@@ -431,17 +483,33 @@ function sanitizeMessageClone(original, clone, documentRef) {
     return clone;
 }
 
-function cloneMessageContent(message, documentRef) {
+function appendDetachedReactionClones(message, content, shell, documentRef) {
+    const reactions = Array.from(message.querySelectorAll('[class*="reaction" i], .emoji-like'))
+        .filter(element => !content.contains(element));
+    for (const reaction of reactions) {
+        if (reactions.some(parent => parent !== reaction && parent.contains(reaction))) {
+            continue;
+        }
+        const clone = reaction.cloneNode(true);
+        copyDynamicMedia(reaction, clone, documentRef);
+        shell.append(clone);
+    }
+}
+
+function cloneMessageContent(message, documentRef, includeReactions = false) {
     const content = getMessageImageContentElement(message);
     if (!content) {
         return null;
     }
     if (content === message) {
-        return sanitizeMessageClone(message, message.cloneNode(true), documentRef);
+        return sanitizeMessageClone(message, message.cloneNode(true), documentRef, includeReactions);
     }
     const shell = message.cloneNode(false);
     shell.append(content.cloneNode(true));
-    return sanitizeMessageClone(content, shell, documentRef);
+    if (includeReactions) {
+        appendDetachedReactionClones(message, content, shell, documentRef);
+    }
+    return sanitizeMessageClone(content, shell, documentRef, includeReactions);
 }
 
 function readCssColor(context, value) {
@@ -675,12 +743,39 @@ function canvasToPngBytes(canvas) {
     });
 }
 
+export function installCanvasTextAlignment(canvas, offsetY = -1) {
+    const context = canvas?.getContext?.('2d');
+    if (!context || !Number.isFinite(offsetY) || offsetY === 0) {
+        return () => {};
+    }
+    const originals = new Map();
+    for (const method of ['fillText', 'strokeText']) {
+        if (typeof context[method] !== 'function') {
+            continue;
+        }
+        const original = context[method];
+        originals.set(method, original);
+        context[method] = function(...args) {
+            args[2] = Number(args[2]) + offsetY;
+            return original.apply(this, args);
+        };
+    }
+    return () => {
+        for (const [method, original] of originals) {
+            context[method] = original;
+        }
+    };
+}
+
 export function createMessageImageController(options = {}) {
     const documentRef = options.document || document;
     const windowRef = options.window || window;
     const isEnabled = typeof options.isEnabled === 'function' ? options.isEnabled : () => true;
     const includeBackground = typeof options.includeBackground === 'function'
         ? options.includeBackground
+        : () => false;
+    const includeReactions = typeof options.includeReactions === 'function'
+        ? options.includeReactions
         : () => false;
     const getMessageElement = typeof options.getMessageElement === 'function' ? options.getMessageElement : value => value;
     const getMessageRecord = typeof options.getMessageRecord === 'function' ? options.getMessageRecord : () => null;
@@ -706,6 +801,30 @@ export function createMessageImageController(options = {}) {
     let busy = false;
     let rendererPromise = null;
     let installTimer = 0;
+    let toastTimer = 0;
+
+    function showToast(message, error = false) {
+        windowRef.clearTimeout(toastTimer);
+        documentRef.getElementById(TOAST_ID)?.remove();
+        const toast = documentRef.createElement('div');
+        toast.id = TOAST_ID;
+        toast.textContent = String(message || '');
+        toast.dataset.error = String(error);
+        toast.setAttribute('role', error ? 'alert' : 'status');
+        toast.setAttribute('aria-live', error ? 'assertive' : 'polite');
+        documentRef.body?.append(toast);
+        const reveal = () => {
+            if (toast.isConnected !== false) {
+                toast.dataset.visible = 'true';
+            }
+        };
+        if (typeof windowRef.requestAnimationFrame === 'function') {
+            windowRef.requestAnimationFrame(reveal);
+        } else {
+            reveal();
+        }
+        toastTimer = windowRef.setTimeout(() => toast.remove(), error ? 3200 : 2200);
+    }
 
     function getRenderer() {
         if (!rendererPromise) {
@@ -780,6 +899,8 @@ export function createMessageImageController(options = {}) {
         const scope = getMessageScope(messages[0]) || documentRef;
         const background = getMessageImageBackground(messages[0], scope, windowRef, documentRef);
         const withBackground = includeBackground();
+        const withReactions = includeReactions();
+        surface.classList.toggle(INCLUDE_REACTIONS_CLASS, withReactions);
         if (withBackground) {
             surface.style.setProperty('background-color', background.color, 'important');
             if (background.image !== 'none') {
@@ -792,7 +913,7 @@ export function createMessageImageController(options = {}) {
         for (const message of messages) {
             const row = documentRef.createElement('div');
             row.className = 'qqnt-toolbox-message-image-row';
-            const content = cloneMessageContent(message, documentRef);
+            const content = cloneMessageContent(message, documentRef, withReactions);
             if (!content) {
                 continue;
             }
@@ -810,29 +931,47 @@ export function createMessageImageController(options = {}) {
             await waitForSurface(surface, windowRef);
             const scale = Math.max(1, Math.min(2, Number(windowRef.devicePixelRatio) || 1));
             const renderDom = await getRenderer();
-            const canvas = await renderDom(surface, {
-                allowTaint: false,
-                backgroundColor: null,
-                logging: false,
-                removeContainer: true,
-                scale,
-                useCORS: true,
-                width: Math.ceil(surface.scrollWidth),
-                height: Math.ceil(surface.scrollHeight),
-                windowWidth: documentRef.documentElement.clientWidth,
-                windowHeight: documentRef.documentElement.clientHeight
-            });
+            const renderWidth = Math.ceil(surface.scrollWidth);
+            const renderHeight = Math.ceil(surface.scrollHeight);
+            const renderCanvas = documentRef.createElement('canvas');
+            renderCanvas.width = Math.floor(renderWidth * scale);
+            renderCanvas.height = Math.floor(renderHeight * scale);
+            renderCanvas.style.width = `${renderWidth}px`;
+            renderCanvas.style.height = `${renderHeight}px`;
+            const restoreTextAlignment = installCanvasTextAlignment(renderCanvas);
+            let canvas;
+            try {
+                canvas = await renderDom(surface, {
+                    allowTaint: false,
+                    backgroundColor: null,
+                    canvas: renderCanvas,
+                    logging: false,
+                    removeContainer: true,
+                    scale,
+                    useCORS: true,
+                    width: renderWidth,
+                    height: renderHeight,
+                    windowWidth: documentRef.documentElement.clientWidth,
+                    windowHeight: documentRef.documentElement.clientHeight
+                });
+            } finally {
+                restoreTextAlignment();
+            }
             const output = cropTransparentCanvas(canvas, { margin: Math.round(scale * 4) });
             const result = await save({
                 data: await canvasToPngBytes(output),
                 count: messages.length
             });
-            if (!result?.ok && !result?.canceled) {
-                throw new Error(result?.message || '保存消息图片失败');
+            if (!result?.ok) {
+                const message = result?.message || '保存消息图片失败';
+                throw new Error(message.startsWith('保存') ? message : `保存失败：${message}`);
             }
+            const toast = getMessageImageToastPresentation(result);
+            showToast(toast.message, toast.error);
             return result;
         } catch (error) {
             onError(error);
+            showToast(error?.message || '保存消息图片失败', true);
             return { ok: false, reason: 'render-failed', message: error?.message || String(error) };
         } finally {
             surface.remove();
@@ -1075,8 +1214,11 @@ export function createMessageImageController(options = {}) {
         clearToolbarVisibility();
         windowRef.clearTimeout(installTimer);
         installTimer = 0;
+        windowRef.clearTimeout(toastTimer);
+        toastTimer = 0;
         documentRef.querySelectorAll(`.${TOOLBAR_BUTTON_CLASS}`).forEach(button => button.remove());
         documentRef.getElementById(ROOT_ID)?.remove();
+        documentRef.getElementById(TOAST_ID)?.remove();
         activeToolbar = null;
     }
 

@@ -1,0 +1,604 @@
+#qqnt-toolbox-message-image-manager {
+    --qmim-surface: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    --qmim-text: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    --qmim-muted: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    --qmim-border: var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
+    --qmim-fill: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .09)));
+    --qmim-hover: var(--overlay_hover, rgba(127, 127, 127, .11));
+    --qmim-accent: var(--brand_standard, var(--brand-primary, #2f6bff));
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    box-sizing: border-box;
+    color: var(--qmim-text);
+    background: rgba(0, 0, 0, .38);
+    font: 13px/1.45 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    letter-spacing: 0;
+    -webkit-app-region: no-drag;
+}
+
+#qqnt-toolbox-message-image-manager *,
+#qqnt-toolbox-message-image-manager *::before,
+#qqnt-toolbox-message-image-manager *::after {
+    box-sizing: border-box;
+    letter-spacing: 0;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-page {
+    position: relative;
+    display: grid;
+    grid-template-rows: 48px minmax(0, 1fr);
+    width: min(760px, calc(100vw - 32px));
+    height: min(540px, calc(100vh - 32px));
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--qmim-border);
+    border-radius: 8px;
+    background: var(--qmim-surface);
+    box-shadow: var(--shadow-bg-middle-primary, 0 14px 42px rgba(0, 0, 0, .24));
+}
+
+#qqnt-toolbox-message-image-manager .qmim-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    gap: 16px;
+    padding: 0 10px 0 18px;
+    border-bottom: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-heading,
+#qqnt-toolbox-message-image-manager .qmim-header-actions,
+#qqnt-toolbox-message-image-manager .qmim-toolbar,
+#qqnt-toolbox-message-image-manager .qmim-toolbar-actions,
+#qqnt-toolbox-message-image-manager .qmim-category-header,
+#qqnt-toolbox-message-image-manager .qmim-footer,
+#qqnt-toolbox-message-image-manager .qmim-preview-header {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-heading {
+    gap: 8px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-total,
+#qqnt-toolbox-message-image-manager .qmim-category-count,
+#qqnt-toolbox-message-image-manager .qmim-card-meta,
+#qqnt-toolbox-message-image-manager .qmim-directory,
+#qqnt-toolbox-message-image-manager .qmim-status,
+#qqnt-toolbox-message-image-manager .qmim-selection-summary {
+    color: var(--qmim-muted);
+    font-size: 12px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-header-actions,
+#qqnt-toolbox-message-image-manager .qmim-toolbar-actions {
+    flex: none;
+    gap: 6px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-close,
+#qqnt-toolbox-message-image-manager .qmim-icon-button,
+#qqnt-toolbox-message-image-manager .qmim-button,
+#qqnt-toolbox-message-image-manager .qmim-quiet-button,
+#qqnt-toolbox-message-image-manager .qmim-primary,
+#qqnt-toolbox-message-image-manager .qmim-category-menu-item {
+    border: 0;
+    color: var(--qmim-text);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-button,
+#qqnt-toolbox-message-image-manager .qmim-primary {
+    height: 30px;
+    padding: 0 11px;
+    border: 1px solid var(--qmim-border);
+    border-radius: 6px;
+    background: var(--qmim-fill);
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-button:hover:not(:disabled),
+#qqnt-toolbox-message-image-manager .qmim-quiet-button:hover:not(:disabled),
+#qqnt-toolbox-message-image-manager .qmim-close:hover,
+#qqnt-toolbox-message-image-manager .qmim-icon-button:hover:not(:disabled),
+#qqnt-toolbox-message-image-manager .qmim-category-menu-item:hover {
+    background: var(--qmim-hover);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-close,
+#qqnt-toolbox-message-image-manager .qmim-icon-button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border-radius: 6px;
+    color: var(--qmim-muted);
+    font: 21px/1 sans-serif;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-icon-button {
+    width: 28px;
+    height: 28px;
+    color: var(--qmim-text);
+    font-size: 19px;
+}
+
+#qqnt-toolbox-message-image-manager button:disabled {
+    cursor: default;
+    opacity: .46;
+}
+
+#qqnt-toolbox-message-image-manager button:focus-visible,
+#qqnt-toolbox-message-image-manager input:focus-visible,
+#qqnt-toolbox-message-image-manager .qmim-card:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--qmim-accent) 48%, transparent);
+    outline-offset: 1px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-body {
+    display: grid;
+    grid-template-columns: 158px minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-sidebar {
+    display: grid;
+    grid-template-rows: 44px minmax(0, 1fr) auto;
+    min-width: 0;
+    min-height: 0;
+    border-right: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-header {
+    justify-content: space-between;
+    padding: 0 10px 0 14px;
+    border-bottom: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-sidebar-title {
+    font-weight: 600;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-list {
+    min-height: 0;
+    padding: 7px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    width: 100%;
+    height: 34px;
+    gap: 8px;
+    padding: 0 9px;
+    border: 0;
+    border-radius: 5px;
+    color: var(--qmim-text);
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-row:hover {
+    background: var(--qmim-hover);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-row[data-active="true"] {
+    color: var(--qmim-accent);
+    background: color-mix(in srgb, var(--qmim-accent) 11%, transparent);
+    font-weight: 600;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px;
+    padding: 7px;
+    border-top: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-quiet-button {
+    height: 27px;
+    border-radius: 5px;
+    color: var(--qmim-muted);
+    font-size: 12px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-danger-text {
+    color: var(--text_error, #e5484d);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-main {
+    display: grid;
+    grid-template-rows: 44px minmax(0, 1fr) 34px;
+    min-width: 0;
+    min-height: 0;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-toolbar {
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-selection-summary {
+    min-width: 76px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-action {
+    position: relative;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-menu {
+    position: absolute;
+    z-index: 4;
+    top: 35px;
+    right: 0;
+    width: 150px;
+    max-height: 240px;
+    padding: 5px;
+    overflow-y: auto;
+    border: 1px solid var(--qmim-border);
+    border-radius: 6px;
+    background: var(--qmim-surface);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+    scrollbar-width: thin;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-menu[hidden] {
+    display: none;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-category-menu-item {
+    display: block;
+    width: 100%;
+    height: 31px;
+    padding: 0 9px;
+    overflow: hidden;
+    border-radius: 4px;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+    align-content: start;
+    min-width: 0;
+    min-height: 0;
+    gap: 10px;
+    padding: 12px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-grid[data-busy="true"] {
+    pointer-events: none;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card {
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--qmim-border);
+    border-radius: 6px;
+    background: var(--qmim-surface);
+    cursor: default;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card:hover {
+    border-color: color-mix(in srgb, var(--qmim-text) 28%, transparent);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card[data-selected="true"] {
+    border-color: var(--qmim-accent);
+    box-shadow: 0 0 0 1px var(--qmim-accent);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card[data-dragging="true"] {
+    opacity: .2;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-image-frame {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    background: var(--qmim-fill);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-thumbnail {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-thumbnail-failed {
+    color: var(--qmim-muted);
+    font-size: 12px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-checkbox {
+    position: absolute;
+    top: 7px;
+    left: 7px;
+    width: 17px;
+    height: 17px;
+    margin: 0;
+    accent-color: var(--qmim-accent);
+    cursor: pointer;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-drag-handle {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    width: 28px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--qmim-surface) 84%, transparent);
+    cursor: grab;
+    touch-action: none;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-drag-handle::before {
+    content: "";
+    position: absolute;
+    inset: 7px 8px;
+    opacity: .7;
+    background: radial-gradient(circle, var(--qmim-muted) 1.4px, transparent 1.6px) 0 0 / 6px 6px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-drag-handle:hover {
+    background: var(--qmim-surface);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card-details {
+    min-width: 0;
+    padding: 8px 9px 9px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card-name,
+#qqnt-toolbox-message-image-manager .qmim-card-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card-name {
+    margin-bottom: 2px;
+    font-size: 12.5px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-card-meta {
+    font-size: 11px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-empty {
+    grid-column: 1 / -1;
+    align-self: center;
+    justify-self: center;
+    padding: 36px 16px;
+    color: var(--qmim-muted);
+    text-align: center;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-footer {
+    justify-content: space-between;
+    gap: 16px;
+    min-width: 0;
+    padding: 0 12px;
+    border-top: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-directory {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-status {
+    flex: none;
+    max-width: 45%;
+    overflow: hidden;
+    color: var(--qmim-muted);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-status[data-result="success"] {
+    color: var(--qmim-accent);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-status[data-result="error"] {
+    color: var(--text_error, #e5484d);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview,
+#qqnt-toolbox-message-image-manager .qmim-dialog-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 8;
+    background: var(--qmim-surface);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview[hidden],
+#qqnt-toolbox-message-image-manager .qmim-dialog-layer[hidden] {
+    display: none;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview {
+    display: grid;
+    grid-template-rows: 48px minmax(0, 1fr);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview-header {
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 10px 0 18px;
+    border-bottom: 1px solid var(--qmim-border);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview-name {
+    min-width: 0;
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview-stage {
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    min-height: 0;
+    padding: 18px;
+    overflow: hidden;
+    background: var(--qmim-fill);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-preview-image {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-dialog-layer {
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, .34);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-dialog {
+    display: grid;
+    width: min(360px, 100%);
+    gap: 13px;
+    padding: 18px;
+    border: 1px solid var(--qmim-border);
+    border-radius: 8px;
+    background: var(--qmim-surface);
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .22);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-dialog-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-dialog-message {
+    color: var(--qmim-muted);
+    overflow-wrap: anywhere;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-dialog-input {
+    width: 100%;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid var(--qmim-border);
+    border-radius: 6px;
+    outline: 0;
+    color: var(--qmim-text);
+    background: var(--qmim-fill);
+    font: inherit;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 7px;
+}
+
+#qqnt-toolbox-message-image-manager .qmim-primary {
+    border-color: var(--qmim-accent);
+    color: var(--on_brand_primary, #fff);
+    background: var(--qmim-accent);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-primary[data-danger="true"] {
+    border-color: var(--text_error, #e5484d);
+    background: var(--text_error, #e5484d);
+}
+
+#qqnt-toolbox-message-image-manager .qmim-drag-ghost {
+    position: fixed;
+    z-index: 20;
+    margin: 0;
+    pointer-events: none;
+    opacity: .92;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, .24);
+}
+
+@media (max-width: 650px) {
+    #qqnt-toolbox-message-image-manager .qmim-body {
+        grid-template-columns: 136px minmax(0, 1fr);
+    }
+
+    #qqnt-toolbox-message-image-manager .qmim-grid {
+        grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+        gap: 8px;
+        padding: 10px;
+    }
+
+    #qqnt-toolbox-message-image-manager .qmim-toolbar-actions {
+        gap: 3px;
+    }
+
+    #qqnt-toolbox-message-image-manager .qmim-toolbar .qmim-button {
+        padding: 0 8px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #qqnt-toolbox-message-image-manager * {
+        scroll-behavior: auto !important;
+    }
+}

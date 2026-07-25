@@ -108,7 +108,12 @@ const {
 } = require('./media-pip-window');
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
 const { createFetchUpdateTransport, createPluginUpdater } = require('./plugin-updater');
-const { saveMessageImage } = require('./message-image');
+const {
+    DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
+    normalizeMessageImageSettings,
+    saveMessageImage
+} = require('./message-image');
+const { createMessageImageLibrary } = require('./message-image-library');
 const {
     expandQrScanPathCandidates,
     getOpenableQrUrl,
@@ -136,7 +141,10 @@ const {
     CHANNEL_MEDIA_PIP_STATE_CHANGED,
     CHANNEL_OPEN_EMOJI_AS_IMAGE,
     CHANNEL_LOAD_MESSAGE_IMAGE_RENDERER,
+    CHANNEL_CHOOSE_MESSAGE_IMAGE_DIRECTORY,
     CHANNEL_SAVE_MESSAGE_IMAGE,
+    CHANNEL_GET_MESSAGE_IMAGE_LIBRARY,
+    CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION,
     CHANNEL_FORWARD_OPEN_INTENT,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
@@ -290,6 +298,10 @@ const DEFAULT_CONFIG = {
         promptNoSeq: false,
         messageToImage: false,
         messageToImageIncludeBackground: false,
+        messageToImageDirectory: '',
+        messageToImageFileNamePattern: DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
+        messageToImageAutoCopy: false,
+        messageToImageIncludeReactions: false,
         customImageSummaryEnabled: false,
         customImageSummary: '',
         removeReactionLimit: false,
@@ -455,6 +467,7 @@ let pluginUpdater = null;
 let pluginUpdaterNetworkSessionPromise = null;
 let automaticUpdateTimer = null;
 let messageImageRendererScriptPromise = null;
+let messageImageLibrary = null;
 
 function isDebugEnabled() {
     return process.env.QQNT_TOOLBOX_DEBUG === '1' || configCache?.debug?.enabled === true;
@@ -548,6 +561,10 @@ function getPluginDataDir() {
 
 function getDefaultLocalStickerDirectory() {
     return path.join(getPluginDataDir(), 'stickers');
+}
+
+function getDefaultMessageImageDirectory() {
+    return path.join(getPluginDataDir(), 'message-images');
 }
 
 function ensureDefaultLocalStickerDirectorySync(config) {
@@ -904,6 +921,83 @@ function normalizeMediaPipBounds(value) {
     };
 }
 
+function getConfiguredMessageImageSettings(messageTweaks = {}) {
+    return normalizeMessageImageSettings({
+        directory: messageTweaks.messageToImageDirectory,
+        fileNamePattern: messageTweaks.messageToImageFileNamePattern,
+        autoCopy: messageTweaks.messageToImageAutoCopy
+    }, path);
+}
+
+function getMessageImageSettings(messageTweaks = {}) {
+    const settings = getConfiguredMessageImageSettings(messageTweaks);
+    return {
+        ...settings,
+        directory: settings.directory || getDefaultMessageImageDirectory()
+    };
+}
+
+function getMessageImageLibrary() {
+    if (!messageImageLibrary) {
+        messageImageLibrary = createMessageImageLibrary({
+            metadataPath: path.join(getPluginDataDir(), 'message-image-library.json'),
+            copyImage: async filePath => {
+                const image = nativeImage.createFromBuffer(await fs.readFile(filePath));
+                if (!image || image.isEmpty()) {
+                    throw new Error('image-invalid');
+                }
+                clipboard.writeImage(image);
+            },
+            revealImage: async (directory, filePath) => {
+                if (filePath) {
+                    shell.showItemInFolder(filePath);
+                    return;
+                }
+                const error = await shell.openPath(directory);
+                if (error) {
+                    throw new Error(error);
+                }
+            }
+        });
+    }
+    return messageImageLibrary;
+}
+
+async function getMessageImageLibraryState() {
+    try {
+        const settings = getMessageImageSettings(getConfig().messageTweaks);
+        return await getMessageImageLibrary().getState(settings.directory);
+    } catch (error) {
+        recordDiagnostic('warn', 'message-image.library-load-failed', { error });
+        return {
+            ok: false,
+            reason: 'library-load-failed',
+            message: error?.message || '消息图片读取失败'
+        };
+    }
+}
+
+async function runMessageImageLibraryAction(request) {
+    const type = normalizeText(request?.type);
+    try {
+        const settings = getMessageImageSettings(getConfig().messageTweaks);
+        const result = await getMessageImageLibrary().action(settings.directory, request);
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'message-image.library-action', {
+            type,
+            ok: result?.ok === true,
+            reason: result?.reason || ''
+        });
+        return result;
+    } catch (error) {
+        recordDiagnostic('warn', 'message-image.library-action-failed', { type, error });
+        return {
+            ok: false,
+            reason: 'library-action-failed',
+            message: error?.message || '消息图片操作失败'
+        };
+    }
+}
+
 function normalizeSimplifyConfig(config) {
     if (!INLINE_MEDIA_BACKGROUND_VALUES.has(config.interfaceTweaks?.inlineMediaBackground)) {
         config.interfaceTweaks.inlineMediaBackground = DEFAULT_CONFIG.interfaceTweaks.inlineMediaBackground;
@@ -919,6 +1013,12 @@ function normalizeSimplifyConfig(config) {
     config.entertainment.autoReaction = normalizeAutoReactionConfig(
         config.entertainment.autoReaction
     );
+    const messageImageSettings = getConfiguredMessageImageSettings(config.messageTweaks);
+    config.messageTweaks.messageToImageDirectory = messageImageSettings.directory;
+    config.messageTweaks.messageToImageFileNamePattern = messageImageSettings.fileNamePattern;
+    config.messageTweaks.messageToImageAutoCopy = messageImageSettings.autoCopy;
+    config.messageTweaks.messageToImageIncludeReactions =
+        config.messageTweaks.messageToImageIncludeReactions === true;
     config.localStickers = normalizeLocalStickerConfig(config.localStickers, {
         defaultPath: getDefaultLocalStickerDirectory()
     });
@@ -2209,6 +2309,20 @@ async function chooseLocalStickerDirectory(browserWindow) {
         : { ok: true, path: directory };
 }
 
+async function chooseMessageImageDirectory(browserWindow) {
+    const settings = getMessageImageSettings(getConfig().messageTweaks);
+    await fs.mkdir(settings.directory, { recursive: true });
+    const result = await dialog.showOpenDialog(browserWindow || undefined, {
+        title: '选择消息图片保存目录',
+        defaultPath: settings.directory,
+        properties: ['openDirectory', 'dontAddToRecent']
+    });
+    const directory = normalizePathText(result.filePaths?.[0]);
+    return result.canceled || !directory
+        ? { ok: false, canceled: true, path: '' }
+        : { ok: true, path: directory };
+}
+
 async function openLocalStickerDirectory() {
     const config = normalizeLocalStickerConfig(getConfig().localStickers);
     if (!config.path) {
@@ -2719,24 +2833,34 @@ function installConfigIpc() {
         });
         return result;
     });
-    ipcMain.handle(CHANNEL_SAVE_MESSAGE_IMAGE, async (event, payload) => {
-        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+    ipcMain.handle(CHANNEL_CHOOSE_MESSAGE_IMAGE_DIRECTORY, event =>
+        chooseMessageImageDirectory(BrowserWindow.fromWebContents(event.sender))
+    );
+    ipcMain.handle(CHANNEL_SAVE_MESSAGE_IMAGE, async (_event, payload) => {
         const result = await saveMessageImage({
-            browserWindow,
             payload,
-            dialog,
+            settings: getMessageImageSettings(getConfig().messageTweaks),
             fs,
             app,
-            path
+            path,
+            clipboard,
+            nativeImage
         });
-        recordDiagnostic(result?.ok || result?.canceled ? 'info' : 'warn', 'message-image.save', {
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'message-image.save', {
             ok: result?.ok === true,
-            canceled: result?.canceled === true,
             count: Number(result?.count) || 0,
+            copied: result?.copied === true,
+            copyError: result?.copyError || '',
             reason: result?.reason || ''
         });
         return result;
     });
+    ipcMain.handle(CHANNEL_GET_MESSAGE_IMAGE_LIBRARY, () =>
+        getMessageImageLibraryState()
+    );
+    ipcMain.handle(CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION, (_event, request) =>
+        runMessageImageLibraryAction(request)
+    );
     ipcMain.handle(CHANNEL_REPEAT_MESSAGE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         if (!browserWindow) {

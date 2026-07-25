@@ -16,6 +16,7 @@ import { createAutoReactionEditor } from './auto-reaction-editor.js';
 import { createLocalStickerController } from './local-sticker-panel.js';
 import { createLocalStickerManager } from './local-sticker-manager.js';
 import { createMessageImageController } from './message-to-image.js';
+import { createMessageImageManager } from './message-image-manager.js';
 import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
@@ -74,6 +75,7 @@ let handleToolboxVueComponentMount = () => {};
     const TOOLBOX_MENU_TYPE_REPEAT = 990101;
     const TOOLBOX_MENU_TYPE_QR_SCAN = 990102;
     const TOOLBOX_MENU_TYPE_MESSAGE_TO_IMAGE = 990103;
+    const DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN = 'QQ消息-{yyyy}{MM}{dd}-{HH}{mm}{ss}';
     const RECALL_MARKER_STYLE_VALUES = new Set(['badge', 'outline']);
     const RECALL_FILTER_MODE_VALUES = new Set(['all', 'blacklist', 'whitelist']);
     const MAX_AUTO_REACTION_EMOJIS = 64;
@@ -156,6 +158,10 @@ let handleToolboxVueComponentMount = () => {};
             promptNoSeq: false,
             messageToImage: false,
             messageToImageIncludeBackground: false,
+            messageToImageDirectory: '',
+            messageToImageFileNamePattern: DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
+            messageToImageAutoCopy: false,
+            messageToImageIncludeReactions: false,
             customImageSummaryEnabled: false,
             customImageSummary: '',
             removeReactionLimit: false,
@@ -254,6 +260,7 @@ let handleToolboxVueComponentMount = () => {};
     let autoReactionEditor = null;
     let localStickerController = null;
     let localStickerManager = null;
+    let messageImageManager = null;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let unreadCountObserver = null;
@@ -352,6 +359,12 @@ let handleToolboxVueComponentMount = () => {};
 
     function normalizeRendererConfig(value) {
         const config = mergeConfig(value);
+        config.messageTweaks.messageToImageDirectory = String(
+            config.messageTweaks.messageToImageDirectory || ''
+        ).trim().slice(0, 1024);
+        config.messageTweaks.messageToImageFileNamePattern = String(
+            config.messageTweaks.messageToImageFileNamePattern || ''
+        ).trim().slice(0, 128) || DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN;
         if (!RECALL_MARKER_STYLE_VALUES.has(config.preventRecall.markerStyle)) {
             config.preventRecall.markerStyle = DEFAULT_CONFIG.preventRecall.markerStyle;
         }
@@ -730,6 +743,16 @@ let handleToolboxVueComponentMount = () => {};
             });
         }
         return localStickerManager;
+    }
+
+    function getMessageImageManager() {
+        if (!messageImageManager) {
+            messageImageManager = createMessageImageManager({
+                getState: () => getBridge()?.getMessageImageLibrary?.(),
+                action: request => getBridge()?.runMessageImageLibraryAction?.(request)
+            });
+        }
+        return messageImageManager;
     }
 
     function syncReactionLimitFeature() {
@@ -1905,6 +1928,34 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function createMessageImageDirectoryItem() {
+        const item = createActionItem(
+            text('保存位置'),
+            text('data\\qqnt_toolbox\\message-images'),
+            'chooseMessageImageDirectory',
+            {
+                label: text('选择'),
+                requires: 'messageTweaks.messageToImage',
+                child: true
+            }
+        );
+        item.dataset.messageImageDirectorySummary = 'true';
+        return item;
+    }
+
+    function createMessageImageManagerItem() {
+        return createActionItem(
+            text('消息图片管理'),
+            text('分类、排序与管理已保存图片'),
+            'manageMessageImages',
+            {
+                label: text('管理'),
+                requires: 'messageTweaks.messageToImage',
+                child: true
+            }
+        );
+    }
+
     function createColorPairItem(name, meta, lightPath, darkPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.colorItem = 'true';
@@ -2158,10 +2209,40 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     text('右键转换单条消息，QQ 原生多选可批量转换'),
                     'messageTweaks.messageToImage'
                 ),
+                createMessageImageManagerItem(),
+                createMessageImageDirectoryItem(),
+                createTextItem(
+                    text('命名格式'),
+                    text('支持 {yyyy} {MM} {dd} {HH} {mm} {ss} {count}'),
+                    'messageTweaks.messageToImageFileNamePattern',
+                    {
+                        requires: 'messageTweaks.messageToImage',
+                        child: true,
+                        maxLength: 128
+                    }
+                ),
+                createSwitchItem(
+                    text('自动复制到剪贴板'),
+                    text('保存成功后复制生成的图片'),
+                    'messageTweaks.messageToImageAutoCopy',
+                    {
+                        requires: 'messageTweaks.messageToImage',
+                        child: true
+                    }
+                ),
                 createSwitchItem(
                     text('包含聊天背景'),
                     text('导出时保留当前会话背景'),
                     'messageTweaks.messageToImageIncludeBackground',
+                    {
+                        requires: 'messageTweaks.messageToImage',
+                        child: true
+                    }
+                ),
+                createSwitchItem(
+                    text('包含表情回应'),
+                    text('导出时保留消息下方的表情回应'),
+                    'messageTweaks.messageToImageIncludeReactions',
                     {
                         requires: 'messageTweaks.messageToImage',
                         child: true
@@ -2594,6 +2675,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 meta.title = filePath;
             }
         });
+        panel.querySelectorAll('.qqnt-toolbox-item[data-message-image-directory-summary="true"]').forEach(item => {
+            const directory = String(currentConfig.messageTweaks.messageToImageDirectory || '').trim();
+            const meta = item.querySelector('.qqnt-toolbox-item-meta');
+            if (meta) {
+                meta.textContent = directory
+                    ? summarizeLocalStickerPath(directory)
+                    : text('data\\qqnt_toolbox\\message-images');
+                meta.title = directory;
+            }
+        });
         updatePluginUpdaterUi(panel);
         updateGroupUi(panel);
     }
@@ -2858,6 +2949,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             getLocalStickerManager().open('packs', button);
             return;
         }
+        if (action === 'manageMessageImages') {
+            getMessageImageManager().open(button);
+            return;
+        }
         showPanelActionFeedback(button, text('处理中'), 'pending', 0);
         try {
             let result = null;
@@ -2882,6 +2977,14 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 getRecallFilterEditor().open(button);
             } else if (action === 'editMessageContextMenuOrder') {
                 getMessageContextMenuOrderController().openEditor();
+            } else if (action === 'chooseMessageImageDirectory') {
+                if (typeof bridge?.chooseMessageImageDirectory !== 'function') {
+                    throw new Error('The message image directory bridge is unavailable.');
+                }
+                result = await bridge.chooseMessageImageDirectory();
+                if (result?.ok && result.path) {
+                    await setConfigValue('messageTweaks.messageToImageDirectory', result.path);
+                }
             } else if (action === 'copyDiagnosticReport') {
                 result = await bridge?.runDiagnosticAction?.('copy-report');
             } else if (action === 'exportDiagnosticReport') {
@@ -2914,6 +3017,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             } else {
                 throw new Error('Unknown panel action.');
             }
+            if (result?.canceled) {
+                showPanelActionFeedback(button, button?.dataset.defaultLabel || text('选择'));
+                return;
+            }
             if (result?.ok === false) {
                 throw new Error(result.reason || 'The action failed.');
             }
@@ -2923,6 +3030,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 openDiagnosticDir: text('已打开'),
                 clearDiagnosticLog: text('已清空'),
                 clearRecallCache: text('已清理'),
+                chooseMessageImageDirectory: text('已选择'),
                 checkPluginUpdate: result?.status === 'available' ? text('有更新') : text('已检查'),
                 preparePluginUpdate: result?.status === 'restarting' ? text('正在重启') : text('已下载')
             };
@@ -6172,6 +6280,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             messageImageController = createMessageImageController({
                 isEnabled: () => isConfigEnabled('messageTweaks.messageToImage'),
                 includeBackground: () => isConfigEnabled('messageTweaks.messageToImageIncludeBackground'),
+                includeReactions: () => isConfigEnabled('messageTweaks.messageToImageIncludeReactions'),
                 getMessageElement: getMessageElementFromElement,
                 getMessageRecord: findMessageRecordFromElement,
                 getRecordKey: getMessageImageRecordKey,
@@ -6201,10 +6310,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     const result = await bridge.saveMessageImage(payload);
                     recordRendererDiagnostic('message-image.completed', {
                         ok: result?.ok === true,
-                        canceled: result?.canceled === true,
                         count: Number(payload?.count) || 0,
+                        copied: result?.copied === true,
                         reason: result?.reason || ''
-                    }, result?.ok || result?.canceled ? 'info' : 'warn');
+                    }, result?.ok ? 'info' : 'warn');
                     return result;
                 },
                 onDiagnostic: (event, details) => recordRendererDiagnostic(event, details, 'info'),

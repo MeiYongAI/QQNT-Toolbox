@@ -24,6 +24,28 @@ test('sorts messages by their current visual position without duplicates', async
     );
 });
 
+test('formats one concise save toast from the actual output filename', async () => {
+    const { getMessageImageToastPresentation } = await modulePromise;
+    assert.deepEqual(
+        getMessageImageToastPresentation({ filePath: 'D:\\Exports\\消息 (2).png' }),
+        { message: '已保存：消息 (2).png', error: false }
+    );
+    assert.deepEqual(
+        getMessageImageToastPresentation({
+            filePath: '/tmp/消息.png',
+            copied: true
+        }),
+        { message: '已保存并复制：消息.png', error: false }
+    );
+    assert.deepEqual(
+        getMessageImageToastPresentation({
+            filePath: '/tmp/消息.png',
+            copyError: 'clipboard busy'
+        }),
+        { message: '已保存，但复制失败：消息.png', error: true }
+    );
+});
+
 test('renders the message container instead of its time and selection wrapper', async () => {
     const { getMessageImageContentElement } = await modulePromise;
     const content = { id: 'content' };
@@ -155,6 +177,29 @@ test('crops transparent outer pixels from the rendered message image', async () 
     assert.deepEqual(drawArgs.slice(1), [1, 1, 3, 2, 0, 0, 3, 2]);
 });
 
+test('aligns canvas text without moving message containers or media', async () => {
+    const { installCanvasTextAlignment } = await modulePromise;
+    const calls = [];
+    const originalFillText = (...args) => calls.push(['fill', ...args]);
+    const originalStrokeText = (...args) => calls.push(['stroke', ...args]);
+    const context = {
+        fillText: originalFillText,
+        strokeText: originalStrokeText
+    };
+    const restore = installCanvasTextAlignment({ getContext: () => context }, -1);
+
+    context.fillText('文字', 20, 30);
+    context.strokeText('描边', 40, 50, 120);
+    assert.deepEqual(calls, [
+        ['fill', '文字', 20, 29],
+        ['stroke', '描边', 40, 49, 120]
+    ]);
+
+    restore();
+    assert.equal(context.fillText, originalFillText);
+    assert.equal(context.strokeText, originalStrokeText);
+});
+
 test('recognizes QQ native checked markers without relying on the gray row overlay', async () => {
     const { isNativeSelectionMarkerChecked } = await modulePromise;
     const emptyAttributes = { getAttribute: () => null, className: '', querySelectorAll: () => [] };
@@ -243,6 +288,9 @@ test('renders cleaned DOM clones and has no custom multi-select overlay or windo
     assert.match(source, /backgroundColor:\s*null/);
     assert.match(source, /\.plus-one-btn/);
     assert.match(source, /\[class\*="reaction" i\]/);
+    assert.match(source, /includeReactions/);
+    assert.match(source, /:not\(\.\$\{INCLUDE_REACTIONS_CLASS\}\)/);
+    assert.match(source, /if \(!includeReactions\)/);
     assert.match(source, /findNativeMultiSelectToolbar/);
     assert.match(source, /qqnt-toolbox-message-to-image-toolbar-button/);
     assert.match(source, /\.message-container\s*\{[\s\S]*?background-color:\s*transparent\s*!important/);
@@ -261,5 +309,7 @@ test('renders cleaned DOM clones and has no custom multi-select overlay or windo
     assert.match(source, /message\.cloneNode\(false\)/);
     assert.doesNotMatch(source, /capturePage|startSelection|closeSelection/);
     assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB/);
+    assert.match(source, /documentRef\.getElementById\(TOAST_ID\)\?\.remove\(\)/);
+    assert.match(source, /error \? 3200 : 2200/);
     assert.equal((source.match(/collectMessages\(scope\)/g) || []).length, 1);
 });

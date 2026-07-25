@@ -10,7 +10,10 @@ const CHANNEL_SCAN_QR_CODE = 'qqnt-toolbox:scan-qr-code';
 const CHANNEL_QR_RESULT_ACTION = 'qqnt-toolbox:qr-result-action';
 const CHANNEL_OPEN_EMOJI_AS_IMAGE = 'qqnt-toolbox:open-emoji-as-image';
 const CHANNEL_LOAD_MESSAGE_IMAGE_RENDERER = 'qqnt-toolbox:load-message-image-renderer';
+const CHANNEL_CHOOSE_MESSAGE_IMAGE_DIRECTORY = 'qqnt-toolbox:choose-message-image-directory';
 const CHANNEL_SAVE_MESSAGE_IMAGE = 'qqnt-toolbox:save-message-image';
+const CHANNEL_GET_MESSAGE_IMAGE_LIBRARY = 'qqnt-toolbox:get-message-image-library';
+const CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION = 'qqnt-toolbox:message-image-library-action';
 const CHANNEL_FORWARD_OPEN_INTENT = 'qqnt-toolbox:forward-open-intent';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
@@ -91,7 +94,11 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     qrResultAction: payload => ipcRenderer.invoke(CHANNEL_QR_RESULT_ACTION, payload),
     openEmojiAsImage: payload => ipcRenderer.invoke(CHANNEL_OPEN_EMOJI_AS_IMAGE, payload),
     loadMessageImageRenderer: () => ipcRenderer.invoke(CHANNEL_LOAD_MESSAGE_IMAGE_RENDERER),
+    chooseMessageImageDirectory: () => ipcRenderer.invoke(CHANNEL_CHOOSE_MESSAGE_IMAGE_DIRECTORY),
     saveMessageImage: payload => ipcRenderer.invoke(CHANNEL_SAVE_MESSAGE_IMAGE, payload),
+    getMessageImageLibrary: () => ipcRenderer.invoke(CHANNEL_GET_MESSAGE_IMAGE_LIBRARY),
+    runMessageImageLibraryAction: payload =>
+        ipcRenderer.invoke(CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION, payload),
     onConfigChanged: callback => {
         const listener = (_event, config) => callback(config);
         ipcRenderer.on(CHANNEL_CONFIG_CHANGED, listener);
