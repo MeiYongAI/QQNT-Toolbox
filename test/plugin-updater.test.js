@@ -13,11 +13,48 @@ const {
 } = require('@zip.js/zip.js');
 const {
     compareVersions,
+    createFetchUpdateTransport,
     createPluginUpdater,
     extractPluginArchive,
     normalizeArchiveEntryName,
     normalizeUpdateManifest
 } = require('../src/plugin-updater');
+
+function makeFetchResponse(status, body = '', headers = {}) {
+    const bytes = Buffer.from(body);
+    const normalizedHeaders = new Map(
+        Object.entries(headers).map(([name, value]) => [name.toLowerCase(), String(value)])
+    );
+    return {
+        status,
+        headers: {
+            get: name => normalizedHeaders.get(String(name).toLowerCase()) || null,
+            entries: () => normalizedHeaders.entries()
+        },
+        body: {
+            getReader() {
+                let consumed = false;
+                return {
+                    async read() {
+                        if (consumed) {
+                            return { done: true, value: undefined };
+                        }
+                        consumed = true;
+                        return { done: false, value: bytes };
+                    },
+                    async cancel() {
+                        consumed = true;
+                    },
+                    releaseLock() {}
+                };
+            },
+            async cancel() {}
+        },
+        async arrayBuffer() {
+            return bytes;
+        }
+    };
+}
 
 async function withTemporaryDirectory(callback) {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qqnt-toolbox-updater-'));
@@ -67,6 +104,68 @@ test('rejects traversal and foreign roots in update archives', () => {
     assert.throws(() => normalizeArchiveEntryName('Other-Plugin/manifest.json'), {
         reason: 'invalid-archive-root'
     });
+});
+
+test('uses a bounded fetch transport for secure manifest and asset requests', async () => {
+    await withTemporaryDirectory(async directory => {
+        const release = makeRelease('0.8.0');
+        const calls = [];
+        const transport = createFetchUpdateTransport(async (url, options) => {
+            calls.push({ url, options });
+            if (url === 'https://updates.example/latest') {
+                return makeFetchResponse(302, '', {
+                    location: '/manifest.json'
+                });
+            }
+            if (url === 'https://updates.example/manifest.json') {
+                return makeFetchResponse(200, JSON.stringify(release), {
+                    etag: 'fetch-etag'
+                });
+            }
+            if (url === release.asset.url) {
+                return makeFetchResponse(200, 'release-asset', {
+                    'content-length': release.asset.size
+                });
+            }
+            throw new Error(`Unexpected URL: ${url}`);
+        });
+
+        const manifestResult = await transport.requestUpdateManifest({
+            manifestUrl: 'https://updates.example/latest'
+        });
+        assert.equal(manifestResult.etag, 'fetch-etag');
+        assert.deepEqual(manifestResult.manifest, release);
+
+        const destination = path.join(directory, release.asset.name);
+        const download = await transport.downloadReleaseAsset({
+            url: release.asset.url,
+            destination
+        });
+        assert.equal(download.size, release.asset.size);
+        assert.equal(download.sha256, release.asset.sha256);
+        assert.equal(await fs.readFile(destination, 'utf8'), 'release-asset');
+        assert.equal(calls.length, 3);
+        assert.ok(calls.every(call => call.options.redirect === 'manual'));
+        assert.ok(calls.every(call => call.options.bypassCustomProtocolHandlers === true));
+    });
+});
+
+test('fetch update transport rejects insecure redirects and oversized responses', async () => {
+    const insecure = createFetchUpdateTransport(async () => makeFetchResponse(302, '', {
+        location: 'http://updates.example/manifest.json'
+    }));
+    await assert.rejects(
+        insecure.requestUpdateManifest({ manifestUrl: 'https://updates.example/latest' }),
+        { reason: 'insecure-url' }
+    );
+
+    const oversized = createFetchUpdateTransport(async () => makeFetchResponse(200, '', {
+        'content-length': 2 * 1024 * 1024 + 1
+    }));
+    await assert.rejects(
+        oversized.requestUpdateManifest({ manifestUrl: 'https://updates.example/latest' }),
+        { reason: 'response-too-large' }
+    );
 });
 
 test('extracts a complete package only when its plugin identity matches', async () => {

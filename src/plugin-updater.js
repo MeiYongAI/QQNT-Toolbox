@@ -155,7 +155,136 @@ function requestBuffer(url, options = {}, redirectCount = 0) {
     });
 }
 
-async function requestUpdateManifest({ manifestUrl = DEFAULT_UPDATE_MANIFEST_URL, etag = '' } = {}) {
+function getFetchHeader(response, name) {
+    const headers = response?.headers;
+    if (typeof headers?.get === 'function') {
+        return String(headers.get(name) || '');
+    }
+    const normalizedName = String(name || '').toLowerCase();
+    const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === normalizedName);
+    return String(entry?.[1] || '');
+}
+
+function normalizeFetchHeaders(response) {
+    const headers = {};
+    if (typeof response?.headers?.entries === 'function') {
+        for (const [name, value] of response.headers.entries()) {
+            headers[String(name).toLowerCase()] = String(value);
+        }
+    }
+    for (const name of ['etag', 'location', 'content-length']) {
+        const value = getFetchHeader(response, name);
+        if (value) {
+            headers[name] = value;
+        }
+    }
+    return headers;
+}
+
+async function readFetchBody(response, maxBytes, controller) {
+    const declaredSize = Number(getFetchHeader(response, 'content-length'));
+    if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+        controller.abort();
+        throw createUpdaterError('response-too-large');
+    }
+    const reader = response?.body?.getReader?.();
+    if (!reader) {
+        const body = Buffer.from(await response.arrayBuffer());
+        if (body.length > maxBytes) {
+            controller.abort();
+            throw createUpdaterError('response-too-large');
+        }
+        return body;
+    }
+    const chunks = [];
+    let size = 0;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            const chunk = Buffer.from(value || []);
+            size += chunk.length;
+            if (size > maxBytes) {
+                controller.abort();
+                await reader.cancel().catch(() => {});
+                throw createUpdaterError('response-too-large');
+            }
+            chunks.push(chunk);
+        }
+    } finally {
+        reader.releaseLock?.();
+    }
+    return Buffer.concat(chunks, size);
+}
+
+async function requestBufferWithFetch(fetchImpl, url, options = {}, redirectCount = 0) {
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(url);
+    } catch {
+        throw createUpdaterError('invalid-url');
+    }
+    if (parsedUrl.protocol !== 'https:' || redirectCount > 5) {
+        throw createUpdaterError(redirectCount > 5 ? 'too-many-redirects' : 'insecure-url');
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, Number(options.timeoutMs) || 20000);
+    timer.unref?.();
+    try {
+        const response = await fetchImpl(parsedUrl.toString(), {
+            method: 'GET',
+            headers: options.headers || {},
+            redirect: 'manual',
+            signal: controller.signal,
+            bypassCustomProtocolHandlers: true
+        });
+        const statusCode = Number(response?.status) || 0;
+        if ([301, 302, 303, 307, 308].includes(statusCode)) {
+            const location = getFetchHeader(response, 'location');
+            await response?.body?.cancel?.().catch(() => {});
+            if (!location) {
+                throw createUpdaterError('invalid-redirect');
+            }
+            let redirectUrl;
+            try {
+                redirectUrl = new URL(location, parsedUrl).toString();
+            } catch {
+                throw createUpdaterError('invalid-redirect');
+            }
+            return requestBufferWithFetch(fetchImpl, redirectUrl, options, redirectCount + 1);
+        }
+        return {
+            statusCode,
+            headers: normalizeFetchHeaders(response),
+            body: await readFetchBody(
+                response,
+                Number(options.maxBytes) || MAX_API_BYTES,
+                controller
+            )
+        };
+    } catch (error) {
+        if (error?.reason) {
+            throw error;
+        }
+        throw createUpdaterError(
+            timedOut ? 'request-timeout' : 'network-request-failed',
+            String(error?.message || error || 'network-request-failed')
+        );
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function requestUpdateManifestWith(request, {
+    manifestUrl = DEFAULT_UPDATE_MANIFEST_URL,
+    etag = ''
+} = {}) {
     const headers = {
         Accept: 'application/json',
         'User-Agent': 'QQNT-Toolbox-Updater'
@@ -163,7 +292,7 @@ async function requestUpdateManifest({ manifestUrl = DEFAULT_UPDATE_MANIFEST_URL
     if (etag) {
         headers['If-None-Match'] = etag;
     }
-    const response = await requestBuffer(
+    const response = await request(
         manifestUrl,
         { headers, maxBytes: MAX_API_BYTES }
     );
@@ -186,8 +315,8 @@ async function requestUpdateManifest({ manifestUrl = DEFAULT_UPDATE_MANIFEST_URL
     };
 }
 
-async function downloadReleaseAsset({ url, destination }) {
-    const response = await requestBuffer(url, {
+async function downloadReleaseAssetWith(request, { url, destination }) {
+    const response = await request(url, {
         headers: { 'User-Agent': 'QQNT-Toolbox-Updater' },
         maxBytes: MAX_ARCHIVE_BYTES,
         timeoutMs: 60000
@@ -197,13 +326,37 @@ async function downloadReleaseAsset({ url, destination }) {
     }
     await fs.mkdir(path.dirname(destination), { recursive: true });
     const temporaryPath = `${destination}.${process.pid}.tmp`;
-    await fs.writeFile(temporaryPath, response.body);
-    await fs.rm(destination, { force: true });
-    await fs.rename(temporaryPath, destination);
+    try {
+        await fs.writeFile(temporaryPath, response.body);
+        await fs.rm(destination, { force: true });
+        await fs.rename(temporaryPath, destination);
+    } catch (error) {
+        await fs.rm(temporaryPath, { force: true }).catch(() => {});
+        throw error;
+    }
     return {
         size: response.body.length,
         sha256: crypto.createHash('sha256').update(response.body).digest('hex')
     };
+}
+
+function requestUpdateManifest(options) {
+    return requestUpdateManifestWith(requestBuffer, options);
+}
+
+function downloadReleaseAsset(options) {
+    return downloadReleaseAssetWith(requestBuffer, options);
+}
+
+function createFetchUpdateTransport(fetchImpl) {
+    if (typeof fetchImpl !== 'function') {
+        throw createUpdaterError('invalid-fetch-transport');
+    }
+    const request = (url, options) => requestBufferWithFetch(fetchImpl, url, options);
+    return Object.freeze({
+        requestUpdateManifest: options => requestUpdateManifestWith(request, options),
+        downloadReleaseAsset: options => downloadReleaseAssetWith(request, options)
+    });
 }
 
 function normalizeArchiveEntryName(value) {
@@ -757,6 +910,7 @@ function createPluginUpdater(options = {}) {
 
 module.exports = {
     compareVersions,
+    createFetchUpdateTransport,
     createPluginUpdater,
     extractPluginArchive,
     normalizeArchiveEntryName,

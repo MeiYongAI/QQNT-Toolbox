@@ -3862,8 +3862,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return svg;
     }
 
-    function getQrImageSources(element, event = null) {
-        const path = event?.composedPath?.() || [];
+    function getSourceEventPath(event, capturedPath = null) {
+        if (Array.isArray(capturedPath) && capturedPath.length) {
+            return capturedPath;
+        }
+        try {
+            const path = Array.from(event?.composedPath?.() || []);
+            if (path.length) {
+                return path;
+            }
+        } catch {
+        }
+        return event?.target ? [event.target] : [];
+    }
+
+    function getQrImageSources(element, event = null, capturedPath = null) {
+        const path = getSourceEventPath(event, capturedPath);
         const visual = path.find(item => item instanceof HTMLImageElement) ||
             (element instanceof HTMLImageElement ? element : element?.querySelector?.('img'));
         return Array.from(new Set([
@@ -3895,12 +3909,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return /^(?:file:|[a-z]:[\\/]|\/)/i.test(source) ? source : '';
     }
 
-    function createQrScanPayload(event, target = getSingleClickMediaTarget(event)) {
+    function createQrScanPayload(event, target = null, capturedPath = null) {
+        target ||= getSingleClickMediaTarget(event, capturedPath);
         if (!target || target.isVideo) {
             return null;
         }
         const item = target.inlineMedia || {};
-        const sources = getQrImageSources(target.element, event);
+        const sources = getQrImageSources(target.element, event, capturedPath);
         const candidatePaths = Array.from(new Set([
             item.filePath,
             ...sources.map(getQrLocalPath)
@@ -4067,7 +4082,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
-    function getClickedMediaElement(event, matchedElement) {
+    function getClickedMediaElement(event, matchedElement, capturedPath = null) {
         if (!(matchedElement instanceof Element)) {
             return null;
         }
@@ -4078,7 +4093,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             '.file-element'
         ].join(',');
         const candidates = [];
-        for (const node of event?.composedPath?.() || []) {
+        for (const node of getSourceEventPath(event, capturedPath)) {
             if (node instanceof Element && node.matches(directSelectors) && matchedElement.contains(node)) {
                 candidates.push(node);
             }
@@ -4530,14 +4545,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return clickedIndex >= 0 ? (candidates[clickedIndex] || candidates[0]) : candidates[0];
     }
 
-    function getMarkdownMediaTarget(event) {
-        const messageElement = event?.target instanceof Element
-            ? getMessageElementFromElement(event.target)
+    function getMarkdownMediaTarget(event, capturedPath = null) {
+        const path = getSourceEventPath(event, capturedPath);
+        const eventTarget = path.find(item => item instanceof Element) || event?.target;
+        const messageElement = eventTarget instanceof Element
+            ? getMessageElementFromElement(eventTarget)
             : null;
         if (!(messageElement instanceof Element)) {
             return null;
         }
-        const record = findMessageRecordFromElement(messageElement) || findMessageRecordFromElement(event.target);
+        const record = findMessageRecordFromElement(messageElement) || findMessageRecordFromElement(eventTarget);
         const elements = Array.isArray(record?.elements) ? record.elements : [];
         const markdownElements = elements.filter(element => Boolean(element?.markdownElement));
         if (!markdownElements.length) {
@@ -4552,7 +4569,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             '[class*="reaction" i]',
             '.q-context-menu'
         ];
-        const visual = (event.composedPath?.() || []).find(item =>
+        const visual = path.find(item =>
             item instanceof Element && item.tagName === 'IMG' &&
             messageElement.contains(item) &&
             !item.closest(excludedSelectors.join(','))
@@ -4578,8 +4595,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             openControl: visual
         };
     }
-    function getSingleClickMediaTarget(event) {
-        const path = event.composedPath?.() || [event.target];
+    function getSingleClickMediaTarget(event, capturedPath = null) {
+        const path = getSourceEventPath(event, capturedPath);
+        const eventTarget = path.find(item => item instanceof Element) || event?.target;
         for (const item of path) {
             if (!(item instanceof Element) || !item.matches(MESSAGE_MEDIA_SELECTOR)) {
                 continue;
@@ -4587,7 +4605,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             if (!item.closest('.message, .ml-item')) {
                 continue;
             }
-            const mediaElement = getClickedMediaElement(event, item);
+            const mediaElement = getClickedMediaElement(event, item, path);
             if (!mediaElement) {
                 continue;
             }
@@ -4634,7 +4652,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }
             if (matchesRecord) {
                 const mediaKind = isFileMessage ? 'file' : isVideo ? 'video' : 'image';
-                const inlineElement = getClickedRecordMediaElement(record, mediaElement, element, mediaKind, event.target) ||
+                const inlineElement = getClickedRecordMediaElement(record, mediaElement, element, mediaKind, eventTarget) ||
                     (isFileMessage
                         ? (provisionalIsVideo ? videoFileElements[0] : imageFileElements[0])
                         : isVideo ? videoElements[0] : imageElements[0]);
@@ -4670,7 +4688,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 inlineMedia: null
             };
         }
-        return getMarkdownMediaTarget(event);
+        return getMarkdownMediaTarget(event, path);
     }
 
     function dispatchNativeMediaOpen(target, sourceEvent) {
@@ -7014,8 +7032,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         setTimeout(run, 140);
     }
 
-    function getToolboxMessageContextMenuItems({ originalContext, sourceEvent }) {
-        const messageElement = getMessageContextTargetFromEvent(sourceEvent);
+    function getToolboxMessageContextMenuItems({
+        originalContext,
+        sourceEvent,
+        sourceEventPath,
+        messageElement: capturedMessage
+    }) {
+        const messageElement = capturedMessage || getMessageContextTargetFromEvent(sourceEvent);
         const record = isMsgRecord(originalContext?.msgRecord)
             ? originalContext.msgRecord
             : messageElement && findMessageRecordFromElement(messageElement);
@@ -7027,13 +7050,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             items.push(createRepeatContextMenuConfig(record));
         }
         if (isConfigEnabled('interfaceTweaks.activeQrScan')) {
-            const payload = createQrScanPayload(sourceEvent);
+            const payload = createQrScanPayload(sourceEvent, null, sourceEventPath);
             if (payload) {
                 items.push(createQrScanContextMenuConfig(payload));
             }
         }
-        if (isConfigEnabled('messageTweaks.messageToImage') &&
-            messageElement && isMsgRecord(findMessageRecordFromElement(messageElement))) {
+        if (isConfigEnabled('messageTweaks.messageToImage') && messageElement) {
             items.push(createMessageImageContextMenuConfig(messageElement));
         }
         return items;

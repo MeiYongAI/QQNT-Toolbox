@@ -249,6 +249,61 @@ test('patches the QQ menu provider once and keeps custom handlers native', async
     assert.equal(handledRecord, record);
 });
 
+test('passes the first captured message context without changing QQ openMenu arguments', async () => {
+    const { createMessageContextMenuOrderController } = await modulePromise;
+    const controller = createMessageContextMenuOrderController({
+        getConfig: () => ({ enabled: false, items: [], catalog: [] })
+    });
+    let extensionContext = null;
+    controller.registerExtension({
+        id: 'captured-context',
+        getItems: context => {
+            extensionContext = context;
+            return [];
+        }
+    });
+
+    const menuContext = {};
+    Object.defineProperty(menuContext, 'showMenuConfig', {
+        configurable: true,
+        get: () => [{ type: 1, text: 'native' }]
+    });
+    let nativeEvent = undefined;
+    menuContext.openMenu = function openMenu(event) {
+        nativeEvent = event;
+        return this.showMenuConfig;
+    };
+    const menu = { _: { ctx: menuContext } };
+    const component = { proxy: { msgCtxMenu: menu }, parent: null };
+    const clickedTarget = { id: 'clicked-target' };
+    let capturedPath = [clickedTarget];
+    const capturedEvent = {
+        type: 'contextmenu',
+        composedPath: () => capturedPath
+    };
+    const OriginalElement = global.Element;
+    class MockElement {}
+    global.Element = MockElement;
+    const messageElement = new MockElement();
+    messageElement.closest = () => messageElement;
+    messageElement.__VUE__ = [component];
+
+    try {
+        assert.equal(controller.handleContextMenu(capturedEvent, messageElement), true);
+        capturedPath = [];
+        assert.deepEqual(menuContext.openMenu(null, [], { msgRecord: { msgId: '1' } }, {}), [
+            { type: 1, text: 'native' }
+        ]);
+    } finally {
+        global.Element = OriginalElement;
+    }
+
+    assert.equal(nativeEvent, null);
+    assert.equal(extensionContext.sourceEvent, capturedEvent);
+    assert.deepEqual(extensionContext.sourceEventPath, [clickedTarget]);
+    assert.equal(extensionContext.messageElement, messageElement);
+});
+
 test('pre-patches declared message menus without touching generic QQ menus', async () => {
     const { createMessageContextMenuOrderController } = await modulePromise;
     const controller = createMessageContextMenuOrderController({

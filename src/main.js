@@ -107,7 +107,7 @@ const {
     snapPipBounds
 } = require('./media-pip-window');
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
-const { createPluginUpdater } = require('./plugin-updater');
+const { createFetchUpdateTransport, createPluginUpdater } = require('./plugin-updater');
 const { saveMessageImage } = require('./message-image');
 const {
     expandQrScanPathCandidates,
@@ -452,6 +452,7 @@ let autoReactionEmojiCatalog = null;
 let diagnosticLogger = null;
 let diagnosticActionRunner = null;
 let pluginUpdater = null;
+let pluginUpdaterNetworkSessionPromise = null;
 let automaticUpdateTimer = null;
 let messageImageRendererScriptPromise = null;
 
@@ -592,6 +593,11 @@ function getInstalledPluginVersion() {
 }
 
 function broadcastUpdateState(state) {
+    if (state?.status === 'error') {
+        recordDiagnostic('warn', 'updater.failed', {
+            reason: String(state.reason || 'unknown')
+        });
+    }
     for (const browserWindow of BrowserWindow.getAllWindows()) {
         if (!browserWindow.isDestroyed()) {
             browserWindow.webContents.send(CHANNEL_UPDATE_STATE_CHANGED, state);
@@ -599,12 +605,47 @@ function broadcastUpdateState(state) {
     }
 }
 
+async function getPluginUpdaterNetworkSession() {
+    if (!pluginUpdaterNetworkSessionPromise) {
+        pluginUpdaterNetworkSessionPromise = (async () => {
+            if (!session?.fromPartition) {
+                throw Object.assign(new Error('Electron session is unavailable.'), {
+                    reason: 'session-unavailable'
+                });
+            }
+            const scopedSession = session.fromPartition('qqnt-toolbox-updater', {
+                cache: false
+            });
+            await scopedSession.setProxy({ mode: 'system' });
+            if (typeof scopedSession.fetch !== 'function') {
+                throw Object.assign(new Error('Electron session.fetch is unavailable.'), {
+                    reason: 'session-fetch-unavailable'
+                });
+            }
+            recordDiagnostic('info', 'updater.network-ready', {
+                mode: 'system'
+            });
+            return scopedSession;
+        })();
+        pluginUpdaterNetworkSessionPromise.catch(() => {
+            pluginUpdaterNetworkSessionPromise = null;
+        });
+    }
+    return await pluginUpdaterNetworkSessionPromise;
+}
+
 function getPluginUpdater() {
     if (!pluginUpdater) {
+        const transport = createFetchUpdateTransport(async (url, options) => {
+            const scopedSession = await getPluginUpdaterNetworkSession();
+            return scopedSession.fetch(url, options);
+        });
         pluginUpdater = createPluginUpdater({
             currentVersion: getInstalledPluginVersion(),
             pluginRoot: path.resolve(__dirname, '..'),
             dataDir: getPluginDataDir(),
+            requestUpdateManifest: transport.requestUpdateManifest,
+            downloadReleaseAsset: transport.downloadReleaseAsset,
             onStateChange: broadcastUpdateState
         });
     }

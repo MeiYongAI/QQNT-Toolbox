@@ -39,6 +39,14 @@ function normalizeText(value) {
     return String(value ?? '').trim();
 }
 
+function snapshotEventPath(event) {
+    try {
+        return Array.from(event?.composedPath?.() || []);
+    } catch {
+        return [];
+    }
+}
+
 function createElement(tag, className = '', content = '') {
     const element = document.createElement(tag);
     if (className) {
@@ -562,12 +570,18 @@ export function createMessageContextMenuOrderController(options) {
         return items;
     }
 
-    function patchMenu(menu) {
+    function patchMenu(menu, capturedContext = null) {
         const menuContext = menu?._?.ctx;
         if (!menuContext) {
             return false;
         }
-        if (patchedMenus.has(menuContext)) {
+        const existingState = patchedMenus.get(menuContext);
+        if (existingState) {
+            if (capturedContext) {
+                existingState.pendingSourceEvent = capturedContext.sourceEvent || null;
+                existingState.pendingSourceEventPath = capturedContext.sourceEventPath || [];
+                existingState.pendingMessageElement = capturedContext.messageElement || null;
+            }
             return true;
         }
         const showDescriptor = Object.getOwnPropertyDescriptor(menuContext, 'showMenuConfig');
@@ -579,6 +593,12 @@ export function createMessageContextMenuOrderController(options) {
         const state = {
             menu,
             sourceEvent: null,
+            capturedSourceEvent: null,
+            sourceEventPath: [],
+            messageElement: null,
+            pendingSourceEvent: capturedContext?.sourceEvent || null,
+            pendingSourceEventPath: capturedContext?.sourceEventPath || [],
+            pendingMessageElement: capturedContext?.messageElement || null,
             originalContext: null,
             context: null,
             options: null
@@ -591,7 +611,9 @@ export function createMessageContextMenuOrderController(options) {
             }
             const hookContext = {
                 menu,
-                sourceEvent: state.sourceEvent,
+                sourceEvent: state.capturedSourceEvent || state.sourceEvent,
+                sourceEventPath: state.sourceEventPath,
+                messageElement: state.messageElement,
                 originalContext: state.originalContext,
                 context: state.context,
                 options: state.options
@@ -626,6 +648,14 @@ export function createMessageContextMenuOrderController(options) {
             nextArgs[2] = request.context;
             nextArgs[3] = request.options;
             state.sourceEvent = request.sourceEvent;
+            state.capturedSourceEvent = state.pendingSourceEvent || request.sourceEvent;
+            state.sourceEventPath = state.pendingSourceEventPath.length
+                ? state.pendingSourceEventPath
+                : snapshotEventPath(state.capturedSourceEvent);
+            state.messageElement = state.pendingMessageElement;
+            state.pendingSourceEvent = null;
+            state.pendingSourceEventPath = [];
+            state.pendingMessageElement = null;
             state.originalContext = request.originalContext;
             state.context = request.context;
             state.options = request.options;
@@ -657,7 +687,7 @@ export function createMessageContextMenuOrderController(options) {
         return null;
     }
 
-    function prepareFromElement(element) {
+    function prepareFromElement(element, sourceEvent = null) {
         if (!(element instanceof Element)) {
             return false;
         }
@@ -676,7 +706,11 @@ export function createMessageContextMenuOrderController(options) {
                     }
                     seen.add(component);
                     const menu = findMenuFromComponent(component, true);
-                    if (menu && patchMenu(menu)) {
+                    if (menu && patchMenu(menu, {
+                        sourceEvent,
+                        sourceEventPath: snapshotEventPath(sourceEvent),
+                        messageElement: element
+                    })) {
                         return true;
                     }
                 }
@@ -685,8 +719,8 @@ export function createMessageContextMenuOrderController(options) {
         return false;
     }
 
-    function handleContextMenu(_event, messageElement) {
-        return prepareFromElement(messageElement);
+    function handleContextMenu(event, messageElement) {
+        return prepareFromElement(messageElement, event);
     }
 
     function handleVueComponentMount(component, patchProvider = true) {
