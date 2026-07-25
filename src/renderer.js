@@ -135,6 +135,7 @@ let handleToolboxVueComponentMount = () => {};
             panelWidth: 350,
             panelHeight: 420,
             sendAsImage: false,
+            directSendMode: 'alt',
             recentEnabled: true,
             recentRows: 2,
             telegramBotToken: '',
@@ -2960,6 +2961,33 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     function togglePanel() {
         const panel = createPanel();
         setVisible(panel, panel.hidden);
+    }
+
+    function handleFloatingPanelEscape(event) {
+        if (event.key !== 'Escape' || activeShortcutCapture) {
+            return;
+        }
+        const panel = document.getElementById(PANEL_ID);
+        if (!panel || panel.hidden) {
+            return;
+        }
+        const upperLayer = Array.from(document.querySelectorAll([
+            '[role="dialog"]',
+            '[role="menu"]',
+            '#qqnt-toolbox-voice-library',
+            `#${POKE_FALLBACK_MENU_ID}`,
+            `#${REPEAT_FALLBACK_MENU_ID}`
+        ].join(','))).find(element =>
+            element !== panel &&
+            !panel.contains(element) &&
+            element.getClientRects().length > 0
+        );
+        if (upperLayer) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        setVisible(panel, false);
     }
 
     function installPanelEvents(panel) {
@@ -6946,6 +6974,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         event.stopPropagation();
         togglePanel();
     }, true);
+    window.addEventListener('keydown', handleFloatingPanelEscape, true);
 
     document.addEventListener('keyup', event => {
         if (!configReady || !isPanelShortcut(event)) {

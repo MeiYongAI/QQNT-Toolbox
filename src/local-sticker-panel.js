@@ -10,6 +10,7 @@ const STYLE_ID = 'qqnt-toolbox-local-sticker-style';
 const ENTRY_CLASS = 'qqnt-toolbox-local-sticker-entry';
 const NATIVE_EMOJI_LABEL = '\u8868\u60c5';
 const ENTRY_MODES = new Set(['contextmenu', 'replace', 'separate']);
+const DIRECT_SEND_MODES = new Set(['alt', 'click']);
 const LEFT_ENTRY_TARGET_SELECTORS = [
     '.chat-func-bar > .func-bar-native.func-bar-shortcuts:first-child',
     '.chat-func-bar > .chat-func-bar__left .func-bar-native',
@@ -30,6 +31,7 @@ const DEFAULT_CONFIG = Object.freeze({
     panelWidth: 350,
     panelHeight: 420,
     sendAsImage: false,
+    directSendMode: 'alt',
     recentEnabled: true,
     recentRows: 2
 });
@@ -63,9 +65,16 @@ export function normalizeLocalStickerPanelConfig(value) {
         panelWidth: clampInteger(source.panelWidth, 280, 520, DEFAULT_CONFIG.panelWidth),
         panelHeight: clampInteger(source.panelHeight, 260, 640, DEFAULT_CONFIG.panelHeight),
         sendAsImage: source.sendAsImage === true,
+        directSendMode: DIRECT_SEND_MODES.has(source.directSendMode)
+            ? source.directSendMode
+            : DEFAULT_CONFIG.directSendMode,
         recentEnabled: source.recentEnabled !== false,
         recentRows: clampInteger(source.recentRows, 1, 6, DEFAULT_CONFIG.recentRows)
     };
+}
+
+function isDirectSendGesture(config, event) {
+    return config.directSendMode === 'click' ? !event.altKey : event.altKey;
 }
 
 export function localStickerFileUrl(filePath) {
@@ -199,6 +208,116 @@ function findProseMirrorEditor() {
     return null;
 }
 
+function findMessageComposer() {
+    return Array.from(document.querySelectorAll([
+        '.qq-msg-editor',
+        '.ck.ck-content.ck-editor__editable'
+    ].join(','))).find(element => element.getClientRects().length > 0) || null;
+}
+
+function countComposerMedia(composer) {
+    if (!composer) {
+        return 0;
+    }
+    const media = new Set();
+    const wrapperSelector = [
+        'msg-img',
+        '[data-type="pic"]',
+        '[data-type="image"]',
+        '[data-type="marketFace"]',
+        '[data-element-type="pic"]'
+    ].join(',');
+    for (const element of composer.querySelectorAll([
+        'img',
+        'msg-img',
+        '[data-type="pic"]',
+        '[data-type="image"]',
+        '[data-type="marketFace"]',
+        '[data-element-type="pic"]'
+    ].join(','))) {
+        const wrapper = element.closest?.(wrapperSelector);
+        media.add(wrapper && composer.contains(wrapper) ? wrapper : element);
+    }
+    return media.size;
+}
+
+function isVisibleControl(element) {
+    return element instanceof HTMLElement &&
+        element.getClientRects().length > 0 &&
+        !element.disabled &&
+        element.getAttribute('aria-disabled') !== 'true';
+}
+
+function findNativeSendButton() {
+    return Array.from(document.querySelectorAll('button, [role="button"], .q-button')).find(element => {
+        if (!isVisibleControl(element)) {
+            return false;
+        }
+        return [
+            element.getAttribute('aria-label'),
+            element.getAttribute('data-title'),
+            element.getAttribute('title'),
+            element.textContent
+        ].some(value => matchesControlLabelValue(value, '\u53d1\u9001'));
+    }) || null;
+}
+
+function findNativeEmojiPanel(target) {
+    for (let candidate = target; candidate && candidate !== document.body; candidate = candidate.parentElement) {
+        if (!(candidate instanceof HTMLElement) || candidate.id === PANEL_ID) {
+            continue;
+        }
+        const className = String(candidate.className || '');
+        const knownFloatingPanel = /(?:q-float-card|popover|popup|emoji.*panel|emoticon.*panel|face.*panel|sticker.*panel|expression.*panel|panel.*(?:emoji|emoticon|face|sticker|expression))/i.test(className);
+        const positionedPanel = /panel/i.test(className) &&
+            ['absolute', 'fixed'].includes(getComputedStyle(candidate).position);
+        if ((!knownFloatingPanel && !positionedPanel) || candidate.closest('.qq-msg-editor')) {
+            continue;
+        }
+        const rect = candidate.getBoundingClientRect();
+        if (rect.width >= 220 && rect.height >= 160 &&
+            candidate.querySelectorAll('img, svg').length >= 4) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function isNativeDefaultEmojiPanel(panel) {
+    const labeled = Array.from(panel?.querySelectorAll?.(
+        '[aria-label], [data-title], [title], [data-text]'
+    ) || []);
+    let explicitlyInactive = false;
+    for (const element of labeled) {
+        const isDefault = [
+            element.getAttribute('aria-label'),
+            element.getAttribute('data-title'),
+            element.getAttribute('title'),
+            element.getAttribute('data-text')
+        ].some(value => matchesControlLabelValue(value, '\u9ed8\u8ba4\u8868\u60c5'));
+        if (!isDefault) {
+            continue;
+        }
+        for (let control = element; control && control !== panel; control = control.parentElement) {
+            if (control.getAttribute('aria-selected') === 'true' ||
+                control.getAttribute('aria-pressed') === 'true' ||
+                control.getAttribute('data-active') === 'true' ||
+                /(?:^|[-_\s])(active|selected|current)(?:$|[-_\s])/i.test(String(control.className || ''))) {
+                return true;
+            }
+            explicitlyInactive ||= control.getAttribute('aria-selected') === 'false' ||
+                control.getAttribute('aria-pressed') === 'false' ||
+                control.getAttribute('data-active') === 'false';
+        }
+    }
+    if (explicitlyInactive) {
+        return false;
+    }
+    const visibleText = String(panel?.innerText || '');
+    return visibleText.includes('\u6700\u8fd1\u8868\u60c5') &&
+        visibleText.includes('\u8d85\u7ea7\u8868\u60c5');
+}
+
 export function insertLocalStickerIntoComposer(filePath, picSubType) {
     const ckeditor = document.querySelector(
         '.ck.ck-content.ck-editor__editable'
@@ -276,6 +395,9 @@ export function createLocalStickerController(options = {}) {
     let requestRevision = 0;
     let noticeTimer = 0;
     let lastNativePointerActivation = 0;
+    let nativeStickerSendObserver = null;
+    let nativeStickerSendTimer = 0;
+    let nativeStickerSendRevision = 0;
     let installed = false;
     let configSignature = '';
 
@@ -496,7 +618,7 @@ export function createLocalStickerController(options = {}) {
     async function activateSticker(stickerPath, event) {
         const config = getConfig();
         const picSubType = config.sendAsImage ? 0 : 1;
-        if (event.altKey) {
+        if (isDirectSendGesture(config, event)) {
             const peer = options.getPeer?.();
             const send = getBridge()?.sendLocalSticker;
             if (!peer || typeof send !== 'function') {
@@ -524,6 +646,67 @@ export function createLocalStickerController(options = {}) {
         rememberSticker(stickerPath);
         if (!event.ctrlKey) {
             close();
+        }
+    }
+
+    function cancelNativeStickerSend() {
+        nativeStickerSendRevision += 1;
+        nativeStickerSendObserver?.disconnect();
+        nativeStickerSendObserver = null;
+        window.clearTimeout(nativeStickerSendTimer);
+        nativeStickerSendTimer = 0;
+    }
+
+    function watchNativeStickerInsertion(composer, directSendMode) {
+        cancelNativeStickerSend();
+        const revision = nativeStickerSendRevision;
+        const mediaCount = countComposerMedia(composer);
+        const observedRoot = composer.parentElement || composer;
+        const finish = () => {
+            if (revision !== nativeStickerSendRevision) {
+                return;
+            }
+            const currentComposer = findMessageComposer();
+            if (!currentComposer || countComposerMedia(currentComposer) <= mediaCount) {
+                return;
+            }
+            cancelNativeStickerSend();
+            const sendRevision = nativeStickerSendRevision;
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(() => {
+                    if (sendRevision === nativeStickerSendRevision &&
+                        getConfig().directSendMode === directSendMode) {
+                        findNativeSendButton()?.click();
+                    }
+                });
+            });
+        };
+        nativeStickerSendObserver = new MutationObserver(finish);
+        nativeStickerSendObserver.observe(observedRoot, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'data']
+        });
+        nativeStickerSendTimer = window.setTimeout(cancelNativeStickerSend, 1200);
+        queueMicrotask(finish);
+    }
+
+    function handleNativeStickerDirectSend(event) {
+        const config = getConfig();
+        const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+        if (!config.enabled || !isDirectSendGesture(config, event) || event.button !== 0 || !target ||
+            event.ctrlKey || event.metaKey || event.shiftKey ||
+            target.closest?.('[id^="qqnt-toolbox-"]')) {
+            return;
+        }
+        const nativePanel = findNativeEmojiPanel(target);
+        if (!nativePanel || isNativeDefaultEmojiPanel(nativePanel)) {
+            return;
+        }
+        const composer = findMessageComposer();
+        if (composer) {
+            watchNativeStickerInsertion(composer, config.directSendMode);
         }
     }
 
@@ -806,6 +989,9 @@ export function createLocalStickerController(options = {}) {
         const toolbar = findNativeChatToolbar();
         syncSeparateEntry(toolbar, config);
         if (!config.enabled) {
+            cancelNativeStickerSend();
+        }
+        if (!config.enabled) {
             close();
             return;
         }
@@ -834,6 +1020,7 @@ export function createLocalStickerController(options = {}) {
         document.addEventListener('mousedown', suppressReplacedNativeEntry, true);
         document.addEventListener('mouseup', suppressReplacedNativeEntry, true);
         document.addEventListener('click', suppressReplacedNativeEntry, true);
+        document.addEventListener('click', handleNativeStickerDirectSend, true);
         document.addEventListener('keydown', handleKeyDown, true);
         window.addEventListener('resize', () => positionPanel());
         sync();

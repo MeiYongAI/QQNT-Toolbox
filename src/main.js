@@ -268,6 +268,7 @@ const DEFAULT_CONFIG = {
         panelWidth: 350,
         panelHeight: 420,
         sendAsImage: false,
+        directSendMode: 'alt',
         recentEnabled: true,
         recentRows: 2,
         telegramBotToken: '',
@@ -673,6 +674,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             entryMode: normalizeLocalStickerConfig(config.localStickers).entryMode,
             iconOnLeft: config.localStickers?.iconOnLeft === true,
             sendAsImage: config.localStickers?.sendAsImage === true,
+            directSendMode: normalizeLocalStickerConfig(config.localStickers).directSendMode,
             recent: config.localStickers?.recentEnabled !== false
         },
         voice: {

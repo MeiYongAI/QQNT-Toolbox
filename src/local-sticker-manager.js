@@ -225,23 +225,28 @@ export function createLocalStickerManager(options = {}) {
         panelPane.setAttribute('role', 'tabpanel');
         const panelForm = createElement('form', 'qlsm-form qlsm-panel-form');
         const layoutSection = createElement('section', 'qlsm-form-section');
-        layoutSection.append(
-            createElement('div', 'qlsm-form-title', '面板布局'),
-            createElement('div', 'qlsm-form-meta', '调整贴纸密度和面板大小')
-        );
+        layoutSection.append(createElement('div', 'qlsm-form-title', '面板布局'));
         const perRow = createNumberControl('每行贴纸', 3, 10, '个');
         const panelWidth = createNumberControl('面板宽度', 280, 520, 'px');
         const panelHeight = createNumberControl('面板高度', 260, 640, 'px');
-        layoutSection.append(
-            createConfigRow('每行贴纸', '3–10 个', perRow.wrap).row,
-            createConfigRow('面板宽度', '280–520 px', panelWidth.wrap).row,
-            createConfigRow('面板高度', '260–640 px', panelHeight.wrap).row
-        );
+        const layoutGrid = createElement('div', 'qlsm-layout-grid');
+        for (const [label, range, control] of [
+            ['每行贴纸', '3–10', perRow],
+            ['面板宽度', '280–520', panelWidth],
+            ['面板高度', '260–640', panelHeight]
+        ]) {
+            const field = createElement('div', 'qlsm-layout-field');
+            const heading = createElement('div', 'qlsm-layout-heading');
+            heading.append(
+                createElement('span', 'qlsm-layout-label', label),
+                createElement('span', 'qlsm-layout-range', range)
+            );
+            field.append(heading, control.wrap);
+            layoutGrid.append(field);
+        }
+        layoutSection.append(layoutGrid);
         const behaviorSection = createElement('section', 'qlsm-form-section');
-        behaviorSection.append(
-            createElement('div', 'qlsm-form-title', '使用方式'),
-            createElement('div', 'qlsm-form-meta', '这些设置不会改变贴纸文件本身')
-        );
+        behaviorSection.append(createElement('div', 'qlsm-form-title', '使用方式'));
         const sendMode = createElement('div', 'qlsm-segmented');
         sendMode.setAttribute('role', 'radiogroup');
         sendMode.setAttribute('aria-label', '发送形式');
@@ -256,14 +261,24 @@ export function createLocalStickerManager(options = {}) {
         recentToggle.type = 'button';
         recentToggle.setAttribute('role', 'switch');
         recentToggle.setAttribute('aria-label', '显示最近使用');
+        const directSendMode = createElement('div', 'qlsm-segmented');
+        directSendMode.setAttribute('role', 'radiogroup');
+        directSendMode.setAttribute('aria-label', '直接发送方式');
+        for (const [value, label] of [['alt', 'Alt + 单击'], ['click', '单击']]) {
+            const button = createElement('button', 'qlsm-segment', label);
+            button.type = 'button';
+            button.dataset.directSendMode = value;
+            button.setAttribute('role', 'radio');
+            directSendMode.append(button);
+        }
         const recentRows = createNumberControl('最近使用行数', 1, 6, '行');
-        const recentRowsRow = createConfigRow('最近使用行数', '1–6 行', recentRows.wrap);
-        recentRowsRow.row.dataset.recentRows = 'true';
+        const recentControls = createElement('div', 'qlsm-recent-controls');
+        recentControls.append(recentRows.wrap, recentToggle);
         const panelStatus = createElement('div', 'qlsm-status qlsm-panel-status');
         behaviorSection.append(
-            createConfigRow('发送形式', '默认使用 QQ 贴纸消息', sendMode).row,
-            createConfigRow('最近使用', '在贴纸包栏保留最近用过的贴纸', recentToggle).row,
-            recentRowsRow.row,
+            createConfigRow('发送形式', '贴纸消息或普通图片', sendMode).row,
+            createConfigRow('直接发送方式', '本地贴纸与 QQ 非默认表情', directSendMode).row,
+            createConfigRow('最近使用', '在贴纸包栏显示最近使用', recentControls).row,
             panelStatus
         );
         panelForm.append(layoutSection, behaviorSection);
@@ -292,16 +307,12 @@ export function createLocalStickerManager(options = {}) {
         downloadSection.append(urlRow, downloadStatus);
 
         const configSection = createElement('section', 'qlsm-form-section qlsm-config-section');
-        configSection.append(
-            createElement('div', 'qlsm-form-title', '下载凭据'),
-            createElement('div', 'qlsm-form-meta', 'Bot Token 仅保存在 Toolbox 本地配置中，不写入日志')
-        );
         const tokenInput = createElement('input', 'qlsm-input qlsm-config-input');
         tokenInput.type = 'password';
         tokenInput.autocomplete = 'off';
         tokenInput.maxLength = 256;
         tokenInput.setAttribute('aria-label', 'Telegram Bot Token');
-        const tokenRow = createConfigRow('Bot Token', '通过 BotFather 创建机器人后取得', tokenInput);
+        const tokenRow = createConfigRow('Bot Token', '在 Telegram 中通过 @BotFather 获取，仅保存在本地', tokenInput);
 
         const ffmpegInput = createElement('input', 'qlsm-input qlsm-path-input');
         ffmpegInput.type = 'text';
@@ -345,7 +356,7 @@ export function createLocalStickerManager(options = {}) {
         proxyRow.control.append(testProxy);
         const proxyStatus = createElement('div', 'qlsm-status qlsm-proxy-status');
         const toolSection = createElement('section', 'qlsm-tool-section');
-        const toolTitle = createElement('div', 'qlsm-tool-title', '转换工具与网络');
+        const toolTitle = createElement('h3', 'qlsm-tool-title', '转换工具与网络');
         const toolBody = createElement('div', 'qlsm-tool-body');
         toolBody.append(ffmpegRow.row, tgsRow.row, proxyRow.row, proxyStatus);
         toolSection.append(toolTitle, toolBody);
@@ -392,12 +403,18 @@ export function createLocalStickerManager(options = {}) {
                 button.dataset.active = String(selected);
                 button.setAttribute('aria-checked', String(selected));
             });
+            const selectedDirectSendMode = config.directSendMode === 'click' ? 'click' : 'alt';
+            directSendMode.querySelectorAll('.qlsm-segment[data-direct-send-mode]').forEach(button => {
+                const selected = button.dataset.directSendMode === selectedDirectSendMode;
+                button.dataset.active = String(selected);
+                button.setAttribute('aria-checked', String(selected));
+            });
             const recentEnabled = config.recentEnabled !== false;
             recentToggle.dataset.checked = String(recentEnabled);
             recentToggle.setAttribute('aria-checked', String(recentEnabled));
             recentRows.input.value = String(config.recentRows ?? 2);
             recentRows.input.disabled = !recentEnabled;
-            recentRowsRow.row.dataset.disabled = String(!recentEnabled);
+            recentRows.wrap.dataset.disabled = String(!recentEnabled);
             tokenInput.value = normalizeText(config.telegramBotToken);
             ffmpegInput.value = normalizeText(config.ffmpegPath);
             tgsInput.value = normalizeText(config.tgsToGifPath);
@@ -747,6 +764,13 @@ export function createLocalStickerManager(options = {}) {
             }
             savePanelSettings({ sendAsImage: button.dataset.sendMode === 'image' });
         });
+        directSendMode.addEventListener('click', event => {
+            const button = event.target.closest?.('.qlsm-segment[data-direct-send-mode]');
+            if (!button) {
+                return;
+            }
+            savePanelSettings({ directSendMode: button.dataset.directSendMode });
+        });
         recentToggle.addEventListener('click', () => {
             savePanelSettings({ recentEnabled: recentToggle.dataset.checked !== 'true' });
         });
@@ -874,11 +898,6 @@ export function createLocalStickerManager(options = {}) {
             next?.focus();
         });
         closeButton.addEventListener('click', close);
-        layer.addEventListener('click', event => {
-            if (event.target === layer) {
-                close();
-            }
-        });
         layer.addEventListener('keydown', event => {
             if (event.key === 'Escape') {
                 event.preventDefault();

@@ -33,7 +33,21 @@ test('inserts local stickers into both QQ editor implementations', () => {
     assert.match(source, /createElement\('msg-img'/);
     assert.match(source, /type: 'msgPic'/);
     assert.match(source, /picSubType/);
-    assert.match(source, /event\.altKey/);
+    assert.match(source, /function isDirectSendGesture\(config, event\)/);
+    assert.match(source, /config\.directSendMode === 'click' \? !event\.altKey : event\.altKey/);
+    assert.match(source, /if \(isDirectSendGesture\(config, event\)\)/);
+});
+
+test('direct-sends only image-style items from QQ non-default emoji panels with the selected gesture', () => {
+    assert.match(source, /function handleNativeStickerDirectSend/);
+    assert.match(source, /!isDirectSendGesture\(config, event\)/);
+    assert.match(source, /watchNativeStickerInsertion\(composer, config\.directSendMode\)/);
+    assert.match(source, /getConfig\(\)\.directSendMode === directSendMode/);
+    assert.match(source, /isNativeDefaultEmojiPanel\(nativePanel\)/);
+    assert.match(source, /visibleText\.includes\('\\u6700\\u8fd1\\u8868\\u60c5'\)[\s\S]*visibleText\.includes\('\\u8d85\\u7ea7\\u8868\\u60c5'\)/);
+    assert.match(source, /countComposerMedia\(currentComposer\) <= mediaCount/);
+    assert.match(source, /findNativeSendButton\(\)\?\.click\(\)/);
+    assert.match(source, /new MutationObserver\(finish\)/);
 });
 
 test('keeps the first panel frame hidden until its stylesheet is ready', () => {

@@ -33,6 +33,7 @@ test('normalizes local sticker settings to bounded values', () => {
         panelWidth: 10,
         panelHeight: 9000,
         sendAsImage: true,
+        directSendMode: 'click',
         recentEnabled: false,
         recentRows: 0,
         telegramBotToken: '  123456:abcdefghijklmnopqrstuvwxyz  ',
@@ -48,6 +49,7 @@ test('normalizes local sticker settings to bounded values', () => {
         panelWidth: 280,
         panelHeight: 640,
         sendAsImage: true,
+        directSendMode: 'click',
         recentEnabled: false,
         recentRows: 1,
         telegramBotToken: '123456:abcdefghijklmnopqrstuvwxyz',
@@ -58,6 +60,7 @@ test('normalizes local sticker settings to bounded values', () => {
 });
 
 test('uses a supplied default directory only when no custom directory exists', () => {
+    assert.equal(normalizeLocalStickerConfig({ directSendMode: 'invalid' }).directSendMode, 'alt');
     assert.equal(normalizeLocalStickerConfig({}, {
         defaultPath: '  D:\\toolbox\\data\\stickers  '
     }).path, 'D:\\toolbox\\data\\stickers');

@@ -29,9 +29,9 @@
 
 #qqnt-toolbox-local-sticker-manager .qlsm-page {
     display: grid;
-    grid-template-rows: 52px 42px minmax(0, 1fr);
-    width: min(620px, calc(100vw - 32px));
-    height: min(700px, calc(100vh - 32px));
+    grid-template-rows: 48px 40px minmax(0, 1fr);
+    width: min(560px, calc(100vw - 32px));
+    height: min(580px, calc(100vh - 32px));
     min-width: 0;
     min-height: 0;
     overflow: hidden;
@@ -62,7 +62,7 @@
 
 #qqnt-toolbox-local-sticker-manager .qlsm-close {
     position: absolute;
-    top: 10px;
+    top: 8px;
     right: 12px;
     display: grid;
     place-items: center;
@@ -92,7 +92,7 @@
 
 #qqnt-toolbox-local-sticker-manager .qlsm-tab {
     position: relative;
-    height: 41px;
+    height: 39px;
     padding: 0 2px;
     border: 0;
     outline: 0;
@@ -392,6 +392,44 @@
     padding-bottom: 10px;
 }
 
+#qqnt-toolbox-local-sticker-manager .qlsm-layout-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-layout-field {
+    min-width: 0;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-layout-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    min-width: 0;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-layout-label {
+    min-width: 0;
+    overflow: hidden;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-layout-range {
+    flex: none;
+    color: var(--qlsm-muted);
+    font-size: 11px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-layout-field .qlsm-number-control {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
 #qqnt-toolbox-local-sticker-manager .qlsm-number-control {
     display: grid;
     grid-template-columns: 74px auto;
@@ -476,8 +514,23 @@
     transform: translateX(16px);
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-config-row[data-disabled="true"] {
+#qqnt-toolbox-local-sticker-manager .qlsm-number-control[data-disabled="true"] {
     opacity: .48;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-panel-form .qlsm-config-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-height: 56px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-panel-form .qlsm-config-control {
+    justify-content: flex-end;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-recent-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
 }
 
 #qqnt-toolbox-local-sticker-manager .qlsm-panel-status {
@@ -485,23 +538,20 @@
     margin-top: 8px;
 }
 
+#qqnt-toolbox-local-sticker-manager .qlsm-panel-status:empty {
+    display: none;
+}
+
 #qqnt-toolbox-local-sticker-manager .qlsm-config-section {
     padding-bottom: 18px;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-tool-section {
-    border-bottom: 1px solid var(--qlsm-border);
-}
-
 #qqnt-toolbox-local-sticker-manager .qlsm-tool-title {
-    display: flex;
-    align-items: center;
-    min-height: 48px;
-    font-weight: 500;
-}
-
-#qqnt-toolbox-local-sticker-manager .qlsm-tool-body {
-    border-top: 1px solid var(--qlsm-border);
+    margin: 0;
+    padding: 16px 0 8px;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
 }
 
 #qqnt-toolbox-local-sticker-manager .qlsm-config-row {
@@ -544,6 +594,18 @@
         grid-template-columns: 1fr;
         gap: 8px;
         padding: 12px 0;
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-layout-grid {
+        grid-template-columns: 1fr;
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-panel-form .qlsm-config-row {
+        grid-template-columns: 1fr;
+    }
+
+    #qqnt-toolbox-local-sticker-manager .qlsm-panel-form .qlsm-config-control {
+        justify-content: flex-start;
     }
 
     #qqnt-toolbox-local-sticker-manager .qlsm-directory-row {

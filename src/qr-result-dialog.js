@@ -355,9 +355,6 @@
         confirmButton.addEventListener('click', close);
         root.addEventListener('pointerdown', event => {
             event.stopPropagation();
-            if (event.target === root) {
-                close();
-            }
         });
         root.addEventListener('click', event => event.stopPropagation());
         root.addEventListener('contextmenu', event => event.stopPropagation());

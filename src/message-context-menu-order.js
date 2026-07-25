@@ -1017,11 +1017,6 @@ export function createMessageContextMenuOrderController(options) {
             await options.saveOrder?.(order);
             closeEditor();
         });
-        layer.addEventListener('click', event => {
-            if (event.target === layer) {
-                closeEditorWithCleanup();
-            }
-        });
         layer.addEventListener('keydown', event => {
             if (event.key === 'Escape') {
                 event.preventDefault();

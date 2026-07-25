@@ -7,6 +7,7 @@ const path = require('path');
 
 const SUPPORTED_STICKER_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
 const LOCAL_STICKER_ENTRY_MODES = new Set(['contextmenu', 'replace', 'separate']);
+const LOCAL_STICKER_DIRECT_SEND_MODES = new Set(['alt', 'click']);
 const RECENT_STICKERS_FILE = 'recentStickers.json';
 const DEFAULT_LOCAL_STICKER_CONFIG = Object.freeze({
     enabled: false,
@@ -17,6 +18,7 @@ const DEFAULT_LOCAL_STICKER_CONFIG = Object.freeze({
     panelWidth: 350,
     panelHeight: 420,
     sendAsImage: false,
+    directSendMode: 'alt',
     recentEnabled: true,
     recentRows: 2,
     telegramBotToken: '',
@@ -53,6 +55,9 @@ function normalizeLocalStickerConfig(value, options = {}) {
         panelWidth: clampInteger(source.panelWidth, 280, 520, DEFAULT_LOCAL_STICKER_CONFIG.panelWidth),
         panelHeight: clampInteger(source.panelHeight, 260, 640, DEFAULT_LOCAL_STICKER_CONFIG.panelHeight),
         sendAsImage: source.sendAsImage === true,
+        directSendMode: LOCAL_STICKER_DIRECT_SEND_MODES.has(source.directSendMode)
+            ? source.directSendMode
+            : DEFAULT_LOCAL_STICKER_CONFIG.directSendMode,
         recentEnabled: source.recentEnabled !== false,
         recentRows: clampInteger(source.recentRows, 1, 6, DEFAULT_LOCAL_STICKER_CONFIG.recentRows),
         telegramBotToken: String(source.telegramBotToken || '').trim().slice(0, 256),

@@ -1077,11 +1077,6 @@ export function createFakeForwardEditor(options = {}) {
 
         closeButton.addEventListener('click', () => close());
         cancel.addEventListener('click', () => close());
-        root.addEventListener('pointerdown', event => {
-            if (event.target === root) {
-                close();
-            }
-        });
         form.addEventListener('submit', event => {
             event.preventDefault();
             commitForm().catch(error => setStatus(error?.message || '保存失败', 'error'));
