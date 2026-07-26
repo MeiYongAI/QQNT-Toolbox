@@ -2572,8 +2572,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     'invalid-github-token': text('GitHub 令牌无效，请检查后重试'),
                     'invalid-proxy-url': text('代理地址无效，请检查网络设置'),
                     'invalid-mirror-url': text('GitHub 镜像地址无效，请检查网络设置'),
-                    'installer-start-timeout': text('安装程序未能启动，QQ 不会退出'),
-                    'installer-start-expired': text('安装程序启动超时，请重新下载更新')
+                    'installer-bootstrap-missing': text('更新引导文件缺失，请重新安装最新版')
                 };
                 return messages[currentUpdateState.reason] || text('更新操作失败，请重试');
             }

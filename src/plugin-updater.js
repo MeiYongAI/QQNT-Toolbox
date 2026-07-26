@@ -5,7 +5,6 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const https = require('https');
 const path = require('path');
-const { spawn } = require('child_process');
 const {
     Uint8ArrayReader,
     Uint8ArrayWriter,
@@ -18,8 +17,7 @@ const MAX_API_BYTES = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 512;
-const INSTALL_PLAN_SCHEMA_VERSION = 4;
-const INSTALLER_HANDSHAKE_TIMEOUT_MS = 8000;
+const INSTALL_PLAN_SCHEMA_VERSION = 5;
 const SUPPORTED_INSTALLER_PLATFORMS = new Set(['win32', 'linux', 'darwin']);
 const REQUIRED_PLUGIN_FILES = Object.freeze([
     'manifest.json',
@@ -27,7 +25,7 @@ const REQUIRED_PLUGIN_FILES = Object.freeze([
     'src/main.js',
     'src/preload.js',
     'src/renderer.js',
-    'src/update-helper.js'
+    'src/update-bootstrap.js'
 ]);
 
 function createUpdaterError(reason, message = reason) {
@@ -550,6 +548,17 @@ function readPluginIdentity(pluginRoot) {
     }
 }
 
+function normalizePluginInjectEntry(value) {
+    const entry = String(value || '').replace(/\\/g, '/');
+    const relative = entry.replace(/^\.\//, '');
+    const segments = relative.split('/');
+    if (!relative || path.isAbsolute(entry) ||
+        segments.some(segment => !segment || segment === '.' || segment === '..')) {
+        throw createUpdaterError('invalid-plugin-entry');
+    }
+    return `./${relative}`;
+}
+
 async function assertCompletePluginDirectory(pluginDirectory, expectedVersion, expectedSlug) {
     const identity = readPluginIdentity(pluginDirectory);
     if (identity?.slug !== expectedSlug || identity.version !== expectedVersion) {
@@ -563,51 +572,6 @@ async function assertCompletePluginDirectory(pluginDirectory, expectedVersion, e
         }
     }
     return pluginDirectory;
-}
-
-function normalizeProcessIds(values) {
-    return [...new Set((Array.isArray(values) ? values : [])
-        .map(Number)
-        .filter(value => Number.isSafeInteger(value) && value > 0))];
-}
-
-async function launchUpdateInstaller({
-    runtimeExecutable,
-    helperPath,
-    planPath,
-    platform = process.platform,
-    spawnProcess = spawn
-}) {
-    if (!SUPPORTED_INSTALLER_PLATFORMS.has(platform)) {
-        throw createUpdaterError('unsupported-platform');
-    }
-    const child = spawnProcess(runtimeExecutable, [helperPath, planPath], {
-        cwd: path.dirname(runtimeExecutable),
-        detached: true,
-        env: {
-            ...process.env,
-            ELECTRON_RUN_AS_NODE: '1',
-            QQNT_TOOLBOX_UPDATE_HELPER: '1'
-        },
-        stdio: 'ignore',
-        windowsHide: true
-    });
-    if (typeof child.once === 'function') {
-        await new Promise((resolve, reject) => {
-            const onSpawn = () => {
-                child.removeListener?.('error', onError);
-                resolve();
-            };
-            const onError = error => {
-                child.removeListener?.('spawn', onSpawn);
-                reject(error);
-            };
-            child.once('spawn', onSpawn);
-            child.once('error', onError);
-        });
-    }
-    child.unref?.();
-    return child;
 }
 
 function isUsableCachedRelease(value) {
@@ -625,23 +589,6 @@ function isUpdaterTemporaryDirectoryName(name) {
     return /^\.qqnt-toolbox-(?:update|backup)-\d+-[0-9a-f]{8}(?:-old)?$/i.test(String(name || ''));
 }
 
-async function waitForInstallerHandshake(statusPath, version, deadlineAt, options = {}) {
-    const sleep = options.sleep || (delay => new Promise(resolve => setTimeout(resolve, delay)));
-    while (Date.now() < deadlineAt) {
-        const status = await readJson(statusPath);
-        if (Number(status?.schemaVersion) === INSTALL_PLAN_SCHEMA_VERSION && status.version === version) {
-            if (['waiting', 'installing', 'installed'].includes(status.status)) {
-                return status;
-            }
-            if (status.status === 'failed') {
-                throw createUpdaterError(String(status.reason || 'installer-failed'));
-            }
-        }
-        await sleep(50);
-    }
-    throw createUpdaterError('installer-start-timeout');
-}
-
 function createPluginUpdater(options = {}) {
     const currentVersion = normalizeVersion(options.currentVersion)?.value;
     const pluginRoot = path.resolve(String(options.pluginRoot || ''));
@@ -652,7 +599,7 @@ function createPluginUpdater(options = {}) {
     const updateRoot = path.join(dataDir, 'updater');
     const cachePath = path.join(updateRoot, 'release-cache.json');
     const pendingPath = path.join(updateRoot, 'pending-update.json');
-    const helperPath = path.join(updateRoot, 'update-helper.js');
+    const legacyHelperPath = path.join(updateRoot, 'update-helper.js');
     const planPath = path.join(updateRoot, 'install-plan.json');
     const statusPath = path.join(updateRoot, 'install-status.json');
     const stagingRoot = path.join(updateRoot, 'staging');
@@ -663,19 +610,17 @@ function createPluginUpdater(options = {}) {
     const requestRelease = options.requestLatestRelease || requestLatestRelease;
     const downloadArchive = options.downloadPluginArchive || downloadPluginArchive;
     const extractArchive = options.extractPluginArchive || extractPluginArchive;
-    const spawnProcess = options.spawnProcess || spawn;
     const now = options.now || Date.now;
     const getRequestOptions = typeof options.getRequestOptions === 'function'
         ? options.getRequestOptions
         : () => ({});
     const checkIntervalMs = Number(options.checkIntervalMs) || DEFAULT_CHECK_INTERVAL_MS;
-    const handshakeTimeoutMs = Number(options.handshakeTimeoutMs) || INSTALLER_HANDSHAKE_TIMEOUT_MS;
     let cache = null;
     let availableRelease = null;
     let initialized = false;
     let initializePromise = null;
     let operationPromise = null;
-    let installerLaunched = false;
+    let restartArmed = false;
     let state = {
         status: 'idle',
         supported: SUPPORTED_INSTALLER_PLATFORMS.has(platform),
@@ -730,7 +675,7 @@ function createPluginUpdater(options = {}) {
         const files = [
             planPath,
             statusPath,
-            helperPath,
+            legacyHelperPath,
             path.join(updateRoot, 'update-helper.ps1')
         ];
         if (!keepPending) {
@@ -767,11 +712,6 @@ function createPluginUpdater(options = {}) {
         if (status.status === 'failed') {
             await cleanupTemporaryPluginDirectories(backupPluginRoot);
             return String(status.reason || 'installer-failed');
-        }
-        if (status.status === 'queued' && Number(plan.launchDeadlineAt) < Date.now()) {
-            await cleanupTemporaryPluginDirectories();
-            await cleanupUpdateArtifacts({ keepPending: true });
-            return 'installer-start-expired';
         }
         return '';
     }
@@ -953,12 +893,12 @@ function createPluginUpdater(options = {}) {
         return cloneState(state);
     }
 
-    async function activatePendingUpdate(runtime = {}) {
+    async function activatePendingUpdate() {
         await ensureInitialized();
         if (state.status !== 'ready') {
             return { ok: false, ...cloneState(state), reason: 'update-not-ready' };
         }
-        if (installerLaunched) {
+        if (restartArmed) {
             return { ok: true, ...emit({ status: 'restarting', reason: '' }) };
         }
         if (operationPromise) {
@@ -972,15 +912,29 @@ function createPluginUpdater(options = {}) {
             const nonce = `${Number(now())}-${crypto.randomBytes(4).toString('hex')}`;
             const preparedPluginRoot = path.join(pluginParent, `.qqnt-toolbox-update-${nonce}`);
             const backupPluginRoot = path.join(pluginParent, `.qqnt-toolbox-backup-${nonce}`);
+            const manifestPath = path.join(pluginRoot, 'manifest.json');
+            let installedManifest = null;
+            let manifestArmed = false;
             try {
                 if (!isDirectChildPath(pluginParent, pluginRoot) ||
                     readPluginIdentity(pluginRoot)?.slug !== pluginSlug) {
                     throw createUpdaterError('installed-plugin-missing');
                 }
-                const helperSource = path.resolve(String(options.helperSource || ''));
-                if (!options.helperSource || !fsSync.existsSync(helperSource)) {
-                    throw createUpdaterError('installer-helper-missing');
+                const bootstrapSource = path.resolve(String(options.bootstrapSource || ''));
+                const bootstrapStat = options.bootstrapSource && isPathInside(pluginRoot, bootstrapSource)
+                    ? await fs.stat(bootstrapSource).catch(() => null)
+                    : null;
+                if (!bootstrapStat?.isFile()) {
+                    throw createUpdaterError('installer-bootstrap-missing');
                 }
+                installedManifest = await readJson(manifestPath);
+                if (!installedManifest || typeof installedManifest !== 'object' ||
+                    String(installedManifest.slug || '') !== pluginSlug) {
+                    throw createUpdaterError('installed-plugin-missing');
+                }
+                const originalMainInject = normalizePluginInjectEntry(installedManifest.injects?.main);
+                const bootstrapRelativePath = path.relative(pluginRoot, bootstrapSource).replace(/\\/g, '/');
+                const bootstrapInject = normalizePluginInjectEntry(bootstrapRelativePath);
                 await fs.rm(preparedPluginRoot, { recursive: true, force: true });
                 await fs.cp(pending.stagedPluginRoot, preparedPluginRoot, {
                     recursive: true,
@@ -989,24 +943,10 @@ function createPluginUpdater(options = {}) {
                 });
                 await assertCompletePluginDirectory(preparedPluginRoot, pending.version, pluginSlug);
                 await fs.mkdir(updateRoot, { recursive: true });
-                await fs.copyFile(helperSource, helperPath);
-                const processIds = normalizeProcessIds(runtime.processIds);
-                if (!processIds.length) {
-                    throw createUpdaterError('installer-processes-missing');
-                }
-                const hostExecutable = path.resolve(String(runtime.hostExecutable || ''));
-                if (!runtime.hostExecutable) {
-                    throw createUpdaterError('installer-host-missing');
-                }
-                const runtimeExecutable = path.resolve(String(
-                    runtime.runtimeExecutable || runtime.hostExecutable
-                ));
-                const launchDeadlineAt = Number(now()) + handshakeTimeoutMs;
                 const plan = {
                     schemaVersion: INSTALL_PLAN_SCHEMA_VERSION,
                     version: pending.version,
                     createdAt: Number(now()),
-                    launchDeadlineAt,
                     slug: pluginSlug,
                     nonce,
                     pluginParent,
@@ -1016,9 +956,8 @@ function createPluginUpdater(options = {}) {
                     updateRoot,
                     pendingPath,
                     statusPath,
-                    processIds,
-                    hostExecutable,
-                    relaunch: runtime.relaunch !== false,
+                    originalMainInject,
+                    bootstrapInject,
                     requiredFiles: [...REQUIRED_PLUGIN_FILES]
                 };
                 await writeJson(planPath, plan);
@@ -1029,35 +968,23 @@ function createPluginUpdater(options = {}) {
                     version: pending.version,
                     updatedAt: Number(now())
                 });
-                await launchUpdateInstaller({
-                    runtimeExecutable,
-                    helperPath,
-                    planPath,
-                    platform,
-                    spawnProcess
+                await writeJson(manifestPath, {
+                    ...installedManifest,
+                    injects: {
+                        ...(installedManifest.injects || {}),
+                        main: bootstrapInject
+                    }
                 });
-                if (typeof options.waitForInstallerHandshake === 'function') {
-                    await options.waitForInstallerHandshake({
-                        planPath,
-                        statusPath,
-                        version: pending.version,
-                        launchDeadlineAt
-                    });
-                } else {
-                    await waitForInstallerHandshake(
-                        statusPath,
-                        pending.version,
-                        launchDeadlineAt,
-                        { sleep: options.sleep }
-                    );
-                }
-                installerLaunched = true;
+                manifestArmed = true;
+                restartArmed = true;
                 return { ok: true, ...emit({ status: 'restarting', reason: '' }) };
             } catch (error) {
                 const reason = String(error?.reason || 'activation-failed');
-                if (reason !== 'installer-start-timeout') {
-                    await fs.rm(preparedPluginRoot, { recursive: true, force: true }).catch(() => {});
+                if (manifestArmed && installedManifest) {
+                    await writeJson(manifestPath, installedManifest).catch(() => {});
                 }
+                await fs.rm(preparedPluginRoot, { recursive: true, force: true }).catch(() => {});
+                await cleanupUpdateArtifacts({ keepPending: true });
                 return { ok: false, ...emit({ status: 'error', reason }) };
             }
         })();
@@ -1082,7 +1009,6 @@ module.exports = {
     createFetchUpdateTransport,
     createPluginUpdater,
     extractPluginArchive,
-    launchUpdateInstaller,
     normalizeArchiveEntryName,
     normalizeGitHubRelease,
     normalizeVersion,

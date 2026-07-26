@@ -651,7 +651,7 @@ function getPluginUpdater() {
             currentVersion: getInstalledPluginVersion(),
             pluginRoot: path.resolve(__dirname, '..'),
             dataDir: getPluginDataDir(),
-            helperSource: path.join(__dirname, 'update-helper.js'),
+            bootstrapSource: path.join(__dirname, 'update-bootstrap.js'),
             requestLatestRelease: transport.requestLatestRelease,
             downloadPluginArchive: transport.downloadPluginArchive,
             getRequestOptions: () => {
@@ -2730,19 +2730,11 @@ function installConfigIpc() {
     ipcMain.handle(CHANNEL_PREPARE_UPDATE, () => getPluginUpdater().prepareUpdate());
     ipcMain.handle(CHANNEL_RESTART_UPDATE, async () => {
         const updater = getPluginUpdater();
-        const result = await updater.activatePendingUpdate({
-            processIds: [
-                process.pid,
-                ...(app.getAppMetrics?.() || []).map(metric => metric.pid)
-            ],
-            runtimeExecutable: process.execPath,
-            hostExecutable: process.platform === 'linux' && process.env.APPIMAGE
-                ? process.env.APPIMAGE
-                : process.execPath
-        });
+        const result = await updater.activatePendingUpdate();
         if (!result.ok) {
             return result;
         }
+        app.relaunch();
         setTimeout(() => {
             app.quit();
         }, 250).unref?.();

@@ -1,13 +1,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
+const fsSync = require('node:fs');
 const fs = require('node:fs').promises;
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { promisify } = require('node:util');
 const {
     TextReader,
     Uint8ArrayWriter,
@@ -19,20 +18,21 @@ const {
     createFetchUpdateTransport,
     createPluginUpdater,
     extractPluginArchive,
-    launchUpdateInstaller,
     normalizeArchiveEntryName,
     normalizeGitHubRelease
 } = require('../src/plugin-updater');
-const { installUpdate } = require('../src/update-helper');
+const {
+    installPreparedUpdate,
+    runUpdateBootstrap
+} = require('../src/update-bootstrap');
 
-const execFile = promisify(childProcess.execFile);
 const REQUIRED_TEST_PLUGIN_FILES = [
     'manifest.json',
     'package.json',
     'src/main.js',
     'src/preload.js',
     'src/renderer.js',
-    'src/update-helper.js'
+    'src/update-bootstrap.js'
 ];
 
 function makeFetchResponse(status, body = '', headers = {}) {
@@ -78,12 +78,20 @@ async function withTemporaryDirectory(callback) {
 
 async function writeTestPlugin(pluginRoot, version, marker = '') {
     const files = {
-        'manifest.json': JSON.stringify({ slug: 'qqnt_toolbox', version }),
+        'manifest.json': JSON.stringify({
+            slug: 'qqnt_toolbox',
+            version,
+            injects: {
+                main: './src/main.js',
+                preload: './src/preload.js',
+                renderer: './src/renderer.js'
+            }
+        }),
         'package.json': JSON.stringify({ name: 'qqnt-toolbox', version }),
-        'src/main.js': 'module.exports = {};',
+        'src/main.js': `module.exports = { marker: ${JSON.stringify(marker)} };`,
         'src/preload.js': 'module.exports = {};',
         'src/renderer.js': 'export {};',
-        'src/update-helper.js': "'use strict';",
+        'src/update-bootstrap.js': "'use strict';",
         'marker.txt': marker
     };
     for (const [relativePath, content] of Object.entries(files)) {
@@ -93,32 +101,45 @@ async function writeTestPlugin(pluginRoot, version, marker = '') {
     }
 }
 
-function runJavaScriptInstaller(planPath) {
-    return execFile(process.execPath, [
-        path.join(__dirname, '..', 'src', 'update-helper.js'),
-        planPath
-    ]);
-}
-
-async function waitForInstallStatus(statusPath, expected, timeoutMs = 10000) {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        try {
-            const status = JSON.parse(await fs.readFile(statusPath, 'utf8'));
-            if (status.status === expected) {
-                return status;
-            }
-            if (status.status === 'failed') {
-                throw new Error(status.reason || 'installer failed');
-            }
-        } catch (error) {
-            if (error?.code !== 'ENOENT' && !String(error?.message || '').includes('Unexpected end')) {
-                throw error;
-            }
-        }
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    throw new Error(`Timed out waiting for installer status: ${expected}`);
+async function writeBootstrapPlan({
+    pluginRoot,
+    preparedPluginRoot,
+    backupPluginRoot,
+    updateRoot,
+    version,
+    nonce
+}) {
+    const planPath = path.join(updateRoot, 'install-plan.json');
+    const statusPath = path.join(updateRoot, 'install-status.json');
+    const manifestPath = path.join(pluginRoot, 'manifest.json');
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    manifest.injects.main = './src/update-bootstrap.js';
+    await fs.mkdir(updateRoot, { recursive: true });
+    await fs.writeFile(manifestPath, JSON.stringify(manifest));
+    await fs.writeFile(planPath, JSON.stringify({
+        schemaVersion: 5,
+        version,
+        createdAt: Date.now(),
+        slug: 'qqnt_toolbox',
+        nonce,
+        pluginParent: path.dirname(pluginRoot),
+        pluginRoot,
+        preparedPluginRoot,
+        backupPluginRoot,
+        updateRoot,
+        pendingPath: path.join(updateRoot, 'pending-update.json'),
+        statusPath,
+        originalMainInject: './src/main.js',
+        bootstrapInject: './src/update-bootstrap.js',
+        requiredFiles: REQUIRED_TEST_PLUGIN_FILES
+    }));
+    await fs.writeFile(statusPath, JSON.stringify({
+        schemaVersion: 5,
+        status: 'queued',
+        reason: '',
+        version
+    }));
+    return { planPath, statusPath };
 }
 
 test('normalizes GitHub Releases and compares semantic versions', () => {
@@ -219,38 +240,16 @@ test('uses one optional proxy address for updates and sticker downloads', async 
     );
 });
 
-test('launches the same JavaScript installer on every supported desktop platform', async () => {
-    for (const platform of ['win32', 'linux', 'darwin']) {
-        let spawnCall = null;
-        await launchUpdateInstaller({
-            runtimeExecutable: process.execPath,
-            helperPath: path.join(__dirname, '..', 'src', 'update-helper.js'),
-            planPath: path.join(os.tmpdir(), 'install-plan.json'),
-            platform,
-            spawnProcess(executable, args, options) {
-                spawnCall = { executable, args, options };
-                return {
-                    once(event, callback) {
-                        if (event === 'spawn') {
-                            setImmediate(callback);
-                        }
-                        return this;
-                    },
-                    unref() {}
-                };
-            }
-        });
-        assert.equal(spawnCall.executable, process.execPath);
-        assert.equal(spawnCall.options.detached, true);
-        assert.equal(spawnCall.options.env.ELECTRON_RUN_AS_NODE, '1');
-    }
-
-    await assert.rejects(launchUpdateInstaller({
-        runtimeExecutable: process.execPath,
-        helperPath: 'helper.js',
-        planPath: 'plan.json',
-        platform: 'freebsd'
-    }), { reason: 'unsupported-platform' });
+test('restarts through Electron and never launches QQ as a Node helper', async () => {
+    const [mainSource, updaterSource, bootstrapSource] = await Promise.all([
+        fs.readFile(path.join(__dirname, '..', 'src', 'main.js'), 'utf8'),
+        fs.readFile(path.join(__dirname, '..', 'src', 'plugin-updater.js'), 'utf8'),
+        fs.readFile(path.join(__dirname, '..', 'src', 'update-bootstrap.js'), 'utf8')
+    ]);
+    assert.match(mainSource, /app\.relaunch\(\)/);
+    assert.match(updaterSource, /bootstrapSource/);
+    assert.match(bootstrapSource, /installPreparedUpdate/);
+    assert.doesNotMatch(updaterSource, /ELECTRON_RUN_AS_NODE|launchUpdateInstaller|child_process/);
 });
 
 test('extracts only a complete, rooted plugin package with the expected identity', async () => {
@@ -262,7 +261,7 @@ test('extracts only a complete, rooted plugin package with the expected identity
             'src/main.js': 'module.exports = {};',
             'src/preload.js': 'module.exports = {};',
             'src/renderer.js': 'export {};',
-            'src/update-helper.js': "'use strict';"
+            'src/update-bootstrap.js': "'use strict';"
         };
         for (const [name, content] of Object.entries(files)) {
             await writer.add(`QQNT-Toolbox/${name}`, new TextReader(content));
@@ -294,21 +293,17 @@ test('stages a Release package and prepares an in-place installation plan', asyn
     await withTemporaryDirectory(async directory => {
         const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox-v0.8.8');
         const dataDir = path.join(directory, 'data');
-        const helperSource = path.join(__dirname, '..', 'src', 'update-helper.js');
-        const hostExecutable = path.join(directory, 'QQ.exe');
         const bytes = Buffer.from('verified release');
         const raw = makeGitHubRelease('0.8.9', bytes);
         let requestOptions = null;
         let downloadOptions = null;
-        let spawnCall = null;
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
-        await fs.writeFile(hostExecutable, 'host');
 
         const updater = createPluginUpdater({
             currentVersion: '0.8.8',
             pluginRoot,
             dataDir,
-            helperSource,
+            bootstrapSource: path.join(pluginRoot, 'src', 'update-bootstrap.js'),
             platform: 'win32',
             now: () => 1000,
             getRequestOptions: () => ({
@@ -332,20 +327,7 @@ test('stages a Release package and prepares an in-place installation plan', asyn
             extractPluginArchive: async ({ destination, expectedVersion }) => {
                 await writeTestPlugin(destination, expectedVersion, 'new');
                 return destination;
-            },
-            spawnProcess(executable, args, spawnOptions) {
-                spawnCall = { executable, args, options: spawnOptions };
-                return {
-                    once(event, callback) {
-                        if (event === 'spawn') {
-                            setImmediate(callback);
-                        }
-                        return this;
-                    },
-                    unref() {}
-                };
-            },
-            waitForInstallerHandshake: async () => {}
+            }
         });
 
         const checked = await updater.checkForUpdates({ force: true });
@@ -356,45 +338,35 @@ test('stages a Release package and prepares an in-place installation plan', asyn
         assert.equal(prepared.status, 'ready');
         assert.equal(downloadOptions.mirrorUrl, 'https://mirror.example/');
 
-        const activated = await updater.activatePendingUpdate({
-            processIds: [42, 24, 42],
-            hostExecutable,
-            relaunch: false
-        });
+        const activated = await updater.activatePendingUpdate();
         assert.equal(activated.status, 'restarting');
-        assert.equal(spawnCall.executable, hostExecutable);
-        assert.equal(spawnCall.options.detached, true);
-        assert.equal(spawnCall.options.env.ELECTRON_RUN_AS_NODE, '1');
-        assert.deepEqual(spawnCall.args, [
-            path.join(dataDir, 'updater', 'update-helper.js'),
-            path.join(dataDir, 'updater', 'install-plan.json')
-        ]);
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'old');
+        const armedManifest = JSON.parse(await fs.readFile(path.join(pluginRoot, 'manifest.json'), 'utf8'));
+        assert.equal(armedManifest.injects.main, './src/update-bootstrap.js');
 
         const plan = JSON.parse(await fs.readFile(
             path.join(dataDir, 'updater', 'install-plan.json'),
             'utf8'
         ));
-        assert.equal(plan.schemaVersion, 4);
+        assert.equal(plan.schemaVersion, 5);
         assert.equal(path.resolve(plan.pluginRoot), path.resolve(pluginRoot));
         assert.equal(path.basename(plan.pluginRoot), 'QQNT-Toolbox-v0.8.8');
         assert.match(path.basename(plan.preparedPluginRoot), /^\.qqnt-toolbox-update-/);
         assert.match(path.basename(plan.backupPluginRoot), /^\.qqnt-toolbox-backup-/);
-        assert.deepEqual(plan.processIds, [42, 24]);
+        assert.equal(plan.originalMainInject, './src/main.js');
+        assert.equal(plan.bootstrapInject, './src/update-bootstrap.js');
         assert.equal(await fs.readFile(path.join(plan.preparedPluginRoot, 'marker.txt'), 'utf8'), 'new');
     });
 });
 
-test('does not report restart readiness before the installer handshake', async () => {
+test('does not arm a restart when the startup bootstrap is missing', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox');
         const dataDir = path.join(directory, 'data');
         const stagingRoot = path.join(dataDir, 'updater', 'staging', 'v0.8.9');
-        const hostExecutable = path.join(directory, 'QQ.exe');
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
         await writeTestPlugin(stagingRoot, '0.8.9', 'new');
         await fs.mkdir(path.join(dataDir, 'updater'), { recursive: true });
-        await fs.writeFile(hostExecutable, 'host');
         await fs.writeFile(path.join(dataDir, 'updater', 'pending-update.json'), JSON.stringify({
             schemaVersion: 1,
             kind: 'version-update',
@@ -407,40 +379,22 @@ test('does not report restart readiness before the installer handshake', async (
             currentVersion: '0.8.8',
             pluginRoot,
             dataDir,
-            helperSource: path.join(__dirname, '..', 'src', 'update-helper.js'),
+            bootstrapSource: path.join(pluginRoot, 'src', 'missing-bootstrap.js'),
             platform: 'win32',
-            now: () => 1000,
-            spawnProcess() {
-                return {
-                    once(event, callback) {
-                        if (event === 'spawn') {
-                            setImmediate(callback);
-                        }
-                        return this;
-                    },
-                    unref() {}
-                };
-            },
-            waitForInstallerHandshake: async () => {
-                const error = new Error('installer-start-timeout');
-                error.reason = 'installer-start-timeout';
-                throw error;
-            }
+            now: () => 1000
         });
         assert.equal((await updater.getState()).status, 'ready');
-        const result = await updater.activatePendingUpdate({
-            processIds: [42],
-            hostExecutable,
-            relaunch: false
-        });
+        const result = await updater.activatePendingUpdate();
         assert.equal(result.ok, false);
         assert.equal(result.status, 'error');
-        assert.equal(result.reason, 'installer-start-timeout');
+        assert.equal(result.reason, 'installer-bootstrap-missing');
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'old');
+        const manifest = JSON.parse(await fs.readFile(path.join(pluginRoot, 'manifest.json'), 'utf8'));
+        assert.equal(manifest.injects.main, './src/main.js');
     });
 });
 
-test('JavaScript installer replaces contents without changing the plugin directory name', async () => {
+test('startup bootstrap replaces contents without changing the plugin directory name', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginParent = path.join(directory, "plugin parent's files");
         const pluginRoot = path.join(pluginParent, 'QQNT-Toolbox-v0.8.8');
@@ -449,35 +403,20 @@ test('JavaScript installer replaces contents without changing the plugin directo
         const backupPluginRoot = path.join(pluginParent, `.qqnt-toolbox-backup-${nonce}`);
         const dataDir = path.join(directory, 'data');
         const updateRoot = path.join(dataDir, 'updater');
-        const pendingPath = path.join(updateRoot, 'pending-update.json');
-        const planPath = path.join(updateRoot, 'install-plan.json');
-        const statusPath = path.join(updateRoot, 'install-status.json');
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
         await writeTestPlugin(preparedPluginRoot, '0.8.9', 'new');
-        await fs.mkdir(updateRoot, { recursive: true });
-        await fs.writeFile(pendingPath, '{}');
-        await fs.writeFile(planPath, JSON.stringify({
-            schemaVersion: 4,
-            version: '0.8.9',
-            createdAt: Date.now(),
-            launchDeadlineAt: Date.now() + 60000,
-            slug: 'qqnt_toolbox',
-            nonce,
-            pluginParent,
+        const { planPath, statusPath } = await writeBootstrapPlan({
             pluginRoot,
             preparedPluginRoot,
             backupPluginRoot,
             updateRoot,
-            pendingPath,
-            statusPath,
-            processIds: [2147483646],
-            hostExecutable: process.execPath,
-            relaunch: false,
-            requiredFiles: REQUIRED_TEST_PLUGIN_FILES
-        }));
+            version: '0.8.9',
+            nonce
+        });
 
-        await runJavaScriptInstaller(planPath);
+        const installed = installPreparedUpdate(planPath);
 
+        assert.equal(installed.ok, true);
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'new');
         assert.equal(await fs.readFile(path.join(backupPluginRoot, 'marker.txt'), 'utf8'), 'old');
         const installedStatus = JSON.parse(await fs.readFile(statusPath, 'utf8'));
@@ -497,84 +436,54 @@ test('JavaScript installer replaces contents without changing the plugin directo
     });
 });
 
-test('detached JavaScript installer survives the launcher process', async () => {
+test('startup bootstrap loads the updated main module in the same launch', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginParent = path.join(directory, "plugin parent's files");
         const pluginRoot = path.join(pluginParent, 'QQNT-Toolbox-v0.8.8');
         const nonce = `${Date.now()}-facefeed`;
         const preparedPluginRoot = path.join(pluginParent, `.qqnt-toolbox-update-${nonce}`);
         const backupPluginRoot = path.join(pluginParent, `.qqnt-toolbox-backup-${nonce}`);
-        const updateRoot = path.join(directory, "data folder's updater");
-        const planPath = path.join(updateRoot, 'install-plan.json');
-        const statusPath = path.join(updateRoot, 'install-status.json');
-        const launcherPath = path.join(directory, 'launcher.js');
-        const helperPath = path.join(__dirname, '..', 'src', 'update-helper.js');
-        const updaterPath = path.join(__dirname, '..', 'src', 'plugin-updater.js');
+        const dataDir = path.join(directory, "data folder's qqnt_toolbox");
+        const updateRoot = path.join(dataDir, 'updater');
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
         await writeTestPlugin(preparedPluginRoot, '0.8.9', 'new');
-        await fs.mkdir(updateRoot, { recursive: true });
-        await fs.writeFile(planPath, JSON.stringify({
-            schemaVersion: 4,
-            version: '0.8.9',
-            createdAt: Date.now(),
-            launchDeadlineAt: Date.now() + 60000,
-            slug: 'qqnt_toolbox',
-            nonce,
-            pluginParent,
+        await writeBootstrapPlan({
             pluginRoot,
             preparedPluginRoot,
             backupPluginRoot,
             updateRoot,
-            pendingPath: path.join(updateRoot, 'pending-update.json'),
-            statusPath,
-            processIds: [],
-            hostExecutable: process.execPath,
-            relaunch: false,
-            requiredFiles: REQUIRED_TEST_PLUGIN_FILES
-        }));
-        await fs.writeFile(launcherPath, [
-            "'use strict';",
-            "const fs = require('node:fs');",
-            "const { launchUpdateInstaller } = require(process.argv[2]);",
-            'const [planPath, statusPath, helperPath] = process.argv.slice(3);',
-            "const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));",
-            'plan.processIds = [process.pid];',
-            'plan.launchDeadlineAt = Date.now() + 60000;',
-            "fs.writeFileSync(planPath, JSON.stringify(plan));",
-            '(async () => {',
-            'await launchUpdateInstaller({',
-            '  runtimeExecutable: process.execPath,',
-            '  helperPath,',
-            '  planPath,',
-            '  platform: process.platform',
-            '});',
-            'const deadline = Date.now() + 8000;',
-            'const poll = () => {',
-            '  try {',
-            "    const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));",
-            "    if (status.status === 'waiting') process.exit(0);",
-            '  } catch {}',
-            '  if (Date.now() >= deadline) process.exit(2);',
-            '  setTimeout(poll, 50);',
-            '};',
-            'poll();',
-            '})().catch(() => process.exit(3));'
-        ].join('\n'));
+            version: '0.8.9',
+            nonce
+        });
+        const oldManifest = JSON.parse(await fs.readFile(path.join(pluginRoot, 'manifest.json'), 'utf8'));
+        const liteLoader = {
+            plugins: {
+                qqnt_toolbox: {
+                    manifest: oldManifest,
+                    path: {
+                        plugin: pluginRoot,
+                        data: dataDir,
+                        injects: {
+                            main: path.join(pluginRoot, 'src', 'update-bootstrap.js')
+                        }
+                    }
+                }
+            }
+        };
 
-        await execFile(process.execPath, [
-            launcherPath,
-            updaterPath,
-            planPath,
-            statusPath,
-            helperPath
-        ], { timeout: 12000 });
-        const status = await waitForInstallStatus(statusPath, 'installed');
-        assert.equal(status.status, 'installed');
+        const loaded = runUpdateBootstrap({ liteLoader, pluginRoot, dataDir });
+
+        assert.equal(loaded.marker, 'new');
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'new');
+        assert.equal(liteLoader.plugins.qqnt_toolbox.manifest.version, '0.8.9');
+        assert.equal(
+            path.resolve(liteLoader.plugins.qqnt_toolbox.path.injects.main),
+            path.resolve(pluginRoot, 'src', 'main.js')
+        );
     });
 });
 
-test('JavaScript installer restores the old plugin when activation fails', async () => {
+test('startup bootstrap restores the old plugin when activation fails', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginParent = path.join(directory, 'plugins');
         const pluginRoot = path.join(pluginParent, 'QQNT-Toolbox');
@@ -582,49 +491,77 @@ test('JavaScript installer restores the old plugin when activation fails', async
         const preparedPluginRoot = path.join(pluginParent, `.qqnt-toolbox-update-${nonce}`);
         const backupPluginRoot = path.join(pluginParent, `.qqnt-toolbox-backup-${nonce}`);
         const updateRoot = path.join(directory, 'data', 'updater');
-        const planPath = path.join(updateRoot, 'install-plan.json');
-        const statusPath = path.join(updateRoot, 'install-status.json');
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
         await writeTestPlugin(preparedPluginRoot, '0.8.9', 'new');
-        await fs.mkdir(updateRoot, { recursive: true });
-        await fs.writeFile(planPath, JSON.stringify({
-            schemaVersion: 4,
-            version: '0.8.9',
-            createdAt: Date.now(),
-            launchDeadlineAt: Date.now() + 60000,
-            slug: 'qqnt_toolbox',
-            nonce,
-            pluginParent,
+        const { planPath, statusPath } = await writeBootstrapPlan({
             pluginRoot,
             preparedPluginRoot,
             backupPluginRoot,
             updateRoot,
-            pendingPath: path.join(updateRoot, 'pending-update.json'),
-            statusPath,
-            processIds: [2147483646],
-            hostExecutable: process.execPath,
-            relaunch: false,
-            requiredFiles: REQUIRED_TEST_PLUGIN_FILES
-        }));
+            version: '0.8.9',
+            nonce
+        });
 
         let renameCount = 0;
-        const result = await installUpdate(planPath, {
-            async renamePath(source, destination) {
+        const result = installPreparedUpdate(planPath, {
+            renamePath(source, destination) {
                 renameCount += 1;
                 if (renameCount === 2) {
                     throw new Error('simulated-activation-failure');
                 }
-                return fs.rename(source, destination);
+                return fsSync.renameSync(source, destination);
             }
         });
 
         assert.equal(result.ok, false);
         assert.equal(renameCount, 3);
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'old');
+        const restoredManifest = JSON.parse(await fs.readFile(path.join(pluginRoot, 'manifest.json'), 'utf8'));
+        assert.equal(restoredManifest.injects.main, './src/main.js');
         await assert.rejects(fs.stat(backupPluginRoot), { code: 'ENOENT' });
         const failedStatus = JSON.parse(await fs.readFile(statusPath, 'utf8'));
         assert.equal(failedStatus.status, 'failed');
         assert.equal(failedStatus.reason, 'simulated-activation-failure');
+    });
+});
+
+test('startup bootstrap restores the normal entry when its install plan is missing', async () => {
+    await withTemporaryDirectory(async directory => {
+        const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox');
+        const dataDir = path.join(directory, 'data');
+        await writeTestPlugin(pluginRoot, '0.8.8', 'old');
+        const manifestPath = path.join(pluginRoot, 'manifest.json');
+        const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+        manifest.injects.main = './src/update-bootstrap.js';
+        await fs.writeFile(manifestPath, JSON.stringify(manifest));
+        const liteLoader = {
+            plugins: {
+                qqnt_toolbox: {
+                    manifest,
+                    path: {
+                        plugin: pluginRoot,
+                        data: dataDir,
+                        injects: {
+                            main: path.join(pluginRoot, 'src', 'update-bootstrap.js')
+                        }
+                    }
+                }
+            }
+        };
+
+        const loaded = runUpdateBootstrap({
+            liteLoader,
+            pluginRoot,
+            dataDir,
+            loadModule: (mainPath, result) => ({ mainPath, result })
+        });
+
+        assert.equal(loaded.result.ok, false);
+        assert.equal(loaded.result.reason, 'invalid-plan');
+        assert.equal(path.resolve(loaded.mainPath), path.resolve(pluginRoot, 'src', 'main.js'));
+        const restoredManifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+        assert.equal(restoredManifest.injects.main, './src/main.js');
+        assert.equal(liteLoader.plugins.qqnt_toolbox.manifest.injects.main, './src/main.js');
     });
 });
 
