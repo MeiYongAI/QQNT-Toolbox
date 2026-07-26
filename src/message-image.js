@@ -2,7 +2,8 @@
 
 const MAX_MESSAGE_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_MESSAGE_IMAGE_COUNT = 100;
-const DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN = 'QQ消息-{yyyy}{MM}{dd}-{HH}{mm}{ss}';
+const DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN =
+    '{source}-{yyyy}{MM}{dd}-{HH}{mm}{ss}';
 const MAX_MESSAGE_IMAGE_FILE_NAME_PATTERN_LENGTH = 128;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -25,12 +26,25 @@ function normalizeMessageImagePayload(payload) {
         !data.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
         return null;
     }
+    const normalizeName = value => String(value || '')
+        .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+    const normalizeNumber = value => {
+        const number = String(value || '').trim();
+        return /^\d{5,20}$/.test(number) ? number : '';
+    };
     return {
         data,
         count: Math.min(
             MAX_MESSAGE_IMAGE_COUNT,
             Math.max(1, Math.floor(Number(payload?.count) || 1))
-        )
+        ),
+        qqNumber: normalizeNumber(payload?.qqNumber),
+        nickname: normalizeName(payload?.nickname),
+        groupNumber: normalizeNumber(payload?.groupNumber),
+        groupName: normalizeName(payload?.groupName)
     };
 }
 
@@ -68,9 +82,16 @@ function sanitizeMessageImageFileName(value) {
 function formatMessageImageFileName(
     now = new Date(),
     pattern = DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
-    count = 1
+    count = 1,
+    metadata = {}
 ) {
     const pad = value => String(value).padStart(2, '0');
+    const normalizedCount = Math.max(1, Math.floor(Number(count) || 1));
+    const sourceNumber = String(metadata?.qqNumber || metadata?.groupNumber || '');
+    const sourceName = String(metadata?.nickname || metadata?.groupName || '');
+    const source = sourceName && sourceNumber
+        ? `${sourceName}(${sourceNumber})`
+        : sourceName || sourceNumber || (normalizedCount > 1 ? '多人消息' : '未知来源');
     const tokens = {
         yyyy: String(now.getFullYear()),
         MM: pad(now.getMonth() + 1),
@@ -78,10 +99,18 @@ function formatMessageImageFileName(
         HH: pad(now.getHours()),
         mm: pad(now.getMinutes()),
         ss: pad(now.getSeconds()),
-        count: String(Math.max(1, Math.floor(Number(count) || 1)))
+        count: String(normalizedCount),
+        source,
+        qq_number: String(metadata?.qqNumber || ''),
+        nickname: String(metadata?.nickname || ''),
+        group_number: String(metadata?.groupNumber || ''),
+        group_name: String(metadata?.groupName || '')
     };
     const template = String(pattern || '').trim() || DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN;
-    const expanded = template.replace(/\{(yyyy|MM|dd|HH|mm|ss|count)\}/g, (_match, token) => tokens[token]);
+    const expanded = template.replace(
+        /\{(yyyy|MM|dd|HH|mm|ss|count|source|qq_number|nickname|group_number|group_name)\}/g,
+        (_match, token) => tokens[token]
+    );
     return sanitizeMessageImageFileName(expanded);
 }
 
@@ -141,7 +170,8 @@ async function saveMessageImage({
             formatMessageImageFileName(
                 new Date(),
                 normalizedSettings.fileNamePattern,
-                image.count
+                image.count,
+                image
             ),
             image.data
         );

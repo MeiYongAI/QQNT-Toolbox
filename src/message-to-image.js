@@ -2,7 +2,30 @@ const STYLE_ID = 'qqnt-toolbox-message-to-image-style';
 const ROOT_ID = 'qqnt-toolbox-message-to-image-render-root';
 const TOAST_ID = 'qqnt-toolbox-message-image-toast';
 const TOOLBAR_BUTTON_CLASS = 'qqnt-toolbox-message-to-image-toolbar-button';
-const INCLUDE_REACTIONS_CLASS = 'qqnt-toolbox-message-image-include-reactions';
+const MESSAGE_ONLY_CLASS = 'qqnt-toolbox-message-image-only-message';
+const MESSAGE_ADDON_SELECTOR = [
+    '[class*="reaction" i]',
+    '.emoji-like',
+    '[class*="essence" i]',
+    '[data-role*="essence" i]',
+    '[data-type*="essence" i]',
+    '[aria-label="精华"]',
+    '[title="精华"]'
+].join(',');
+const ESSENCE_ASSET_SELECTOR = [
+    'img[src*="essence" i]',
+    'svg use[href*="essence" i]',
+    '[style*="essence" i]'
+].join(',');
+const MESSAGE_SENDER_NAME_SELECTOR = [
+    '.message__nickname',
+    '.message-container__name',
+    '.message-container__sender-name',
+    '.user-name',
+    '[class*="nickname" i]',
+    '[class*="sender-name" i]',
+    '[class*="username" i]'
+].join(',');
 const MAX_RENDER_MESSAGES = 50;
 const NATIVE_TOOLBAR_LABELS = new Set(['逐条转发', '合并转发', '保存至电脑', '收藏', '删除', '复制']);
 const HTML2CANVAS_COLOR_PROPERTIES = [
@@ -18,6 +41,77 @@ const HTML2CANVAS_COLOR_PROPERTIES = [
 
 function compactText(value) {
     return String(value?.textContent ?? value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeSenderName(value) {
+    return compactText(value).slice(0, 80);
+}
+
+export function getMessageImageSenderMetadata(message, record = {}) {
+    const senderUin = String(record?.senderUin || record?.sender?.uin || '').trim();
+    const qqNumber = /^\d{5,20}$/.test(senderUin) ? senderUin : '';
+    let nickname = [
+        record?.sendMemberName,
+        record?.sendNickName,
+        record?.sendRemarkName,
+        record?.senderName,
+        record?.sender?.nickName,
+        record?.sender?.nickname,
+        record?.sender?.name,
+        record?.anonymousExtInfo?.anonymousNick
+    ].map(normalizeSenderName).find(Boolean) || '';
+    const scope = message?.closest?.('.ml-item') || message;
+    if (!nickname) {
+        nickname = Array.from(scope?.querySelectorAll?.(MESSAGE_SENDER_NAME_SELECTOR) || [])
+            .map(element => normalizeSenderName(element?.innerText || element))
+            .find(Boolean) || '';
+    }
+    if (!nickname) {
+        const avatar = scope?.querySelector?.(
+            '.avatar img, .avatar-span img, [class*="avatar" i] img, img[class*="avatar" i]'
+        );
+        nickname = normalizeSenderName(
+            avatar?.getAttribute?.('alt') || avatar?.getAttribute?.('title') || ''
+        );
+    }
+    return { qqNumber, nickname };
+}
+
+function getMessageImageSenderIdentity(record, metadata) {
+    const senderUin = String(record?.senderUin || record?.sender?.uin || metadata?.qqNumber || '').trim();
+    if (senderUin) {
+        return `uin:${senderUin}`;
+    }
+    const senderUid = String(record?.senderUid || record?.sender?.uid || '').trim();
+    if (senderUid) {
+        return `uid:${senderUid}`;
+    }
+    const nickname = normalizeSenderName(metadata?.nickname);
+    return nickname ? `name:${nickname}` : '';
+}
+
+export function resolveMessageImageNamingMetadata(entries, groupMetadata = {}) {
+    const items = Array.isArray(entries) ? entries.filter(Boolean) : [];
+    const identities = items.map(item => getMessageImageSenderIdentity(item.record, item.metadata));
+    const sameSender = items.length === 1 || (
+        identities.length > 1 &&
+        Boolean(identities[0]) &&
+        identities.every(identity => identity === identities[0])
+    );
+    if (sameSender) {
+        return {
+            qqNumber: items.map(item => item.metadata?.qqNumber).find(Boolean) || '',
+            nickname: items.map(item => item.metadata?.nickname).find(Boolean) || '',
+            groupNumber: '',
+            groupName: ''
+        };
+    }
+    return {
+        qqNumber: '',
+        nickname: '',
+        groupNumber: String(groupMetadata?.groupNumber || '').trim(),
+        groupName: normalizeSenderName(groupMetadata?.groupName)
+    };
 }
 
 export function getMessageImageToastPresentation(result = {}) {
@@ -345,8 +439,11 @@ function ensureStyle(documentRef) {
 #${ROOT_ID} [class*="qqnt-toolbox" i]:not(.qqnt-toolbox-message-image-row):not(.qqnt-toolbox-message-image-source) {
     display: none !important;
 }
-#${ROOT_ID}:not(.${INCLUDE_REACTIONS_CLASS}) [class*="reaction" i],
-#${ROOT_ID}:not(.${INCLUDE_REACTIONS_CLASS}) .emoji-like {
+#${ROOT_ID}.${MESSAGE_ONLY_CLASS} [class*="reaction" i],
+#${ROOT_ID}.${MESSAGE_ONLY_CLASS} .emoji-like,
+#${ROOT_ID}.${MESSAGE_ONLY_CLASS} [class*="essence" i],
+#${ROOT_ID}.${MESSAGE_ONLY_CLASS} [data-role*="essence" i],
+#${ROOT_ID}.${MESSAGE_ONLY_CLASS} [data-type*="essence" i] {
     display: none !important;
 }
 #${TOAST_ID} {
@@ -444,7 +541,27 @@ function copyDynamicMedia(original, clone, documentRef) {
     });
 }
 
-function sanitizeMessageClone(original, clone, documentRef, includeReactions = false) {
+function findEssenceBadge(asset, root) {
+    let current = asset;
+    for (let depth = 0; current && current !== root && depth < 5; depth += 1) {
+        const label = compactText(current).replace(/\s+/g, '');
+        if (label === '精华' || label === '💧精华') {
+            return current;
+        }
+        current = current.parentElement;
+    }
+    return asset.closest?.('[class*="essence" i]') || asset;
+}
+
+export function removeMessageAddons(root) {
+    const addons = new Set(root?.querySelectorAll?.(MESSAGE_ADDON_SELECTOR) || []);
+    root?.querySelectorAll?.(ESSENCE_ASSET_SELECTOR).forEach(asset => {
+        addons.add(findEssenceBadge(asset, root));
+    });
+    addons.forEach(element => element !== root && element?.remove?.());
+}
+
+function sanitizeMessageClone(original, clone, documentRef, messageOnly = true) {
     copyDynamicMedia(original, clone, documentRef);
     clone.classList.add('qqnt-toolbox-message-image-source');
     for (const element of [clone, ...clone.querySelectorAll('*')]) {
@@ -470,10 +587,10 @@ function sanitizeMessageClone(original, clone, documentRef, includeReactions = f
         'input[type="checkbox"]',
         '.q-context-menu'
     ];
-    if (!includeReactions) {
-        removableSelectors.push('[class*="reaction" i]', '.emoji-like');
-    }
     clone.querySelectorAll(removableSelectors.join(',')).forEach(element => element.remove());
+    if (messageOnly) {
+        removeMessageAddons(clone);
+    }
     clone.querySelectorAll('button, [role="button"]').forEach(element => {
         const className = String(element.className?.baseVal ?? element.className ?? '').toLowerCase();
         if (compactText(element) === '+1' || /repeat|plus-one/.test(className)) {
@@ -496,20 +613,20 @@ function appendDetachedReactionClones(message, content, shell, documentRef) {
     }
 }
 
-function cloneMessageContent(message, documentRef, includeReactions = false) {
+function cloneMessageContent(message, documentRef, messageOnly = true) {
     const content = getMessageImageContentElement(message);
     if (!content) {
         return null;
     }
     if (content === message) {
-        return sanitizeMessageClone(message, message.cloneNode(true), documentRef, includeReactions);
+        return sanitizeMessageClone(message, message.cloneNode(true), documentRef, messageOnly);
     }
     const shell = message.cloneNode(false);
     shell.append(content.cloneNode(true));
-    if (includeReactions) {
+    if (!messageOnly) {
         appendDetachedReactionClones(message, content, shell, documentRef);
     }
-    return sanitizeMessageClone(content, shell, documentRef, includeReactions);
+    return sanitizeMessageClone(content, shell, documentRef, messageOnly);
 }
 
 function readCssColor(context, value) {
@@ -677,16 +794,16 @@ async function waitForSurface(surface, windowRef) {
     await waitForPaint(windowRef);
 }
 
-export function cropTransparentCanvas(canvas, options = {}) {
+function getCanvasAlphaBounds(canvas, options = {}) {
     const context = canvas.getContext('2d', { willReadFrequently: true });
     if (!context || !canvas.width || !canvas.height) {
-        return canvas;
+        return null;
     }
     let pixels;
     try {
         pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
     } catch {
-        return canvas;
+        return null;
     }
     let left = canvas.width;
     let top = canvas.height;
@@ -704,13 +821,24 @@ export function cropTransparentCanvas(canvas, options = {}) {
         }
     }
     if (right < left || bottom < top) {
-        return canvas;
+        return null;
     }
     const margin = Math.max(0, Math.round(Number(options.margin) || 0));
     left = Math.max(0, left - margin);
     top = Math.max(0, top - margin);
     right = Math.min(canvas.width - 1, right + margin);
     bottom = Math.min(canvas.height - 1, bottom + margin);
+    return { left, top, right, bottom };
+}
+
+export function cropCanvasToBounds(canvas, bounds) {
+    if (!bounds || !canvas?.width || !canvas?.height) {
+        return canvas;
+    }
+    const left = Math.max(0, Math.min(canvas.width - 1, Math.round(Number(bounds.left) || 0)));
+    const top = Math.max(0, Math.min(canvas.height - 1, Math.round(Number(bounds.top) || 0)));
+    const right = Math.max(left, Math.min(canvas.width - 1, Math.round(Number(bounds.right) || 0)));
+    const bottom = Math.max(top, Math.min(canvas.height - 1, Math.round(Number(bounds.bottom) || 0)));
     if (left === 0 && top === 0 && right === canvas.width - 1 && bottom === canvas.height - 1) {
         return canvas;
     }
@@ -729,6 +857,10 @@ export function cropTransparentCanvas(canvas, options = {}) {
         output.height
     );
     return output;
+}
+
+export function cropTransparentCanvas(canvas, options = {}) {
+    return cropCanvasToBounds(canvas, getCanvasAlphaBounds(canvas, options));
 }
 
 function canvasToPngBytes(canvas) {
@@ -774,9 +906,18 @@ export function createMessageImageController(options = {}) {
     const includeBackground = typeof options.includeBackground === 'function'
         ? options.includeBackground
         : () => false;
-    const includeReactions = typeof options.includeReactions === 'function'
-        ? options.includeReactions
+    const includeBackgroundWhitespace = typeof options.includeBackgroundWhitespace === 'function'
+        ? options.includeBackgroundWhitespace
         : () => false;
+    const messageOnly = typeof options.messageOnly === 'function'
+        ? options.messageOnly
+        : () => true;
+    const getSenderMetadata = typeof options.getSenderMetadata === 'function'
+        ? options.getSenderMetadata
+        : getMessageImageSenderMetadata;
+    const getGroupMetadata = typeof options.getGroupMetadata === 'function'
+        ? options.getGroupMetadata
+        : () => ({});
     const getMessageElement = typeof options.getMessageElement === 'function' ? options.getMessageElement : value => value;
     const getMessageRecord = typeof options.getMessageRecord === 'function' ? options.getMessageRecord : () => null;
     const getRecordKey = typeof options.getRecordKey === 'function' ? options.getRecordKey : () => '';
@@ -890,6 +1031,14 @@ export function createMessageImageController(options = {}) {
         if (!messages.length) {
             return { ok: false, reason: 'no-message', message: '没有可转换的消息' };
         }
+        const records = messages.map(getMessageRecord);
+        const namingMetadata = resolveMessageImageNamingMetadata(
+            messages.map((message, index) => ({
+                record: records[index],
+                metadata: getSenderMetadata(message, records[index]) || {}
+            })),
+            getGroupMetadata(messages[0], records[0])
+        );
         busy = true;
         ensureStyle(documentRef);
         documentRef.getElementById(ROOT_ID)?.remove();
@@ -899,9 +1048,10 @@ export function createMessageImageController(options = {}) {
         const scope = getMessageScope(messages[0]) || documentRef;
         const background = getMessageImageBackground(messages[0], scope, windowRef, documentRef);
         const withBackground = includeBackground();
-        const withReactions = includeReactions();
-        surface.classList.toggle(INCLUDE_REACTIONS_CLASS, withReactions);
-        if (withBackground) {
+        const withBackgroundWhitespace = withBackground && includeBackgroundWhitespace();
+        const onlyMessage = messageOnly();
+        surface.classList.toggle(MESSAGE_ONLY_CLASS, onlyMessage);
+        const applyBackground = () => {
             surface.style.setProperty('background-color', background.color, 'important');
             if (background.image !== 'none') {
                 surface.style.setProperty('background-image', background.image, 'important');
@@ -909,11 +1059,14 @@ export function createMessageImageController(options = {}) {
                 surface.style.setProperty('background-repeat', background.repeat, 'important');
                 surface.style.setProperty('background-size', background.size, 'important');
             }
+        };
+        if (withBackgroundWhitespace) {
+            applyBackground();
         }
         for (const message of messages) {
             const row = documentRef.createElement('div');
             row.className = 'qqnt-toolbox-message-image-row';
-            const content = cloneMessageContent(message, documentRef, withReactions);
+            const content = cloneMessageContent(message, documentRef, onlyMessage);
             if (!content) {
                 continue;
             }
@@ -933,34 +1086,50 @@ export function createMessageImageController(options = {}) {
             const renderDom = await getRenderer();
             const renderWidth = Math.ceil(surface.scrollWidth);
             const renderHeight = Math.ceil(surface.scrollHeight);
-            const renderCanvas = documentRef.createElement('canvas');
-            renderCanvas.width = Math.floor(renderWidth * scale);
-            renderCanvas.height = Math.floor(renderHeight * scale);
-            renderCanvas.style.width = `${renderWidth}px`;
-            renderCanvas.style.height = `${renderHeight}px`;
-            const restoreTextAlignment = installCanvasTextAlignment(renderCanvas);
-            let canvas;
-            try {
-                canvas = await renderDom(surface, {
-                    allowTaint: false,
-                    backgroundColor: null,
-                    canvas: renderCanvas,
-                    logging: false,
-                    removeContainer: true,
-                    scale,
-                    useCORS: true,
-                    width: renderWidth,
-                    height: renderHeight,
-                    windowWidth: documentRef.documentElement.clientWidth,
-                    windowHeight: documentRef.documentElement.clientHeight
-                });
-            } finally {
-                restoreTextAlignment();
+            const renderSurface = async () => {
+                const renderCanvas = documentRef.createElement('canvas');
+                renderCanvas.width = Math.floor(renderWidth * scale);
+                renderCanvas.height = Math.floor(renderHeight * scale);
+                renderCanvas.style.width = `${renderWidth}px`;
+                renderCanvas.style.height = `${renderHeight}px`;
+                const restoreTextAlignment = installCanvasTextAlignment(renderCanvas);
+                try {
+                    return await renderDom(surface, {
+                        allowTaint: false,
+                        backgroundColor: null,
+                        canvas: renderCanvas,
+                        logging: false,
+                        removeContainer: true,
+                        scale,
+                        useCORS: true,
+                        width: renderWidth,
+                        height: renderHeight,
+                        windowWidth: documentRef.documentElement.clientWidth,
+                        windowHeight: documentRef.documentElement.clientHeight
+                    });
+                } finally {
+                    restoreTextAlignment();
+                }
+            };
+            const margin = Math.round(scale * 4);
+            let contentBounds = null;
+            if (withBackground && !withBackgroundWhitespace) {
+                const contentCanvas = await renderSurface();
+                contentBounds = getCanvasAlphaBounds(contentCanvas, { margin });
+                applyBackground();
+                await waitForPaint(windowRef);
             }
-            const output = cropTransparentCanvas(canvas, { margin: Math.round(scale * 4) });
+            const canvas = await renderSurface();
+            const output = withBackground
+                ? (withBackgroundWhitespace ? canvas : cropCanvasToBounds(canvas, contentBounds))
+                : cropTransparentCanvas(canvas, { margin });
             const result = await save({
                 data: await canvasToPngBytes(output),
-                count: messages.length
+                count: messages.length,
+                qqNumber: namingMetadata.qqNumber,
+                nickname: namingMetadata.nickname,
+                groupNumber: namingMetadata.groupNumber,
+                groupName: namingMetadata.groupName
             });
             if (!result?.ok) {
                 const message = result?.message || '保存消息图片失败';

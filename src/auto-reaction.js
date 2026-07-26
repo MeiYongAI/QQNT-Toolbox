@@ -121,7 +121,7 @@ function getAutoReactionDecision(record, identity, configValue) {
     if (config.selfMessages && selfMessage) {
         reasons.push('self-message');
     }
-    if (config.mentionSelf && mentionsSelf) {
+    if (config.mentionSelf && (mentionsSelf || hasAtAll)) {
         reasons.push('mention-self');
     }
     if (config.replySelf && repliesToSelf) {

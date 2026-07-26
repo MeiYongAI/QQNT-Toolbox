@@ -67,6 +67,12 @@ const {
     isRecentAutoReactionRecord,
     normalizeAutoReactionConfig
 } = require('./auto-reaction');
+const {
+    DEFAULT_AUTO_POKE_TRIGGER_CONFIG,
+    getAutoPokeMessageDecision,
+    getAutoPokeMessageKey,
+    normalizeAutoPokeTriggerConfig
+} = require('./auto-poke');
 const { getTencentFilesRoots } = require('./qq-data-root');
 const {
     classifyMediaFilePath,
@@ -214,6 +220,7 @@ const NUDGE_SEND_COMMAND = 'nodeIKernelMsgService/sendNudge';
 const POKE_EVENT_TTL_MS = 60 * 60 * 1000;
 const POKE_AUTO_REPLY_MAX_AGE_MS = 60 * 1000;
 const POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS = 10 * 1000;
+const MAX_POKE_PROCESSED_EVENTS = 10000;
 const AUTO_REACTION_EVENT_TTL_MS = 60 * 60 * 1000;
 const AUTO_REACTION_UID_LOOKUP_RETRY_MS = 60 * 1000;
 const MAX_AUTO_REACTION_PROCESSED_MESSAGES = 10000;
@@ -250,6 +257,11 @@ try {
     voiceFileSender = null;
 }
 const INLINE_MEDIA_BACKGROUND_VALUES = new Set(['transparent', 'white', 'semi', 'black']);
+const LEGACY_MESSAGE_IMAGE_FILE_NAME_PATTERNS = new Set([
+    'QQ消息-{yyyy}{MM}{dd}-{HH}{mm}{ss}',
+    'QQ消息-{source}-{yyyy}{MM}{dd}-{HH}{mm}{ss}-{count}条',
+    '{source}-{yyyy}{MM}{dd}-{HH}{mm}{ss}-{count}条'
+]);
 const DEFAULT_CONFIG = {
     fileRetryFixer: {
         enabled: false,
@@ -295,10 +307,11 @@ const DEFAULT_CONFIG = {
         promptNoSeq: false,
         messageToImage: false,
         messageToImageIncludeBackground: false,
+        messageToImageIncludeBackgroundWhitespace: false,
         messageToImageDirectory: '',
         messageToImageFileNamePattern: DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
         messageToImageAutoCopy: false,
-        messageToImageIncludeReactions: false,
+        messageToImageOnlyMessage: true,
         customImageSummaryEnabled: false,
         customImageSummary: '',
         removeReactionLimit: false,
@@ -308,6 +321,7 @@ const DEFAULT_CONFIG = {
     entertainment: {
         autoPokeBack: false,
         autoPokeBackLimit: 1,
+        autoPokeBackTriggers: DEFAULT_AUTO_POKE_TRIGGER_CONFIG,
         doubleClickAvatarPoke: false,
         rightClickAvatarPoke: false,
         sendWindowShake: false,
@@ -762,6 +776,10 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         poke: {
             autoReply: config.entertainment?.autoPokeBack === true,
             autoReplyLimit: Math.max(0, Number(config.entertainment?.autoPokeBackLimit) || 0),
+            poked: config.entertainment?.autoPokeBackTriggers?.poked !== false,
+            mentionSelf: config.entertainment?.autoPokeBackTriggers?.mentionSelf === true,
+            replySelf: config.entertainment?.autoPokeBackTriggers?.replySelf === true,
+            excludeAtAll: config.entertainment?.autoPokeBackTriggers?.excludeAtAll !== false,
             doubleClickAvatar: config.entertainment?.doubleClickAvatarPoke === true,
             contextMenu: config.entertainment?.rightClickAvatarPoke === true,
             windowShake: config.entertainment?.sendWindowShake === true
@@ -877,6 +895,25 @@ function migrateNetworkConfig(value) {
         source.network.proxyUrl = legacyProxy;
     }
     delete source.network.proxyMode;
+    return source;
+}
+
+function migrateMessageToImageConfig(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const messageTweaks = source.messageTweaks && typeof source.messageTweaks === 'object'
+        ? source.messageTweaks
+        : {};
+    if (typeof messageTweaks.messageToImageOnlyMessage !== 'boolean' &&
+        typeof messageTweaks.messageToImageIncludeReactions === 'boolean') {
+        messageTweaks.messageToImageOnlyMessage = !messageTweaks.messageToImageIncludeReactions;
+    }
+    if (LEGACY_MESSAGE_IMAGE_FILE_NAME_PATTERNS.has(
+        String(messageTweaks.messageToImageFileNamePattern || '').trim()
+    )) {
+        messageTweaks.messageToImageFileNamePattern = DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN;
+    }
+    delete messageTweaks.messageToImageIncludeReactions;
+    source.messageTweaks = messageTweaks;
     return source;
 }
 
@@ -1026,12 +1063,17 @@ function normalizeSimplifyConfig(config) {
     config.entertainment.autoReaction = normalizeAutoReactionConfig(
         config.entertainment.autoReaction
     );
+    config.entertainment.autoPokeBackTriggers = normalizeAutoPokeTriggerConfig(
+        config.entertainment.autoPokeBackTriggers
+    );
     const messageImageSettings = getConfiguredMessageImageSettings(config.messageTweaks);
     config.messageTweaks.messageToImageDirectory = messageImageSettings.directory;
     config.messageTweaks.messageToImageFileNamePattern = messageImageSettings.fileNamePattern;
     config.messageTweaks.messageToImageAutoCopy = messageImageSettings.autoCopy;
-    config.messageTweaks.messageToImageIncludeReactions =
-        config.messageTweaks.messageToImageIncludeReactions === true;
+    config.messageTweaks.messageToImageIncludeBackgroundWhitespace =
+        config.messageTweaks.messageToImageIncludeBackgroundWhitespace === true;
+    config.messageTweaks.messageToImageOnlyMessage =
+        config.messageTweaks.messageToImageOnlyMessage !== false;
     config.localStickers = normalizeLocalStickerConfig(config.localStickers, {
         defaultPath: getDefaultLocalStickerDirectory()
     });
@@ -1052,8 +1094,8 @@ function loadConfig() {
             fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
             return clonePlain(configCache);
         }
-        configCache = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(migrateQrScanConfig(
-            JSON.parse(fsSync.readFileSync(configPath, 'utf8'))
+        configCache = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(migrateMessageToImageConfig(
+            migrateQrScanConfig(JSON.parse(fsSync.readFileSync(configPath, 'utf8')))
         ))));
         ensureDefaultLocalStickerDirectorySync(configCache.localStickers);
         fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
@@ -1071,7 +1113,9 @@ async function saveConfig(nextConfig) {
     const wasSingleForwardViewerEnabled = configCache?.interfaceTweaks?.singleForwardViewer === true;
     const wasSingleForwardGroupIsolationEnabled =
         configCache?.interfaceTweaks?.singleForwardGroupIsolation === true;
-    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(migrateQrScanConfig(nextConfig))));
+    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(
+        migrateMessageToImageConfig(migrateQrScanConfig(nextConfig))
+    )));
     const willDebugBeEnabled = process.env.QQNT_TOOLBOX_DEBUG === '1' || normalizedConfig.debug?.enabled === true;
     if (wasDebugEnabled && !willDebugBeEnabled) {
         recordDiagnostic('info', 'diagnostics.disabled');
@@ -5162,6 +5206,9 @@ function prunePokeState() {
             pokeState.processedEvents.delete(key);
         }
     }
+    while (pokeState.processedEvents.size > MAX_POKE_PROCESSED_EVENTS) {
+        pokeState.processedEvents.delete(pokeState.processedEvents.keys().next().value);
+    }
     const sequenceCutoff = now - POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS;
     for (const [key, sequence] of pokeState.autoReplySequences) {
         if (sequence.lastAt < sequenceCutoff) {
@@ -5179,13 +5226,84 @@ function isRecentPokeRecord(record) {
     return Math.abs(Date.now() - timestamp) <= POKE_AUTO_REPLY_MAX_AGE_MS;
 }
 
+function queueAutomaticPoke(browserWindow, request) {
+    const eventKey = normalizeText(request?.eventKey);
+    if (!eventKey || pokeState.processedEvents.has(eventKey)) {
+        return false;
+    }
+    const chatType = Number(request?.chatType);
+    const targetUin = normalizeUin(request?.targetUin);
+    const groupUin = chatType === 2 ? normalizeUin(request?.groupUin) : '';
+    const selfUin = normalizeUin(request?.selfUin);
+    if (!targetUin || !selfUin || targetUin === selfUin ||
+        (chatType !== 1 && chatType !== 2) || (chatType === 2 && !groupUin)) {
+        return false;
+    }
+
+    const now = Date.now();
+    pokeState.processedEvents.set(eventKey, now);
+    let replyTargetKey = '';
+    let nextSequence = null;
+    if (request?.enforceLimit === true) {
+        replyTargetKey = getPokeReplyTargetKey(chatType, targetUin, groupUin);
+        const previousSequence = pokeState.autoReplySequences.get(replyTargetKey);
+        const sequence = previousSequence &&
+            now - previousSequence.lastAt <= POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS
+            ? previousSequence
+            : { count: 0, lastAt: 0 };
+        const limit = getAutoPokeBackLimit();
+        if (limit > 0 && sequence.count >= limit) {
+            sequence.lastAt = now;
+            pokeState.autoReplySequences.set(replyTargetKey, sequence);
+            recordDiagnostic('info', 'poke-auto-reply.skipped', {
+                reason: 'limit',
+                trigger: normalizeText(request?.trigger),
+                chatType,
+                limit
+            });
+            return false;
+        }
+        nextSequence = { count: sequence.count + 1, lastAt: now };
+        pokeState.autoReplySequences.set(replyTargetKey, nextSequence);
+    }
+
+    Promise.resolve(sendPoke(browserWindow, {
+        chatType,
+        targetUin,
+        groupUin,
+        peerUid: normalizeText(request?.peerUid),
+        selfUin,
+        source: normalizeText(request?.source) || 'auto-reply'
+    })).then(result => {
+        recordDiagnostic(result?.ok ? 'info' : 'warn', 'poke-auto-reply.completed', {
+            ok: result?.ok === true,
+            reason: result?.reason || '',
+            method: result?.method || '',
+            trigger: normalizeText(request?.trigger),
+            chatType
+        });
+        if (!result?.ok && nextSequence &&
+            pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
+            pokeState.autoReplySequences.delete(replyTargetKey);
+        }
+    }).catch(error => {
+        if (nextSequence && pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
+            pokeState.autoReplySequences.delete(replyTargetKey);
+        }
+        warn('automatic poke-back failed:', error?.message || error);
+    });
+    return true;
+}
+
 function processPokeUpdates(browserWindow, context) {
     if (!context.commandNames.has(POKE_RECEIVE_CMD)) {
         return;
     }
     const records = context.records;
     rememberPokeAccountFromRecords(browserWindow, records);
-    if (getEntertainmentConfig().autoPokeBack !== true) {
+    const entertainment = getEntertainmentConfig();
+    const triggers = normalizeAutoPokeTriggerConfig(entertainment.autoPokeBackTriggers);
+    if (entertainment.autoPokeBack !== true || !triggers.poked) {
         return;
     }
 
@@ -5215,48 +5333,15 @@ function processPokeUpdates(browserWindow, context) {
         if ((chatType !== 1 && chatType !== 2) || (chatType === 2 && !groupUin)) {
             continue;
         }
-        const key = getPokeEventKey(record, event);
-        if (pokeState.processedEvents.has(key)) {
-            continue;
-        }
-        const now = Date.now();
-        pokeState.processedEvents.set(key, now);
-        const replyTargetKey = getPokeReplyTargetKey(chatType, event.initiatorUin, groupUin);
-        const previousSequence = pokeState.autoReplySequences.get(replyTargetKey);
-        const sequence = previousSequence &&
-            now - previousSequence.lastAt <= POKE_AUTO_REPLY_SEQUENCE_WINDOW_MS
-            ? previousSequence
-            : { count: 0, lastAt: 0 };
-        const limit = getAutoPokeBackLimit();
-        if (limit > 0 && sequence.count >= limit) {
-            sequence.lastAt = now;
-            pokeState.autoReplySequences.set(replyTargetKey, sequence);
-            recordDiagnostic('info', 'poke-auto-reply.skipped', { reason: 'limit', chatType, limit });
-            continue;
-        }
-        const nextSequence = { count: sequence.count + 1, lastAt: now };
-        pokeState.autoReplySequences.set(replyTargetKey, nextSequence);
-        Promise.resolve(sendPoke(browserWindow, {
+        queueAutomaticPoke(browserWindow, {
+            eventKey: getPokeEventKey(record, event),
             chatType,
             targetUin: event.initiatorUin,
             groupUin,
             selfUin,
-            source: 'auto-reply'
-        })).then(result => {
-            recordDiagnostic(result?.ok ? 'info' : 'warn', 'poke-auto-reply.completed', {
-                ok: result?.ok === true,
-                reason: result?.reason || '',
-                method: result?.method || '',
-                chatType
-            });
-            if (!result?.ok && pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
-                pokeState.autoReplySequences.delete(replyTargetKey);
-            }
-        }).catch(error => {
-            if (pokeState.autoReplySequences.get(replyTargetKey) === nextSequence) {
-                pokeState.autoReplySequences.delete(replyTargetKey);
-            }
-            warn('automatic poke-back failed:', error?.message || error);
+            source: 'auto-reply',
+            trigger: 'poke',
+            enforceLimit: true
         });
     }
 }
@@ -5289,6 +5374,70 @@ async function resolveAutoReactionAccountUid(browserWindow) {
         });
     state.selfUidPromise = promise;
     return await promise;
+}
+
+async function processAutoPokeMessageUpdates(browserWindow, context) {
+    if (!context.commandNames.has(POKE_RECEIVE_CMD) ||
+        getEntertainmentConfig().autoPokeBack !== true) {
+        return;
+    }
+    const config = normalizeAutoPokeTriggerConfig(
+        getEntertainmentConfig().autoPokeBackTriggers
+    );
+    if (!config.mentionSelf && !config.replySelf) {
+        return;
+    }
+
+    const records = Array.from(new Set(context.records));
+    rememberPokeAccountFromRecords(browserWindow, records);
+    const state = getWindowState(browserWindow);
+    if (state.selfUin && !state.selfUid) {
+        await resolveAutoReactionAccountUid(browserWindow);
+    }
+    prunePokeState();
+
+    for (const record of records) {
+        const chatType = Number(record?.chatType || record?.peer?.chatType);
+        if (browserWindow.isDestroyed() || (chatType !== 1 && chatType !== 2) ||
+            !isRecentPokeRecord(record)) {
+            continue;
+        }
+        const decision = getAutoPokeMessageDecision(record, {
+            selfUin: state.selfUin,
+            selfUid: state.selfUid
+        }, config);
+        if (!decision.matched || decision.selfMessage) {
+            continue;
+        }
+
+        const senderUid = normalizeText(
+            record?.senderUid || record?.senderUidStr || record?.sender?.uid
+        );
+        const targetUin = normalizeUin(record?.senderUin || record?.sender?.uin) ||
+            resolveUinFromUid(browserWindow, senderUid);
+        const groupUin = chatType === 2
+            ? normalizeUin(
+                record?.peerUin || record?.peerUid || record?.peer?.peerUin || record?.peer?.peerUid
+            )
+            : '';
+        const eventKey = getAutoPokeMessageKey(
+            record,
+            state.selfUin || `window-${Number(browserWindow.id) || 0}`
+        );
+        queueAutomaticPoke(browserWindow, {
+            eventKey,
+            chatType,
+            targetUin,
+            groupUin,
+            peerUid: chatType === 1
+                ? senderUid || normalizeText(record?.peerUid || record?.peer?.peerUid)
+                : '',
+            selfUin: state.selfUin,
+            source: 'auto-message',
+            trigger: decision.reasons.join(','),
+            enforceLimit: false
+        });
+    }
 }
 
 function pruneAutoReactionState(now = Date.now()) {
@@ -8277,6 +8426,9 @@ function handleNativeSend(browserWindow, channel, args) {
     processPreventRecall(browserWindow, context);
     rememberInlineMediaRecords(browserWindow, context);
     processPokeUpdates(browserWindow, context);
+    Promise.resolve()
+        .then(() => processAutoPokeMessageUpdates(browserWindow, context))
+        .catch(error => warn('auto poke processing failed:', error?.message || error));
     Promise.resolve()
         .then(() => processAutoReactionUpdates(browserWindow, context))
         .catch(error => warn('auto reaction processing failed:', error?.message || error));

@@ -9,6 +9,8 @@ const source = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'message-to-image.js'),
     'utf8'
 );
+const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8');
 const modulePromise = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 test('sorts messages by their current visual position without duplicates', async () => {
@@ -44,6 +46,52 @@ test('formats one concise save toast from the actual output filename', async () 
         }),
         { message: '已保存，但复制失败：消息.png', error: true }
     );
+});
+
+test('reads sender QQ number and nickname for filename placeholders', async () => {
+    const { getMessageImageSenderMetadata } = await modulePromise;
+    const message = {
+        closest: () => null,
+        querySelectorAll: () => [],
+        querySelector: () => null
+    };
+    assert.deepEqual(getMessageImageSenderMetadata(message, {
+        senderUin: '12345678',
+        sendMemberName: '群名片'
+    }), {
+        qqNumber: '12345678',
+        nickname: '群名片'
+    });
+});
+
+test('uses sender tokens only for one sender and group tokens for mixed group messages', async () => {
+    const { resolveMessageImageNamingMetadata } = await modulePromise;
+    const alice = { record: { senderUin: '12345678' }, metadata: {
+        qqNumber: '12345678', nickname: 'Alice'
+    } };
+    const aliceAgain = { record: { senderUin: '12345678' }, metadata: {
+        qqNumber: '12345678', nickname: '群名片 Alice'
+    } };
+    const bob = { record: { senderUin: '23456789' }, metadata: {
+        qqNumber: '23456789', nickname: 'Bob'
+    } };
+
+    assert.deepEqual(resolveMessageImageNamingMetadata([alice, aliceAgain], {
+        groupNumber: '87654321', groupName: '测试群'
+    }), {
+        qqNumber: '12345678',
+        nickname: 'Alice',
+        groupNumber: '',
+        groupName: ''
+    });
+    assert.deepEqual(resolveMessageImageNamingMetadata([alice, bob], {
+        groupNumber: '87654321', groupName: '测试群'
+    }), {
+        qqNumber: '',
+        nickname: '',
+        groupNumber: '87654321',
+        groupName: '测试群'
+    });
 });
 
 test('renders the message container instead of its time and selection wrapper', async () => {
@@ -177,6 +225,27 @@ test('crops transparent outer pixels from the rendered message image', async () 
     assert.deepEqual(drawArgs.slice(1), [1, 1, 3, 2, 0, 0, 3, 2]);
 });
 
+test('crops an opaque chat background to previously measured message bounds', async () => {
+    const { cropCanvasToBounds } = await modulePromise;
+    let drawArgs = null;
+    const output = {
+        width: 0,
+        height: 0,
+        getContext: () => ({ drawImage: (...args) => { drawArgs = args; } })
+    };
+    const canvas = {
+        width: 10,
+        height: 6,
+        ownerDocument: { createElement: () => output }
+    };
+
+    const result = cropCanvasToBounds(canvas, { left: 2, top: 1, right: 7, bottom: 4 });
+
+    assert.equal(result, output);
+    assert.deepEqual({ width: result.width, height: result.height }, { width: 6, height: 4 });
+    assert.deepEqual(drawArgs.slice(1), [2, 1, 6, 4, 0, 0, 6, 4]);
+});
+
 test('aligns canvas text without moving message containers or media', async () => {
     const { installCanvasTextAlignment } = await modulePromise;
     const calls = [];
@@ -198,6 +267,60 @@ test('aligns canvas text without moving message containers or media', async () =
     restore();
     assert.equal(context.fillText, originalFillText);
     assert.equal(context.strokeText, originalStrokeText);
+});
+
+test('removes reactions and the complete QQ essence badge in message-only mode', async () => {
+    const { removeMessageAddons } = await modulePromise;
+    const removed = [];
+    const reaction = { remove: () => removed.push('reaction') };
+    const essenceBadge = {
+        textContent: '💧 精华',
+        parentElement: null,
+        remove: () => removed.push('essence')
+    };
+    const essenceIcon = {
+        textContent: '',
+        parentElement: essenceBadge,
+        closest: () => null,
+        remove: () => removed.push('icon')
+    };
+    const root = {
+        querySelectorAll: selector => selector.includes('img[src*="essence"')
+            ? [essenceIcon]
+            : [reaction]
+    };
+
+    removeMessageAddons(root);
+
+    assert.deepEqual(removed.sort(), ['essence', 'reaction']);
+});
+
+test('uses a positive message-only setting and migrates the retired reaction setting', () => {
+    assert.match(rendererSource, /text\('仅包含消息'\)/);
+    assert.match(rendererSource, /messageTweaks\.messageToImageOnlyMessage/);
+    assert.match(mainSource, /messageToImageOnlyMessage\s*=\s*!messageTweaks\.messageToImageIncludeReactions/);
+    assert.match(mainSource, /delete messageTweaks\.messageToImageIncludeReactions/);
+    assert.match(mainSource, /LEGACY_MESSAGE_IMAGE_FILE_NAME_PATTERNS/);
+    assert.match(mainSource, /messageToImageFileNamePattern\s*=\s*DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN/);
+    assert.doesNotMatch(rendererSource, /messageToImageIncludeReactions|text\('包含表情回应'\)/);
+});
+
+test('keeps background whitespace as an opt-in child setting', () => {
+    assert.match(mainSource, /messageToImageIncludeBackgroundWhitespace:\s*false/);
+    assert.match(rendererSource, /text\('包含背景留白'\)/);
+    assert.match(rendererSource, /includeBackgroundWhitespace:\s*\(\)\s*=>/);
+    assert.match(source, /withBackground\s*&&\s*includeBackgroundWhitespace\(\)/);
+    assert.match(source, /getCanvasAlphaBounds\(contentCanvas,\s*\{ margin \}\)/);
+});
+
+test('passes resolved sender or group metadata to the save payload', () => {
+    assert.match(source, /resolveMessageImageNamingMetadata/);
+    assert.match(source, /qqNumber:\s*namingMetadata\.qqNumber/);
+    assert.match(source, /nickname:\s*namingMetadata\.nickname/);
+    assert.match(source, /groupNumber:\s*namingMetadata\.groupNumber/);
+    assert.match(source, /groupName:\s*namingMetadata\.groupName/);
+    assert.match(rendererSource, /getSenderMetadata:\s*getMessageImageFileNameMetadata/);
+    assert.match(rendererSource, /getGroupMetadata:\s*getMessageImageGroupMetadata/);
 });
 
 test('recognizes QQ native checked markers without relying on the gray row overlay', async () => {
@@ -288,9 +411,10 @@ test('renders cleaned DOM clones and has no custom multi-select overlay or windo
     assert.match(source, /backgroundColor:\s*null/);
     assert.match(source, /\.plus-one-btn/);
     assert.match(source, /\[class\*="reaction" i\]/);
-    assert.match(source, /includeReactions/);
-    assert.match(source, /:not\(\.\$\{INCLUDE_REACTIONS_CLASS\}\)/);
-    assert.match(source, /if \(!includeReactions\)/);
+    assert.match(source, /\[class\*="essence" i\]/);
+    assert.match(source, /MESSAGE_ONLY_CLASS/);
+    assert.match(source, /if \(messageOnly\)/);
+    assert.doesNotMatch(source, /includeReactions|INCLUDE_REACTIONS_CLASS/);
     assert.match(source, /findNativeMultiSelectToolbar/);
     assert.match(source, /qqnt-toolbox-message-to-image-toolbar-button/);
     assert.match(source, /\.message-container\s*\{[\s\S]*?background-color:\s*transparent\s*!important/);

@@ -144,6 +144,7 @@ try {
         'QQNT-Toolbox/src/recall-viewer-preload.js',
         'QQNT-Toolbox/src/reaction-catalog.js',
         'QQNT-Toolbox/src/reaction-limit.js',
+        'QQNT-Toolbox/src/auto-poke.js',
         'QQNT-Toolbox/src/auto-reaction.js',
         'QQNT-Toolbox/src/auto-reaction-editor.js',
         'QQNT-Toolbox/src/repeat-message.js',

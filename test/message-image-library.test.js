@@ -41,7 +41,7 @@ async function createFixture() {
     return { root, directory, metadataPath, library, calls };
 }
 
-test('manages logical categories, manual order, rename, copy and delete without moving images', async t => {
+test('uses real folders for categories and keeps manual ordering metadata', async t => {
     const fixture = await createFixture();
     t.after(() => fsPromises.rm(fixture.root, { recursive: true, force: true }));
 
@@ -60,14 +60,16 @@ test('manages logical categories, manual order, rename, copy and delete without 
     });
     assert.equal(firstCategory.categoryId, 'category-1');
     assert.equal(secondCategory.categoryId, 'category-2');
+    assert.equal((await fsPromises.stat(path.join(fixture.directory, '收藏'))).isDirectory(), true);
 
     state = await fixture.library.action(fixture.directory, {
         type: 'assign',
         categoryId: firstCategory.categoryId,
         imageIds: ['newer.png']
     });
-    assert.equal(state.images.find(image => image.id === 'newer.png').categoryId, 'category-1');
-    assert.equal(await fsPromises.readFile(path.join(fixture.directory, 'newer.png'), 'utf8'), 'newer');
+    assert.equal(state.images.find(image => image.id === '收藏/newer.png').categoryId, 'category-1');
+    assert.equal(await fsPromises.readFile(path.join(fixture.directory, '收藏', 'newer.png'), 'utf8'), 'newer');
+    await assert.rejects(fsPromises.access(path.join(fixture.directory, 'newer.png')));
 
     state = await fixture.library.action(fixture.directory, {
         type: 'reorder-categories',
@@ -78,35 +80,45 @@ test('manages logical categories, manual order, rename, copy and delete without 
     state = await fixture.library.action(fixture.directory, {
         type: 'reorder-images',
         categoryId: 'all',
-        imageIds: ['older.png', 'newer.png']
+        imageIds: ['older.png', '收藏/newer.png']
     });
-    assert.deepEqual(state.images.map(image => image.id), ['older.png', 'newer.png']);
+    assert.deepEqual(state.images.map(image => image.id), ['older.png', '收藏/newer.png']);
 
     state = await fixture.library.action(fixture.directory, {
         type: 'rename-image',
-        imageId: 'newer.png',
+        imageId: '收藏/newer.png',
         name: '已收藏图片'
     });
-    assert.equal(state.imageId, '已收藏图片.png');
-    assert.equal(state.images.find(image => image.id === '已收藏图片.png').categoryId, 'category-1');
-    await assert.rejects(fsPromises.access(path.join(fixture.directory, 'newer.png')));
+    assert.equal(state.imageId, '收藏/已收藏图片.png');
+    assert.equal(state.images.find(image => image.id === state.imageId).categoryId, 'category-1');
+
+    state = await fixture.library.action(fixture.directory, {
+        type: 'rename-category',
+        categoryId: firstCategory.categoryId,
+        name: '珍藏'
+    });
+    assert.equal(state.categories.find(category => category.id === firstCategory.categoryId).name, '珍藏');
+    assert.equal(state.images.find(image => image.id === '珍藏/已收藏图片.png').categoryId, 'category-1');
+    await assert.rejects(fsPromises.access(path.join(fixture.directory, '收藏')));
 
     await fixture.library.action(fixture.directory, {
         type: 'copy-image',
-        imageId: '已收藏图片.png'
+        imageId: '珍藏/已收藏图片.png'
     });
     await fixture.library.action(fixture.directory, {
         type: 'open-directory',
-        imageId: '已收藏图片.png'
+        imageId: '珍藏/已收藏图片.png'
     });
     assert.equal(path.basename(fixture.calls.copied[0]), '已收藏图片.png');
     assert.equal(path.basename(fixture.calls.revealed[0][1]), '已收藏图片.png');
 
     state = await fixture.library.action(fixture.directory, {
         type: 'delete-category',
-        categoryId: 'category-1'
+        categoryId: firstCategory.categoryId
     });
     assert.equal(state.images.find(image => image.id === '已收藏图片.png').categoryId, '');
+    assert.equal(await fsPromises.readFile(path.join(fixture.directory, '已收藏图片.png'), 'utf8'), 'newer');
+    await assert.rejects(fsPromises.access(path.join(fixture.directory, '珍藏')));
 
     state = await fixture.library.action(fixture.directory, {
         type: 'delete-images',
@@ -114,10 +126,14 @@ test('manages logical categories, manual order, rename, copy and delete without 
     });
     assert.equal(state.deletedCount, 1);
     assert.deepEqual(state.images.map(image => image.id), ['已收藏图片.png']);
-    assert.equal(JSON.parse(await fsPromises.readFile(fixture.metadataPath, 'utf8')).version, 1);
+
+    const metadata = JSON.parse(await fsPromises.readFile(fixture.metadataPath, 'utf8'));
+    assert.equal(metadata.version, 2);
+    assert.equal(metadata.libraries[0].layout, 'folders');
+    assert.equal('assignments' in metadata.libraries[0], false);
 });
 
-test('keeps image ordering scoped to the active category', async t => {
+test('keeps image ordering scoped to the active folder category', async t => {
     const fixture = await createFixture();
     t.after(() => fsPromises.rm(fixture.root, { recursive: true, force: true }));
     await fsPromises.writeFile(path.join(fixture.directory, 'third.png'), Buffer.from('third'));
@@ -134,14 +150,51 @@ test('keeps image ordering scoped to the active category', async t => {
     const state = await fixture.library.action(fixture.directory, {
         type: 'reorder-images',
         categoryId: category.categoryId,
-        imageIds: ['older.png', 'newer.png']
+        imageIds: ['一组/older.png', '一组/newer.png']
     });
     const grouped = state.images.filter(image => image.categoryId === category.categoryId);
-    assert.deepEqual(grouped.map(image => image.id), ['older.png', 'newer.png']);
+    assert.deepEqual(grouped.map(image => image.id), ['一组/older.png', '一组/newer.png']);
     assert.equal(state.images.filter(image => !image.categoryId).length, 1);
 });
 
-test('rejects duplicate names and paths outside the managed image directory', async t => {
+test('discovers folder categories and supports equal file names in different folders', async t => {
+    const fixture = await createFixture();
+    t.after(() => fsPromises.rm(fixture.root, { recursive: true, force: true }));
+    await fsPromises.mkdir(path.join(fixture.directory, '表情'));
+    await fsPromises.mkdir(path.join(fixture.directory, '收藏'));
+    await fsPromises.writeFile(path.join(fixture.directory, '表情', 'same.png'), Buffer.from('first'));
+    await fsPromises.writeFile(path.join(fixture.directory, '收藏', 'same.png'), Buffer.from('second'));
+    await fsPromises.writeFile(path.join(fixture.directory, '收藏', 'upper.PNG'), Buffer.from('upper'));
+
+    const state = await fixture.library.getState(fixture.directory);
+    assert.deepEqual(state.categories.map(category => category.name), ['表情', '收藏']);
+    assert.ok(state.images.some(image => image.id === '表情/same.png'));
+    assert.ok(state.images.some(image => image.id === '收藏/same.png'));
+    assert.ok(state.images.some(image => image.id === '收藏/upper.PNG'));
+});
+
+test('migrates version 1 logical assignments into category folders', async t => {
+    const fixture = await createFixture();
+    t.after(() => fsPromises.rm(fixture.root, { recursive: true, force: true }));
+    await fsPromises.writeFile(fixture.metadataPath, JSON.stringify({
+        version: 1,
+        libraries: [{
+            directory: fixture.directory,
+            categories: [{ id: 'legacy-category', name: '旧分类' }],
+            order: ['newer.png', 'older.png'],
+            assignments: { 'newer.png': 'legacy-category' }
+        }]
+    }));
+
+    const state = await fixture.library.getState(fixture.directory);
+    assert.equal(state.images.find(image => image.id === '旧分类/newer.png').categoryId, 'legacy-category');
+    assert.equal(await fsPromises.readFile(path.join(fixture.directory, '旧分类', 'newer.png'), 'utf8'), 'newer');
+    const metadata = JSON.parse(await fsPromises.readFile(fixture.metadataPath, 'utf8'));
+    assert.equal(metadata.version, 2);
+    assert.equal(metadata.libraries[0].layout, 'folders');
+});
+
+test('rejects duplicate names, unsafe paths and category deletion with foreign files', async t => {
     const fixture = await createFixture();
     t.after(() => fsPromises.rm(fixture.root, { recursive: true, force: true }));
 
@@ -156,6 +209,18 @@ test('rejects duplicate names and paths outside the managed image directory', as
         imageIds: ['..\\outside.png']
     });
     assert.deepEqual(outside, { ok: false, reason: 'image-selection-empty' });
+
+    const category = await fixture.library.action(fixture.directory, {
+        type: 'create-category',
+        name: '不可删除'
+    });
+    await fsPromises.writeFile(path.join(fixture.directory, '不可删除', 'note.txt'), 'keep');
+    const deletion = await fixture.library.action(fixture.directory, {
+        type: 'delete-category',
+        categoryId: category.categoryId
+    });
+    assert.deepEqual(deletion, { ok: false, reason: 'category-directory-not-empty' });
+    assert.equal(await fsPromises.readFile(path.join(fixture.directory, '不可删除', 'note.txt'), 'utf8'), 'keep');
 });
 
 test('uses a compact standalone manager with selection, preview and pointer sorting', () => {

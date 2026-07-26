@@ -110,6 +110,7 @@ const ERROR_MESSAGES = Object.freeze({
     'category-name-empty': '请输入分类名称',
     'category-name-conflict': '已经存在同名分类',
     'category-not-found': '分类已不存在，请刷新后重试',
+    'category-directory-not-empty': '分类文件夹中含有非图片内容，请先移出后再删除',
     'image-selection-empty': '请先选择图片',
     'image-name-empty': '请输入图片名称',
     'image-name-conflict': '已经存在同名图片',
@@ -779,7 +780,7 @@ export function createMessageImageManager(options = {}) {
             }
             const confirmed = await ask({
                 title: '删除分类',
-                message: `“${category.name}”中的图片会回到未分类，图片文件不会被删除。`,
+                message: `“${category.name}”中的图片会移回保存目录根层级，不会被删除。`,
                 confirmLabel: '删除分类',
                 danger: true,
                 input: false

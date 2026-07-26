@@ -24,12 +24,20 @@ test('accepts PNG bytes from renderer and normalizes the message count', () => {
     const bytes = createPngBytes();
     const payload = normalizeMessageImagePayload({
         data: new Uint8Array(bytes),
-        count: 2.9
+        count: 2.9,
+        qqNumber: '12345678',
+        nickname: ' Alice\nBob ',
+        groupNumber: '87654321',
+        groupName: ' 测试\n群 '
     });
 
     assert.ok(payload);
     assert.deepEqual(payload.data, bytes);
     assert.equal(payload.count, 2);
+    assert.equal(payload.qqNumber, '12345678');
+    assert.equal(payload.nickname, 'Alice Bob');
+    assert.equal(payload.groupNumber, '87654321');
+    assert.equal(payload.groupName, '测试 群');
 });
 
 test('rejects invalid image payloads', () => {
@@ -40,7 +48,29 @@ test('rejects invalid image payloads', () => {
 test('uses a stable timestamped PNG file name', () => {
     assert.equal(
         formatMessageImageFileName(new Date(2026, 6, 25, 9, 8, 7)),
-        'QQ消息-20260725-090807.png'
+        '未知来源-20260725-090807.png'
+    );
+});
+
+test('uses one normalized source token in the default filename', () => {
+    const now = new Date(2026, 6, 25, 9, 8, 7);
+    assert.equal(
+        formatMessageImageFileName(now, DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN, 2, {
+            qqNumber: '12345678',
+            nickname: 'Alice'
+        }),
+        'Alice(12345678)-20260725-090807.png'
+    );
+    assert.equal(
+        formatMessageImageFileName(now, DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN, 5, {
+            groupNumber: '87654321',
+            groupName: '测试群'
+        }),
+        '测试群(87654321)-20260725-090807.png'
+    );
+    assert.equal(
+        formatMessageImageFileName(now, DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN, 3),
+        '多人消息-20260725-090807.png'
     );
 });
 
@@ -49,6 +79,24 @@ test('expands custom filename tokens and sanitizes Windows filenames', () => {
     assert.equal(
         formatMessageImageFileName(now, '{yyyy}-{MM}-{dd}_{HH}:{mm}:{ss}_{count}', 12),
         '2026-07-25_09_08_07_12.png'
+    );
+    assert.equal(
+        formatMessageImageFileName(
+            now,
+            '{qq_number}-{nickname}-{count}',
+            2,
+            { qqNumber: '12345678', nickname: 'Alice/Bob' }
+        ),
+        '12345678-Alice_Bob-2.png'
+    );
+    assert.equal(
+        formatMessageImageFileName(
+            now,
+            '{group_number}-{group_name}-{count}',
+            3,
+            { groupNumber: '87654321', groupName: '测试群' }
+        ),
+        '87654321-测试群-3.png'
     );
     assert.equal(sanitizeMessageImageFileName('CON.png'), '_CON.png');
     assert.equal(sanitizeMessageImageFileName('bad<name>?'), 'bad_name__.png');
@@ -73,10 +121,10 @@ test('writes the renderer-generated PNG directly to the configured directory', a
     let written = null;
     let createdDirectory = null;
     const result = await saveMessageImage({
-        payload: { data: bytes, count: 3 },
+        payload: { data: bytes, count: 3, qqNumber: '12345678', nickname: 'Alice' },
         settings: {
             directory: 'D:\\Exports',
-            fileNamePattern: 'output'
+            fileNamePattern: 'output-{qq_number}-{nickname}'
         },
         fs: {
             mkdir: async (directory, options) => { createdDirectory = { directory, options }; },
@@ -85,12 +133,16 @@ test('writes the renderer-generated PNG directly to the configured directory', a
         path
     });
 
-    assert.deepEqual(result, { ok: true, filePath: 'D:\\Exports\\output.png', count: 3 });
+    assert.deepEqual(result, {
+        ok: true,
+        filePath: 'D:\\Exports\\output-12345678-Alice.png',
+        count: 3
+    });
     assert.deepEqual(createdDirectory, {
         directory: 'D:\\Exports',
         options: { recursive: true }
     });
-    assert.equal(written.filePath, 'D:\\Exports\\output.png');
+    assert.equal(written.filePath, 'D:\\Exports\\output-12345678-Alice.png');
     assert.deepEqual(written.data, bytes);
     assert.deepEqual(written.options, { flag: 'wx' });
 });

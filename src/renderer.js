@@ -18,7 +18,10 @@ import { createRecallFilterEditor } from './recall-filter-editor.js';
 import { createAutoReactionEditor } from './auto-reaction-editor.js';
 import { createLocalStickerController } from './local-sticker-panel.js';
 import { createLocalStickerManager } from './local-sticker-manager.js';
-import { createMessageImageController } from './message-to-image.js';
+import {
+    createMessageImageController,
+    getMessageImageSenderMetadata
+} from './message-to-image.js';
 import { createMessageImageManager } from './message-image-manager.js';
 import './qr-result-dialog.js';
 
@@ -78,7 +81,8 @@ let handleToolboxVueComponentMount = () => {};
     const TOOLBOX_MENU_TYPE_REPEAT = 990101;
     const TOOLBOX_MENU_TYPE_QR_SCAN = 990102;
     const TOOLBOX_MENU_TYPE_MESSAGE_TO_IMAGE = 990103;
-    const DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN = 'QQ消息-{yyyy}{MM}{dd}-{HH}{mm}{ss}';
+    const DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN =
+        '{source}-{yyyy}{MM}{dd}-{HH}{mm}{ss}';
     const RECALL_MARKER_STYLE_VALUES = new Set(['badge', 'outline']);
     const RECALL_FILTER_MODE_VALUES = new Set(['all', 'blacklist', 'whitelist']);
     const MAX_AUTO_REACTION_EMOJIS = 64;
@@ -161,10 +165,11 @@ let handleToolboxVueComponentMount = () => {};
             promptNoSeq: false,
             messageToImage: false,
             messageToImageIncludeBackground: false,
+            messageToImageIncludeBackgroundWhitespace: false,
             messageToImageDirectory: '',
             messageToImageFileNamePattern: DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
             messageToImageAutoCopy: false,
-            messageToImageIncludeReactions: false,
+            messageToImageOnlyMessage: true,
             customImageSummaryEnabled: false,
             customImageSummary: '',
             removeReactionLimit: false,
@@ -174,6 +179,12 @@ let handleToolboxVueComponentMount = () => {};
         entertainment: {
             autoPokeBack: false,
             autoPokeBackLimit: 1,
+            autoPokeBackTriggers: {
+                poked: true,
+                mentionSelf: false,
+                replySelf: false,
+                excludeAtAll: true
+            },
             doubleClickAvatarPoke: false,
             rightClickAvatarPoke: false,
             sendWindowShake: false,
@@ -2230,7 +2241,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createMessageImageDirectoryItem(),
                 createTextItem(
                     text('命名格式'),
-                    text('支持 {yyyy} {MM} {dd} {HH} {mm} {ss} {count}'),
+                    text('支持 {source} 及发送者、群聊、时间占位符'),
                     'messageTweaks.messageToImageFileNamePattern',
                     {
                         requires: 'messageTweaks.messageToImage',
@@ -2257,9 +2268,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     }
                 ),
                 createSwitchItem(
-                    text('包含表情回应'),
-                    text('导出时保留消息下方的表情回应'),
-                    'messageTweaks.messageToImageIncludeReactions',
+                    text('包含背景留白'),
+                    text('保留消息外侧的完整会话宽度'),
+                    'messageTweaks.messageToImageIncludeBackgroundWhitespace',
+                    {
+                        requires: [
+                            'messageTweaks.messageToImage',
+                            'messageTweaks.messageToImageIncludeBackground'
+                        ],
+                        childLevel: 2
+                    }
+                ),
+                createSwitchItem(
+                    text('仅包含消息'),
+                    text('不保留精华标记与表情回应'),
+                    'messageTweaks.messageToImageOnlyMessage',
                     {
                         requires: 'messageTweaks.messageToImage',
                         child: true
@@ -2369,7 +2392,23 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     child: true
                 }),
                 createSwitchItem(text('发送窗口抖动'), text('在好友私聊输入栏显示发送按钮'), 'entertainment.sendWindowShake'),
-                createSwitchItem(text('自动回戳'), text('收到戳戳后自动回戳'), 'entertainment.autoPokeBack'),
+                createSwitchItem(text('自动回戳'), text('按所选条件自动戳发送者'), 'entertainment.autoPokeBack'),
+                createSwitchItem(text('被戳时回戳'), text('收到别人对自己的戳戳时戳回'), 'entertainment.autoPokeBackTriggers.poked', {
+                    requires: 'entertainment.autoPokeBack',
+                    child: true
+                }),
+                createSwitchItem(text('被 @ 时回戳'), text('群消息提到自己时戳发送者'), 'entertainment.autoPokeBackTriggers.mentionSelf', {
+                    requires: 'entertainment.autoPokeBack',
+                    child: true
+                }),
+                createSwitchItem(text('被回复时回戳'), text('消息回复自己时戳发送者'), 'entertainment.autoPokeBackTriggers.replySelf', {
+                    requires: 'entertainment.autoPokeBack',
+                    child: true
+                }),
+                createSwitchItem(text('排除 @ 全体成员'), text('含 @ 全体成员的消息不回戳'), 'entertainment.autoPokeBackTriggers.excludeAtAll', {
+                    requires: 'entertainment.autoPokeBack',
+                    child: true
+                }),
                 createNumberItem(text('回戳阈值'), text('0 为无限制'), 'entertainment.autoPokeBackLimit', {
                     min: 0,
                     max: 9999,
@@ -6297,6 +6336,40 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         ].map(normalizeText).join(':');
     }
 
+    function getMessageImageFileNameMetadata(message, record) {
+        const metadata = getMessageImageSenderMetadata(message, record);
+        if (metadata.nickname || !metadata.qqNumber) {
+            return metadata;
+        }
+        const peer = getPeerFromRecord(record);
+        if (Number(peer?.chatType) !== 1) {
+            return metadata;
+        }
+        const peerUin = normalizeUin(peer?.peerUin || peer?.peerUid);
+        if (peerUin && metadata.qqNumber === peerUin) {
+            metadata.nickname = getCurrentRecallPeerLabel(peer);
+        }
+        return metadata;
+    }
+
+    function getMessageImageGroupMetadata(_message, record) {
+        const peer = getPeerFromRecord(record);
+        if (Number(peer?.chatType) !== 2) {
+            return {};
+        }
+        return {
+            groupNumber: normalizeUin(
+                record?.groupUin || record?.peerUin || record?.peer?.peerUin || peer.peerUin || peer.peerUid
+            ),
+            groupName: [
+                record?.groupName,
+                record?.peerName,
+                record?.peer?.name,
+                getCurrentRecallPeerLabel(peer)
+            ].map(normalizeText).find(Boolean) || ''
+        };
+    }
+
     function getVisibleMessageElements() {
         const seen = new Set();
         const messages = [];
@@ -6316,7 +6389,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             messageImageController = createMessageImageController({
                 isEnabled: () => isConfigEnabled('messageTweaks.messageToImage'),
                 includeBackground: () => isConfigEnabled('messageTweaks.messageToImageIncludeBackground'),
-                includeReactions: () => isConfigEnabled('messageTweaks.messageToImageIncludeReactions'),
+                includeBackgroundWhitespace: () =>
+                    isConfigEnabled('messageTweaks.messageToImageIncludeBackgroundWhitespace'),
+                messageOnly: () => isConfigEnabled('messageTweaks.messageToImageOnlyMessage'),
+                getSenderMetadata: getMessageImageFileNameMetadata,
+                getGroupMetadata: getMessageImageGroupMetadata,
                 getMessageElement: getMessageElementFromElement,
                 getMessageRecord: findMessageRecordFromElement,
                 getRecordKey: getMessageImageRecordKey,
