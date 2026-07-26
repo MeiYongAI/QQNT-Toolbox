@@ -194,7 +194,6 @@ let handleToolboxVueComponentMount = () => {};
             checkOnStartup: false
         },
         network: {
-            proxyMode: 'system',
             proxyUrl: '',
             githubMirror: '',
             githubToken: ''
@@ -400,9 +399,6 @@ let handleToolboxVueComponentMount = () => {};
             }
         }
         config.entertainment.autoReaction.emojiIds = Array.from(emojiIds);
-        if (!['system', 'direct', 'manual'].includes(config.network.proxyMode)) {
-            config.network.proxyMode = DEFAULT_CONFIG.network.proxyMode;
-        }
         for (const [key, maxLength] of [
             ['proxyUrl', 2048],
             ['githubMirror', 2048],
@@ -2391,14 +2387,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             createSection('simplifyChat', text('聊天功能栏'), []),
             createCategoryTitle(text('其他')),
             createSection('network', text('网络'), [
-                createChoiceItem(text('代理方式'), text('同时用于插件更新与 Telegram 贴纸下载'), 'network.proxyMode', [
-                    { value: 'system', label: text('系统') },
-                    { value: 'direct', label: text('直连') },
-                    { value: 'manual', label: text('手动') }
-                ]),
-                createTextItem(text('代理地址'), text('仅手动模式使用，支持 HTTP、HTTPS 与 SOCKS'), 'network.proxyUrl', {
-                    maxLength: 2048,
-                    child: true
+                createTextItem(text('代理地址'), text('留空跟随系统，支持 HTTP、HTTPS 与 SOCKS'), 'network.proxyUrl', {
+                    maxLength: 2048
                 }),
                 createTextItem(text('GitHub 镜像'), text('可选；留空直连，镜像失败时自动回退'), 'network.githubMirror', {
                     maxLength: 2048

@@ -250,7 +250,6 @@ try {
     voiceFileSender = null;
 }
 const INLINE_MEDIA_BACKGROUND_VALUES = new Set(['transparent', 'white', 'semi', 'black']);
-const NETWORK_PROXY_MODES = new Set(['system', 'direct', 'manual']);
 const DEFAULT_CONFIG = {
     fileRetryFixer: {
         enabled: false,
@@ -325,7 +324,6 @@ const DEFAULT_CONFIG = {
         checkOnStartup: false
     },
     network: {
-        proxyMode: 'system',
         proxyUrl: '',
         githubMirror: '',
         githubToken: ''
@@ -868,16 +866,17 @@ function mergeConfig(value, defaults = DEFAULT_CONFIG) {
 
 function migrateNetworkConfig(value) {
     const source = value && typeof value === 'object' ? value : {};
+    source.network = source.network && typeof source.network === 'object'
+        ? source.network
+        : {};
+    const legacyMode = String(source.network.proxyMode || '');
     const legacyProxy = String(source.localStickers?.httpProxy || '').trim();
-    if (legacyProxy) {
-        source.network = source.network && typeof source.network === 'object'
-            ? source.network
-            : {};
-        if (!String(source.network.proxyUrl || '').trim()) {
-            source.network.proxyMode = 'manual';
-            source.network.proxyUrl = legacyProxy;
-        }
+    if (legacyMode === 'system' || legacyMode === 'direct') {
+        source.network.proxyUrl = '';
+    } else if (legacyProxy && !String(source.network.proxyUrl || '').trim()) {
+        source.network.proxyUrl = legacyProxy;
     }
+    delete source.network.proxyMode;
     return source;
 }
 
@@ -888,9 +887,6 @@ function normalizeNetworkConfig(value) {
         .trim()
         .slice(0, maxLength);
     return {
-        proxyMode: NETWORK_PROXY_MODES.has(source.proxyMode)
-            ? source.proxyMode
-            : DEFAULT_CONFIG.network.proxyMode,
         proxyUrl: singleLine(source.proxyUrl, 2048),
         githubMirror: singleLine(source.githubMirror, 2048),
         githubToken: singleLine(source.githubToken, 512)
@@ -2412,10 +2408,7 @@ function normalizeProxyServerUrl(value) {
 
 function resolveConfiguredNetwork() {
     const config = normalizeNetworkConfig(getConfig().network);
-    if (config.proxyMode === 'direct') {
-        return { mode: 'direct', source: 'direct', proxyUrl: '' };
-    }
-    if (config.proxyMode === 'manual') {
+    if (config.proxyUrl) {
         const proxyUrl = normalizeProxyServerUrl(config.proxyUrl);
         if (!proxyUrl) {
             throw Object.assign(new Error('代理地址格式无效'), { reason: 'invalid-proxy-url' });

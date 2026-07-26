@@ -73,7 +73,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 - 校验完成的更新先进入 `data\qqnt_toolbox\updater` 暂存目录，不会覆盖正在运行的插件。
 - 点击“重启安装”后，Toolbox 会先确认更新助手已启动，再退出 QQ。助手等待本次 QQ 完全退出后，在原插件目录中交换完整版本；失败时恢复旧版本，完成安装或回滚后才重新启动 QQ。
 - 自动更新不会再按版本创建新目录。已有 `QQNT-Toolbox-v*` 目录会保留当前名称并原位更新；全新手动安装使用固定的 `QQNT-Toolbox` 目录。
-- “其他 > 网络”可统一选择系统代理、直连或手动代理，并配置可选的 GitHub 下载镜像。GitHub 令牌只发送给 GitHub API，不会发送给第三方镜像。
+- “其他 > 网络”可填写统一代理地址并配置可选的 GitHub 下载镜像；代理地址留空时跟随系统网络设置。GitHub 令牌只发送给 GitHub API，不会发送给第三方镜像。
 - 使用旧版更新器的用户需要从 GitHub Releases 手动安装一次新版；项目不再提供 `update.json` 兼容迁移。
 - Windows、Linux 和 macOS 共用同一套 JavaScript 更新助手；它由 QQ 自带的运行时执行，不要求另外安装 Node.js、PowerShell 或 shell 工具。
 
@@ -190,7 +190,7 @@ NoSeq 通常表示消息在弱网环境下可能没有成功发送，或者被�
 - `FFmpeg`：用于把 Telegram 视频贴纸转换为 GIF；路径留空时自动从 `PATH` 查找，普通静态 WebP 贴纸不依赖 FFmpeg。
 - `tgsToGif`：用于把 TGS 动画贴纸转换为 GIF；路径留空时自动从 `PATH` 查找，可从 [tgs_to_gif Releases](https://github.com/jiongjiongJOJO/tgs_to_gif/releases/latest) 下载，未找到时会跳过 TGS。
 
-Telegram 贴纸下载与插件更新共用“其他 > 网络”中的网络设置。手动代理支持 HTTP、HTTPS 和 SOCKS；“系统”模式会优先读取可用的代理环境变量，再使用 Chromium 的系统代理/PAC。这些设置只作用于 Toolbox 发起的网络请求，不会修改 QQ 的全局网络设置。
+Telegram 贴纸下载与插件更新共用“其他 > 网络”中的代理地址，支持 HTTP、HTTPS 和 SOCKS。地址留空时会优先读取可用的代理环境变量，再使用 Chromium 的系统代理/PAC。这些设置只作用于 Toolbox 发起的网络请求，不会修改 QQ 的全局网络设置。
 
 Telegram 下载结果直接保存在所选贴纸目录内，不建立额外缓存目录。单个贴纸、整包大小、贴纸数量、并发数与请求时间均有上限；Bot Token 不会写入 Toolbox 诊断日志。
 

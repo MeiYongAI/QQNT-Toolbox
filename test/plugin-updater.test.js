@@ -198,6 +198,20 @@ test('reports GitHub anonymous rate limiting distinctly', async () => {
     await assert.rejects(transport.requestLatestRelease(), { reason: 'github-rate-limited' });
 });
 
+test('uses one optional proxy address for updates and sticker downloads', async () => {
+    const [mainSource, rendererSource] = await Promise.all([
+        fs.readFile(path.join(__dirname, '..', 'src', 'main.js'), 'utf8'),
+        fs.readFile(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8')
+    ]);
+    assert.doesNotMatch(rendererSource, /network\.proxyMode|text\('代理方式'\)/);
+    assert.match(rendererSource, /createTextItem\(text\('代理地址'\)[\s\S]*?'network\.proxyUrl'/);
+    assert.match(mainSource, /if \(config\.proxyUrl\)[\s\S]*?source: 'manual'/);
+    assert.match(
+        mainSource,
+        /legacyMode === 'system' \|\| legacyMode === 'direct'[\s\S]*?proxyUrl = ''[\s\S]*?delete source\.network\.proxyMode/
+    );
+});
+
 test('launches the same JavaScript installer on every supported desktop platform', async () => {
     for (const platform of ['win32', 'linux', 'darwin']) {
         let spawnCall = null;
