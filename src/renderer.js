@@ -3,7 +3,10 @@ import {
     createMessageContextMenuOrderController,
     getContextMenuItemElements
 } from './message-context-menu-order.js';
-import { matchesControlLabelValue } from './control-label-match.js';
+import {
+    matchesControlLabelValue,
+    normalizeDynamicControlLabel
+} from './control-label-match.js';
 import { createReactionLimitController } from './reaction-limit.js';
 import { createFakeForwardEditor } from './fake-forward-editor.js';
 import {
@@ -3283,9 +3286,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function normalizeSimplifyItemName(value) {
-        return normalizeText(value)
-            .replace(/\s*[（(]?(?:99\+|\d+)\s*(?:条未读(?:消息)?|条新消息|个未读(?:消息)?)[）)]?\s*$/u, '')
-            .trim();
+        return normalizeDynamicControlLabel(normalizeText(value));
     }
 
     function getSimplifyItemName(element) {

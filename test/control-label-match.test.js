@@ -24,3 +24,11 @@ test('does not treat conversation content containing a label as the control itse
     assert.equal(matchesControlLabelValue('\u68c0\u67e5\u66f4\u65b0\u540e\u91cd\u542f QQ', '\u68c0\u67e5\u66f4\u65b0'), false);
     assert.equal(matchesControlLabelValue('\u6d88\u606f\u5217\u8868', '\u5e2e\u52a9'), false);
 });
+
+test('keeps sidebar labels stable while QQ notification counts change', async () => {
+    const { normalizeDynamicControlLabel } = await modulePromise;
+    assert.equal(normalizeDynamicControlLabel('\u8054\u7cfb\u4eba 6\u4e2a\u901a\u77e5'), '\u8054\u7cfb\u4eba');
+    assert.equal(normalizeDynamicControlLabel('\u8054\u7cfb\u4eba 13\u4e2a\u901a\u77e5'), '\u8054\u7cfb\u4eba');
+    assert.equal(normalizeDynamicControlLabel('\u6d88\u606f\uff0899+ \u6761\u672a\u8bfb\u6d88\u606f\uff09'), '\u6d88\u606f');
+    assert.equal(normalizeDynamicControlLabel('\u5c0f\u7a0b\u5e8f'), '\u5c0f\u7a0b\u5e8f');
+});
