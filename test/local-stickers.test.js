@@ -38,8 +38,7 @@ test('normalizes local sticker settings to bounded values', () => {
         recentRows: 0,
         telegramBotToken: '  123456:abcdefghijklmnopqrstuvwxyz  ',
         ffmpegPath: '  D:\\tools\\ffmpeg.exe  ',
-        tgsToGifPath: '  D:\\tools\\tgs_to_gif.exe  ',
-        httpProxy: '  http://127.0.0.1:7890  '
+        tgsToGifPath: '  D:\\tools\\tgs_to_gif.exe  '
     }), {
         enabled: true,
         path: 'D:\\stickers',
@@ -54,8 +53,7 @@ test('normalizes local sticker settings to bounded values', () => {
         recentRows: 1,
         telegramBotToken: '123456:abcdefghijklmnopqrstuvwxyz',
         ffmpegPath: 'D:\\tools\\ffmpeg.exe',
-        tgsToGifPath: 'D:\\tools\\tgs_to_gif.exe',
-        httpProxy: 'http://127.0.0.1:7890'
+        tgsToGifPath: 'D:\\tools\\tgs_to_gif.exe'
     });
 });
 

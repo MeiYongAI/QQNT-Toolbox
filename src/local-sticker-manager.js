@@ -344,21 +344,10 @@ export function createLocalStickerManager(options = {}) {
         downloadTgs.dataset.downloadTool = 'tgsToGif';
         tgsRow.control.append(chooseTgs, downloadTgs);
 
-        const proxyInput = createElement('input', 'qlsm-input qlsm-path-input');
-        proxyInput.type = 'url';
-        proxyInput.placeholder = '自动检测环境与系统代理';
-        proxyInput.autocomplete = 'off';
-        proxyInput.spellcheck = false;
-        proxyInput.setAttribute('aria-label', 'HTTP 代理');
-        const proxyRow = createConfigRow('HTTP 代理', '留空时自动使用环境变量或系统代理/PAC', proxyInput);
-        const testProxy = createElement('button', 'qlsm-secondary', '检测');
-        testProxy.type = 'button';
-        proxyRow.control.append(testProxy);
-        const proxyStatus = createElement('div', 'qlsm-status qlsm-proxy-status');
         const toolSection = createElement('section', 'qlsm-tool-section');
-        const toolTitle = createElement('h3', 'qlsm-tool-title', '转换工具与网络');
+        const toolTitle = createElement('h3', 'qlsm-tool-title', '转换工具');
         const toolBody = createElement('div', 'qlsm-tool-body');
-        toolBody.append(ffmpegRow.row, tgsRow.row, proxyRow.row, proxyStatus);
+        toolBody.append(ffmpegRow.row, tgsRow.row);
         toolSection.append(toolTitle, toolBody);
         configSection.append(tokenRow.row, toolSection);
         form.append(downloadSection, configSection);
@@ -418,7 +407,6 @@ export function createLocalStickerManager(options = {}) {
             tokenInput.value = normalizeText(config.telegramBotToken);
             ffmpegInput.value = normalizeText(config.ffmpegPath);
             tgsInput.value = normalizeText(config.tgsToGifPath);
-            proxyInput.value = normalizeText(config.httpProxy);
         };
 
         let environmentRevision = 0;
@@ -456,19 +444,6 @@ export function createLocalStickerManager(options = {}) {
                 Boolean(tgsInput.value.trim()),
                 '未在 PATH 中检测到；仅影响 TGS 动画贴纸'
             );
-            const network = result.network || {};
-            proxyRow.meta.title = normalizeText(network.proxyUrl || network.route);
-            if (proxyInput.value.trim()) {
-                proxyRow.meta.textContent = network.reason
-                    ? '手动代理格式无效'
-                    : '使用手动 HTTP 代理';
-            } else if (network.source === 'environment') {
-                proxyRow.meta.textContent = `已自动读取 ${network.sourceName || '代理环境变量'}`;
-            } else if (network.route && network.route !== 'DIRECT') {
-                proxyRow.meta.textContent = '已自动使用系统代理/PAC';
-            } else {
-                proxyRow.meta.textContent = '未检测到代理，将使用直连';
-            }
         };
 
         const renderPacks = packs => {
@@ -779,8 +754,7 @@ export function createLocalStickerManager(options = {}) {
         for (const [input, key] of [
             [tokenInput, 'telegramBotToken'],
             [ffmpegInput, 'ffmpegPath'],
-            [tgsInput, 'tgsToGifPath'],
-            [proxyInput, 'httpProxy']
+            [tgsInput, 'tgsToGifPath']
         ]) {
             input.addEventListener('change', async () => {
                 try {
@@ -831,23 +805,6 @@ export function createLocalStickerManager(options = {}) {
             }
         });
 
-        testProxy.addEventListener('click', async () => {
-            testProxy.disabled = true;
-            setStatus(proxyStatus, '正在连接 Telegram', 'pending');
-            try {
-                const proxy = proxyInput.value.trim();
-                await saveSettings?.({ httpProxy: proxy });
-                const result = await options.testProxy?.(proxy);
-                setStatus(proxyStatus, result?.msg || (result?.ok ? '连接可用' : '连接不可用'),
-                    result?.ok ? 'success' : 'error');
-                await inspectEnvironment();
-            } catch (error) {
-                setStatus(proxyStatus, error?.message || '代理检测失败', 'error');
-            } finally {
-                testProxy.disabled = false;
-            }
-        });
-
         form.addEventListener('submit', async event => {
             event.preventDefault();
             if (downloadButton.disabled) {
@@ -859,8 +816,7 @@ export function createLocalStickerManager(options = {}) {
                 await saveSettings?.({
                     telegramBotToken: tokenInput.value.trim(),
                     ffmpegPath: ffmpegInput.value.trim(),
-                    tgsToGifPath: tgsInput.value.trim(),
-                    httpProxy: proxyInput.value.trim()
+                    tgsToGifPath: tgsInput.value.trim()
                 });
                 const result = await options.download?.(urlInput.value.trim());
                 if (result?.ok !== true) {

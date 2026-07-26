@@ -362,8 +362,7 @@
     margin-top: 12px;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-download-status,
-#qqnt-toolbox-local-sticker-manager .qlsm-proxy-status {
+#qqnt-toolbox-local-sticker-manager .qlsm-download-status {
     min-height: 18px;
     margin-top: 8px;
 }

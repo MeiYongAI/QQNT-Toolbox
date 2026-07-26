@@ -23,8 +23,7 @@ const DEFAULT_LOCAL_STICKER_CONFIG = Object.freeze({
     recentRows: 2,
     telegramBotToken: '',
     ffmpegPath: '',
-    tgsToGifPath: '',
-    httpProxy: ''
+    tgsToGifPath: ''
 });
 const DEFAULT_SCAN_LIMITS = Object.freeze({
     maxDepth: 8,
@@ -62,8 +61,7 @@ function normalizeLocalStickerConfig(value, options = {}) {
         recentRows: clampInteger(source.recentRows, 1, 6, DEFAULT_LOCAL_STICKER_CONFIG.recentRows),
         telegramBotToken: String(source.telegramBotToken || '').trim().slice(0, 256),
         ffmpegPath: String(source.ffmpegPath || '').trim().slice(0, 4096),
-        tgsToGifPath: String(source.tgsToGifPath || '').trim().slice(0, 4096),
-        httpProxy: String(source.httpProxy || '').trim().slice(0, 512)
+        tgsToGifPath: String(source.tgsToGifPath || '').trim().slice(0, 4096)
     };
 }
 

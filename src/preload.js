@@ -28,7 +28,6 @@ const CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER = 'qqnt-toolbox:update-local-stick
 const CHANNEL_CHOOSE_LOCAL_STICKER_TOOL = 'qqnt-toolbox:choose-local-sticker-tool';
 const CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT = 'qqnt-toolbox:get-local-sticker-environment';
 const CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD = 'qqnt-toolbox:open-local-sticker-tool-download';
-const CHANNEL_TEST_LOCAL_STICKER_PROXY = 'qqnt-toolbox:test-local-sticker-proxy';
 const CHANNEL_DOWNLOAD_TELEGRAM_STICKERS = 'qqnt-toolbox:download-telegram-stickers';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_GET_AUTO_REACTION_CATALOG = 'qqnt-toolbox:get-auto-reaction-catalog';
@@ -71,7 +70,6 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     getLocalStickerEnvironment: () => ipcRenderer.invoke(CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT),
     openLocalStickerToolDownload: tool =>
         ipcRenderer.invoke(CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD, tool),
-    testLocalStickerProxy: proxyUrl => ipcRenderer.invoke(CHANNEL_TEST_LOCAL_STICKER_PROXY, proxyUrl),
     downloadTelegramStickers: url => ipcRenderer.invoke(CHANNEL_DOWNLOAD_TELEGRAM_STICKERS, url),
     getReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_REACTION_CATALOG),
     getAutoReactionEmojiCatalog: () => ipcRenderer.invoke(CHANNEL_GET_AUTO_REACTION_CATALOG),

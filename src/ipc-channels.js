@@ -36,7 +36,6 @@ const CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER = 'qqnt-toolbox:update-local-stick
 const CHANNEL_CHOOSE_LOCAL_STICKER_TOOL = 'qqnt-toolbox:choose-local-sticker-tool';
 const CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT = 'qqnt-toolbox:get-local-sticker-environment';
 const CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD = 'qqnt-toolbox:open-local-sticker-tool-download';
-const CHANNEL_TEST_LOCAL_STICKER_PROXY = 'qqnt-toolbox:test-local-sticker-proxy';
 const CHANNEL_DOWNLOAD_TELEGRAM_STICKERS = 'qqnt-toolbox:download-telegram-stickers';
 const CHANNEL_GET_REACTION_CATALOG = 'qqnt-toolbox:get-reaction-catalog';
 const CHANNEL_GET_AUTO_REACTION_CATALOG = 'qqnt-toolbox:get-auto-reaction-catalog';
@@ -96,7 +95,6 @@ module.exports = Object.freeze({
     CHANNEL_CHOOSE_LOCAL_STICKER_TOOL,
     CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT,
     CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD,
-    CHANNEL_TEST_LOCAL_STICKER_PROXY,
     CHANNEL_DOWNLOAD_TELEGRAM_STICKERS,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_GET_AUTO_REACTION_CATALOG,

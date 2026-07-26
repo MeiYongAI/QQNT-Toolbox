@@ -103,7 +103,6 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.chooseLocalStickerTool('ffmpeg');
     await api.getLocalStickerEnvironment();
     await api.openLocalStickerToolDownload('tgsToGif');
-    await api.testLocalStickerProxy('http://127.0.0.1:7890');
     await api.downloadTelegramStickers('https://t.me/addstickers/example');
     await api.getReactionEmojiCatalog();
     await api.getAutoReactionEmojiCatalog();
@@ -148,7 +147,6 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:choose-local-sticker-tool',
         'qqnt-toolbox:get-local-sticker-environment',
         'qqnt-toolbox:open-local-sticker-tool-download',
-        'qqnt-toolbox:test-local-sticker-proxy',
         'qqnt-toolbox:download-telegram-stickers',
         'qqnt-toolbox:get-reaction-catalog',
         'qqnt-toolbox:get-auto-reaction-catalog',

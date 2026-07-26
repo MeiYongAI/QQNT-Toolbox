@@ -29,7 +29,7 @@ test('keeps common sticker management together and tool settings directly availa
     assert.match(source, /recentEnabled/);
     assert.match(source, /recentRows/);
     assert.match(source, /createElement\('section', 'qlsm-tool-section'\)/);
-    assert.match(source, /createElement\('h3', 'qlsm-tool-title', '转换工具与网络'\)/);
+    assert.match(source, /createElement\('h3', 'qlsm-tool-title', '转换工具'\)/);
     assert.match(source, /activeTab === 'telegram'[\s\S]*?inspectEnvironment\(\)/);
     assert.doesNotMatch(source, /createElement\('details'|advanced\.addEventListener\('toggle'/);
     assert.match(source, /addEventListener\('pointermove'/);
@@ -37,12 +37,11 @@ test('keeps common sticker management together and tool settings directly availa
     for (const setting of [
         'telegramBotToken',
         'ffmpegPath',
-        'tgsToGifPath',
-        'httpProxy'
+        'tgsToGifPath'
     ]) {
         assert.match(source, new RegExp(setting));
     }
-    assert.match(source, /options\.testProxy/);
+    assert.doesNotMatch(source, /httpProxy|options\.testProxy/);
     assert.match(source, /options\.inspectEnvironment/);
     assert.match(source, /options\.openToolDownload/);
     assert.match(source, /dataset\.downloadTool/);

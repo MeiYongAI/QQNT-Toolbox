@@ -107,6 +107,7 @@ let handleToolboxVueComponentMount = () => {};
             localStickers: false,
             preventRecall: false,
             entertainment: false,
+            network: false,
             updater: false,
             floatingPanel: false,
             simplifySidebar: false,
@@ -147,8 +148,7 @@ let handleToolboxVueComponentMount = () => {};
             recentRows: 2,
             telegramBotToken: '',
             ffmpegPath: '',
-            tgsToGifPath: '',
-            httpProxy: ''
+            tgsToGifPath: ''
         },
         voiceMessage: {
             enabled: false,
@@ -192,6 +192,12 @@ let handleToolboxVueComponentMount = () => {};
         },
         updater: {
             checkOnStartup: false
+        },
+        network: {
+            proxyMode: 'system',
+            proxyUrl: '',
+            githubMirror: '',
+            githubToken: ''
         },
         preventRecall: {
             enabled: false,
@@ -394,6 +400,19 @@ let handleToolboxVueComponentMount = () => {};
             }
         }
         config.entertainment.autoReaction.emojiIds = Array.from(emojiIds);
+        if (!['system', 'direct', 'manual'].includes(config.network.proxyMode)) {
+            config.network.proxyMode = DEFAULT_CONFIG.network.proxyMode;
+        }
+        for (const [key, maxLength] of [
+            ['proxyUrl', 2048],
+            ['githubMirror', 2048],
+            ['githubToken', 512]
+        ]) {
+            config.network[key] = String(config.network[key] || '')
+                .replace(/[\r\n]+/g, '')
+                .trim()
+                .slice(0, maxLength);
+        }
         return config;
     }
 
@@ -735,7 +754,6 @@ let handleToolboxVueComponentMount = () => {};
                 chooseTool: tool => getBridge()?.chooseLocalStickerTool?.(tool),
                 inspectEnvironment: () => getBridge()?.getLocalStickerEnvironment?.(),
                 openToolDownload: tool => getBridge()?.openLocalStickerToolDownload?.(tool),
-                testProxy: proxyUrl => getBridge()?.testLocalStickerProxy?.(proxyUrl),
                 download: async url => {
                     const result = await getBridge()?.downloadTelegramStickers?.(url);
                     if (result?.ok) {
@@ -1804,7 +1822,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const input = createElement('input', 'qqnt-toolbox-password-input');
         input.type = 'password';
         input.autocomplete = 'off';
-        input.maxLength = 128;
+        input.maxLength = Number(options.maxLength) || 128;
         input.dataset.configPath = configPath;
         input.setAttribute('aria-label', name);
         item.append(itemMain, input);
@@ -2372,13 +2390,30 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             createSection('simplifyTop', text('顶部功能栏'), []),
             createSection('simplifyChat', text('聊天功能栏'), []),
             createCategoryTitle(text('其他')),
+            createSection('network', text('网络'), [
+                createChoiceItem(text('代理方式'), text('同时用于插件更新与 Telegram 贴纸下载'), 'network.proxyMode', [
+                    { value: 'system', label: text('系统') },
+                    { value: 'direct', label: text('直连') },
+                    { value: 'manual', label: text('手动') }
+                ]),
+                createTextItem(text('代理地址'), text('仅手动模式使用，支持 HTTP、HTTPS 与 SOCKS'), 'network.proxyUrl', {
+                    maxLength: 2048,
+                    child: true
+                }),
+                createTextItem(text('GitHub 镜像'), text('可选；留空直连，镜像失败时自动回退'), 'network.githubMirror', {
+                    maxLength: 2048
+                }),
+                createPasswordItem(text('GitHub 令牌'), text('可选；留空匿名访问，填写后提高 API 限额'), 'network.githubToken', {
+                    maxLength: 512
+                })
+            ]),
             createSection('updater', text('插件更新'), [
                 createSwitchItem(text('启动时检查更新'), text('每 12 小时最多检查一次'), 'updater.checkOnStartup'),
-                createActionItem(text('检查更新'), text('读取 GitHub 上的结构化更新清单'), 'checkPluginUpdate', {
+                createActionItem(text('检查更新'), text('通过 GitHub Releases API 检查，默认匿名访问'), 'checkPluginUpdate', {
                     label: text('检查'),
                     updateRole: 'check'
                 }),
-                createActionItem(text('下载更新'), text('校验后暂存，重启 QQ 后生效'), 'preparePluginUpdate', {
+                createActionItem(text('下载更新'), text('校验 Release 包后暂存，重启 QQ 原位安装'), 'preparePluginUpdate', {
                     label: text('下载'),
                     child: true,
                     updateRole: 'prepare'
@@ -2501,10 +2536,18 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 return `${latest} ${text('已就绪，点击“重启安装”后生效')}`;
             case 'restarting':
                 return text('正在重启 QQ 并安装更新');
-            case 'error':
-                return currentUpdateState.reason === 'unsupported-platform'
-                    ? text('自动安装目前仅支持 Windows')
-                    : text('更新操作失败，请重试');
+            case 'error': {
+                const messages = {
+                    'unsupported-platform': text('自动安装目前仅支持 Windows'),
+                    'github-rate-limited': text('GitHub 匿名请求已达限额，可填写令牌后重试'),
+                    'invalid-github-token': text('GitHub 令牌无效，请检查后重试'),
+                    'invalid-proxy-url': text('代理地址无效，请检查网络设置'),
+                    'invalid-mirror-url': text('GitHub 镜像地址无效，请检查网络设置'),
+                    'installer-start-timeout': text('安装程序未能启动，QQ 不会退出'),
+                    'installer-start-expired': text('安装程序启动超时，请重新下载更新')
+                };
+                return messages[currentUpdateState.reason] || text('更新操作失败，请重试');
+            }
             default:
                 return `${text('当前版本')} ${current}`;
         }
@@ -2525,7 +2568,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             checkButton.disabled = busy;
         }
         if (prepareButton && !panelActionFeedbackTimers.has(prepareButton)) {
-            prepareButton.textContent = currentUpdateState.status === 'ready' ? text('重启安装') : text('下载');
+            prepareButton.textContent = currentUpdateState.status === 'ready'
+                ? text('重启安装')
+                : text('下载');
             prepareButton.disabled = !['available', 'ready'].includes(currentUpdateState.status) ||
                 !currentUpdateState.supported;
         }

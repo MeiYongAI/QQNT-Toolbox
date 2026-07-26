@@ -52,8 +52,7 @@ const {
 const {
     downloadTelegramStickerPack,
     getEnvironmentHttpProxy,
-    inspectLocalStickerTools,
-    normalizeHttpProxyUrl
+    inspectLocalStickerTools
 } = require('./local-sticker-downloader');
 const {
     loadAutoReactionEmojiCatalog,
@@ -159,7 +158,6 @@ const {
     CHANNEL_CHOOSE_LOCAL_STICKER_TOOL,
     CHANNEL_GET_LOCAL_STICKER_ENVIRONMENT,
     CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD,
-    CHANNEL_TEST_LOCAL_STICKER_PROXY,
     CHANNEL_DOWNLOAD_TELEGRAM_STICKERS,
     CHANNEL_GET_REACTION_CATALOG,
     CHANNEL_GET_AUTO_REACTION_CATALOG,
@@ -252,6 +250,7 @@ try {
     voiceFileSender = null;
 }
 const INLINE_MEDIA_BACKGROUND_VALUES = new Set(['transparent', 'white', 'semi', 'black']);
+const NETWORK_PROXY_MODES = new Set(['system', 'direct', 'manual']);
 const DEFAULT_CONFIG = {
     fileRetryFixer: {
         enabled: false,
@@ -284,8 +283,7 @@ const DEFAULT_CONFIG = {
         recentRows: 2,
         telegramBotToken: '',
         ffmpegPath: '',
-        tgsToGifPath: '',
-        httpProxy: ''
+        tgsToGifPath: ''
     },
     voiceMessage: {
         enabled: false,
@@ -325,6 +323,12 @@ const DEFAULT_CONFIG = {
     },
     updater: {
         checkOnStartup: false
+    },
+    network: {
+        proxyMode: 'system',
+        proxyUrl: '',
+        githubMirror: '',
+        githubToken: ''
     },
     preventRecall: {
         enabled: false,
@@ -412,7 +416,7 @@ const localStickerCache = {
     promiseSignature: '',
     revision: 0
 };
-const localStickerNetworkSessions = new Map();
+const networkSessions = new Map();
 let localStickerDownloadPromise = null;
 const recallStates = new Map();
 let configCache = null;
@@ -464,7 +468,6 @@ let autoReactionEmojiCatalog = null;
 let diagnosticLogger = null;
 let diagnosticActionRunner = null;
 let pluginUpdater = null;
-let pluginUpdaterNetworkSessionPromise = null;
 let automaticUpdateTimer = null;
 let messageImageRendererScriptPromise = null;
 let messageImageLibrary = null;
@@ -623,32 +626,7 @@ function broadcastUpdateState(state) {
 }
 
 async function getPluginUpdaterNetworkSession() {
-    if (!pluginUpdaterNetworkSessionPromise) {
-        pluginUpdaterNetworkSessionPromise = (async () => {
-            if (!session?.fromPartition) {
-                throw Object.assign(new Error('Electron session is unavailable.'), {
-                    reason: 'session-unavailable'
-                });
-            }
-            const scopedSession = session.fromPartition('qqnt-toolbox-updater', {
-                cache: false
-            });
-            await scopedSession.setProxy({ mode: 'system' });
-            if (typeof scopedSession.fetch !== 'function') {
-                throw Object.assign(new Error('Electron session.fetch is unavailable.'), {
-                    reason: 'session-fetch-unavailable'
-                });
-            }
-            recordDiagnostic('info', 'updater.network-ready', {
-                mode: 'system'
-            });
-            return scopedSession;
-        })();
-        pluginUpdaterNetworkSessionPromise.catch(() => {
-            pluginUpdaterNetworkSessionPromise = null;
-        });
-    }
-    return await pluginUpdaterNetworkSessionPromise;
+    return await getConfiguredNetworkSession('updater');
 }
 
 function getPluginUpdater() {
@@ -661,8 +639,16 @@ function getPluginUpdater() {
             currentVersion: getInstalledPluginVersion(),
             pluginRoot: path.resolve(__dirname, '..'),
             dataDir: getPluginDataDir(),
-            requestUpdateManifest: transport.requestUpdateManifest,
-            downloadReleaseAsset: transport.downloadReleaseAsset,
+            helperSource: path.join(__dirname, 'update-helper.ps1'),
+            requestLatestRelease: transport.requestLatestRelease,
+            downloadPluginArchive: transport.downloadPluginArchive,
+            getRequestOptions: () => {
+                const network = normalizeNetworkConfig(getConfig().network);
+                return {
+                    githubMirror: network.githubMirror,
+                    githubToken: network.githubToken
+                };
+            },
             onStateChange: broadcastUpdateState
         });
     }
@@ -880,6 +866,37 @@ function mergeConfig(value, defaults = DEFAULT_CONFIG) {
     return result;
 }
 
+function migrateNetworkConfig(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const legacyProxy = String(source.localStickers?.httpProxy || '').trim();
+    if (legacyProxy) {
+        source.network = source.network && typeof source.network === 'object'
+            ? source.network
+            : {};
+        if (!String(source.network.proxyUrl || '').trim()) {
+            source.network.proxyMode = 'manual';
+            source.network.proxyUrl = legacyProxy;
+        }
+    }
+    return source;
+}
+
+function normalizeNetworkConfig(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const singleLine = (input, maxLength) => String(input || '')
+        .replace(/[\r\n]+/g, '')
+        .trim()
+        .slice(0, maxLength);
+    return {
+        proxyMode: NETWORK_PROXY_MODES.has(source.proxyMode)
+            ? source.proxyMode
+            : DEFAULT_CONFIG.network.proxyMode,
+        proxyUrl: singleLine(source.proxyUrl, 2048),
+        githubMirror: singleLine(source.githubMirror, 2048),
+        githubToken: singleLine(source.githubToken, 512)
+    };
+}
+
 function normalizeSimplifyItemName(value) {
     return String(value ?? '')
         .trim()
@@ -1022,6 +1039,7 @@ function normalizeSimplifyConfig(config) {
     config.localStickers = normalizeLocalStickerConfig(config.localStickers, {
         defaultPath: getDefaultLocalStickerDirectory()
     });
+    config.network = normalizeNetworkConfig(config.network);
     return config;
 }
 
@@ -1038,9 +1056,9 @@ function loadConfig() {
             fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
             return clonePlain(configCache);
         }
-        configCache = normalizeSimplifyConfig(mergeConfig(migrateQrScanConfig(
+        configCache = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(migrateQrScanConfig(
             JSON.parse(fsSync.readFileSync(configPath, 'utf8'))
-        )));
+        ))));
         ensureDefaultLocalStickerDirectorySync(configCache.localStickers);
         fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
         return clonePlain(configCache);
@@ -1057,7 +1075,7 @@ async function saveConfig(nextConfig) {
     const wasSingleForwardViewerEnabled = configCache?.interfaceTweaks?.singleForwardViewer === true;
     const wasSingleForwardGroupIsolationEnabled =
         configCache?.interfaceTweaks?.singleForwardGroupIsolation === true;
-    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateQrScanConfig(nextConfig)));
+    const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(migrateQrScanConfig(nextConfig))));
     const willDebugBeEnabled = process.env.QQNT_TOOLBOX_DEBUG === '1' || normalizedConfig.debug?.enabled === true;
     if (wasDebugEnabled && !willDebugBeEnabled) {
         recordDiagnostic('info', 'diagnostics.disabled');
@@ -2375,66 +2393,80 @@ async function openLocalStickerToolDownload(tool) {
     }
 }
 
-function resolveLocalStickerNetworkMode(proxyUrl = '') {
-    const input = String(proxyUrl || '').trim();
-    if (input) {
-        const normalizedProxy = normalizeHttpProxyUrl(input);
-        if (!normalizedProxy) {
-            throw Object.assign(new Error('仅支持 http://主机:端口 格式的代理'), {
-                code: 'invalid-http-proxy'
-            });
+function normalizeProxyServerUrl(value) {
+    const input = String(value || '').trim();
+    if (!input || input.length > 2048 || /[\r\n]/.test(input)) {
+        return '';
+    }
+    try {
+        const parsed = new URL(input);
+        if (!['http:', 'https:', 'socks:', 'socks4:', 'socks5:'].includes(parsed.protocol) ||
+            !parsed.hostname) {
+            return '';
         }
-        return {
-            source: 'configured',
-            sourceName: '',
-            proxyUrl: normalizedProxy
-        };
+        return parsed.toString();
+    } catch {
+        return '';
+    }
+}
+
+function resolveConfiguredNetwork() {
+    const config = normalizeNetworkConfig(getConfig().network);
+    if (config.proxyMode === 'direct') {
+        return { mode: 'direct', source: 'direct', proxyUrl: '' };
+    }
+    if (config.proxyMode === 'manual') {
+        const proxyUrl = normalizeProxyServerUrl(config.proxyUrl);
+        if (!proxyUrl) {
+            throw Object.assign(new Error('代理地址格式无效'), { reason: 'invalid-proxy-url' });
+        }
+        return { mode: 'fixed_servers', source: 'manual', proxyUrl };
     }
     const environmentProxy = getEnvironmentHttpProxy(process.env);
     if (environmentProxy.url) {
         return {
+            mode: 'fixed_servers',
             source: 'environment',
-            sourceName: environmentProxy.source,
             proxyUrl: environmentProxy.url
         };
     }
-    return {
-        source: 'system',
-        sourceName: '',
-        proxyUrl: ''
-    };
+    return { mode: 'system', source: 'system', proxyUrl: '' };
 }
 
-async function getLocalStickerNetworkSession(proxyUrl = '') {
-    const network = resolveLocalStickerNetworkMode(proxyUrl);
+async function getConfiguredNetworkSession(purpose = 'shared') {
+    const network = resolveConfiguredNetwork();
     if (!session?.fromPartition) {
         throw Object.assign(new Error('当前 QQ 版本不支持独立网络会话'), {
-            code: 'session-unavailable'
+            reason: 'session-unavailable'
         });
     }
-    const key = network.proxyUrl ? `proxy:${network.proxyUrl}` : 'system';
-    let entry = localStickerNetworkSessions.get(key);
+    const key = `${purpose}:${network.mode}:${network.proxyUrl}`;
+    let entry = networkSessions.get(key);
     if (!entry) {
         const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
-        const scopedSession = session.fromPartition(`qqnt-toolbox-stickers-${hash}`, {
+        const scopedSession = session.fromPartition(`qqnt-toolbox-network-${hash}`, {
             cache: false
         });
-        const ready = scopedSession.setProxy(network.proxyUrl
+        const ready = scopedSession.setProxy(network.mode === 'fixed_servers'
             ? {
                 mode: 'fixed_servers',
                 proxyRules: network.proxyUrl,
                 proxyBypassRules: '<-loopback>'
             }
-            : { mode: 'system' });
-        entry = { session: scopedSession, ready };
-        localStickerNetworkSessions.set(key, entry);
+            : { mode: network.mode });
+        entry = { session: scopedSession, ready, source: network.source };
+        networkSessions.set(key, entry);
     }
     await entry.ready;
     if (typeof entry.session.fetch !== 'function') {
         throw Object.assign(new Error('当前 QQ 版本不支持独立网络请求'), {
-            code: 'session-fetch-unavailable'
+            reason: 'session-fetch-unavailable'
         });
     }
+    recordDiagnostic('info', 'network.ready', {
+        purpose: String(purpose || 'shared'),
+        source: entry.source
+    });
     return entry.session;
 }
 
@@ -2444,89 +2476,10 @@ async function getLocalStickerEnvironment() {
         ffmpegPath: config.ffmpegPath || process.env.FFMPEG_PATH || '',
         tgsToGifPath: config.tgsToGifPath || process.env.TGS_TO_GIF_PATH || ''
     });
-    let network;
-    let route = '';
-    try {
-        network = resolveLocalStickerNetworkMode(config.httpProxy);
-        const scopedSession = await getLocalStickerNetworkSession(config.httpProxy);
-        route = typeof scopedSession.resolveProxy === 'function'
-            ? String(await scopedSession.resolveProxy('https://api.telegram.org') || '')
-            : '';
-    } catch (error) {
-        network = {
-            source: config.httpProxy ? 'configured' : 'system',
-            sourceName: '',
-            proxyUrl: '',
-            reason: error?.code || 'proxy-inspection-failed'
-        };
-    }
     return {
         ok: true,
-        tools,
-        network: {
-            ...network,
-            route: route.slice(0, 240)
-        }
+        tools
     };
-}
-
-async function testLocalStickerProxy(proxyUrl) {
-    const input = String(proxyUrl || '').trim();
-    let network;
-    try {
-        network = resolveLocalStickerNetworkMode(input);
-    } catch {
-        return { ok: false, reason: 'invalid-http-proxy', msg: '代理格式应为 http://主机:端口' };
-    }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
-    const startedAt = Date.now();
-    try {
-        const scopedSession = await getLocalStickerNetworkSession(input);
-        const route = typeof scopedSession.resolveProxy === 'function'
-            ? String(await scopedSession.resolveProxy('https://api.telegram.org') || '')
-            : '';
-        const response = await scopedSession.fetch('https://api.telegram.org', {
-            method: 'GET',
-            redirect: 'follow',
-            signal: controller.signal,
-            bypassCustomProtocolHandlers: true
-        });
-        try {
-            await response.body?.cancel?.();
-        } catch {
-        }
-        if (response.status === 407 || response.status >= 500) {
-            return {
-                ok: false,
-                reason: response.status === 407 ? 'proxy-auth-required' : 'proxy-upstream-error',
-                msg: response.status === 407 ? '代理需要身份验证' : '代理无法连接 Telegram'
-            };
-        }
-        const latencyMs = Date.now() - startedAt;
-        const connection = network.source === 'configured'
-            ? '手动代理'
-            : network.source === 'environment'
-                ? network.sourceName
-                : route && route !== 'DIRECT'
-                    ? '系统代理'
-                    : '直连';
-        return {
-            ok: true,
-            latencyMs,
-            source: network.source,
-            route: route.slice(0, 240),
-            msg: `${connection}可用，连接耗时 ${latencyMs} ms`
-        };
-    } catch (error) {
-        return {
-            ok: false,
-            reason: error?.name === 'AbortError' ? 'proxy-timeout' : error?.code || 'proxy-unreachable',
-            msg: error?.name === 'AbortError' ? '连接 Telegram 超时' : '当前网络无法连接 Telegram'
-        };
-    } finally {
-        clearTimeout(timer);
-    }
 }
 
 async function updateConfiguredLocalStickerPackOrder(packPaths) {
@@ -2555,7 +2508,7 @@ async function downloadConfiguredTelegramStickers(url) {
     }
     const task = (async () => {
         try {
-            const scopedSession = await getLocalStickerNetworkSession(config.httpProxy);
+            const scopedSession = await getConfiguredNetworkSession('stickers');
             const result = await downloadTelegramStickerPack({
                 url,
                 rootPath: config.path,
@@ -2740,12 +2693,17 @@ function installConfigIpc() {
     ipcMain.handle(CHANNEL_PREPARE_UPDATE, () => getPluginUpdater().prepareUpdate());
     ipcMain.handle(CHANNEL_RESTART_UPDATE, async () => {
         const updater = getPluginUpdater();
-        const result = await updater.activatePendingUpdate();
+        const result = await updater.activatePendingUpdate({
+            processIds: [
+                process.pid,
+                ...(app.getAppMetrics?.() || []).map(metric => metric.pid)
+            ],
+            hostExecutable: process.execPath
+        });
         if (!result.ok) {
             return result;
         }
         setTimeout(() => {
-            app.relaunch();
             app.quit();
         }, 250).unref?.();
         return result;
@@ -2945,9 +2903,6 @@ function installConfigIpc() {
     );
     ipcMain.handle(CHANNEL_OPEN_LOCAL_STICKER_TOOL_DOWNLOAD, (_event, tool) =>
         openLocalStickerToolDownload(tool)
-    );
-    ipcMain.handle(CHANNEL_TEST_LOCAL_STICKER_PROXY, (_event, proxyUrl) =>
-        testLocalStickerProxy(proxyUrl)
     );
     ipcMain.handle(CHANNEL_DOWNLOAD_TELEGRAM_STICKERS, (_event, url) =>
         downloadConfiguredTelegramStickers(url)
