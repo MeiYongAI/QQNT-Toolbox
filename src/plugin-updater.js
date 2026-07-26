@@ -267,15 +267,15 @@ async function readFetchBody(response, maxBytes, controller) {
     return Buffer.concat(chunks, size);
 }
 
-async function requestBufferWithFetch(fetchImpl, url, options = {}, redirectCount = 0) {
+async function requestBufferWithFetch(fetchImpl, url, options = {}) {
     let parsedUrl;
     try {
         parsedUrl = new URL(url);
     } catch {
         throw createUpdaterError('invalid-url');
     }
-    if (parsedUrl.protocol !== 'https:' || redirectCount > 5) {
-        throw createUpdaterError(redirectCount > 5 ? 'too-many-redirects' : 'insecure-url');
+    if (parsedUrl.protocol !== 'https:') {
+        throw createUpdaterError('insecure-url');
     }
     const controller = new AbortController();
     let timedOut = false;
@@ -288,23 +288,19 @@ async function requestBufferWithFetch(fetchImpl, url, options = {}, redirectCoun
         const response = await fetchImpl(parsedUrl.toString(), {
             method: 'GET',
             headers: options.headers || {},
-            redirect: 'manual',
+            redirect: 'follow',
             signal: controller.signal,
             bypassCustomProtocolHandlers: true
         });
         const statusCode = Number(response?.status) || 0;
-        if ([301, 302, 303, 307, 308].includes(statusCode)) {
-            const location = getFetchHeader(response, 'location');
-            await response?.body?.cancel?.().catch(() => {});
-            if (!location) {
-                throw createUpdaterError('invalid-redirect');
-            }
-            return requestBufferWithFetch(
-                fetchImpl,
-                new URL(location, parsedUrl).toString(),
-                options,
-                redirectCount + 1
-            );
+        let finalUrl;
+        try {
+            finalUrl = new URL(String(response?.url || parsedUrl));
+        } catch {
+            throw createUpdaterError('invalid-redirect');
+        }
+        if (finalUrl.protocol !== 'https:') {
+            throw createUpdaterError('insecure-url');
         }
         return {
             statusCode,

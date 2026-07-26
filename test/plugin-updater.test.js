@@ -147,7 +147,11 @@ test('uses an optional GitHub token only for the API and falls back from a downl
         const raw = makeGitHubRelease('0.8.9', archive);
         const requests = [];
         const transport = createFetchUpdateTransport(async (url, options) => {
-            requests.push({ url, headers: { ...(options.headers || {}) } });
+            requests.push({
+                url,
+                headers: { ...(options.headers || {}) },
+                redirect: options.redirect
+            });
             if (url.startsWith('https://api.github.com/')) {
                 return makeFetchResponse(200, JSON.stringify(raw), { etag: 'release-etag' });
             }
@@ -164,6 +168,7 @@ test('uses an optional GitHub token only for the API and falls back from a downl
         assert.equal(checked.etag, 'release-etag');
         assert.equal(requests[0].headers.Authorization, 'Bearer github_pat_test');
         assert.equal(requests[0].headers['If-None-Match'], 'old-etag');
+        assert.equal(requests[0].redirect, 'follow');
 
         const destination = path.join(directory, 'asset.zip');
         const downloaded = await transport.downloadPluginArchive({
@@ -175,6 +180,8 @@ test('uses an optional GitHub token only for the API and falls back from a downl
         assert.equal(await fs.readFile(destination, 'utf8'), archive.toString());
         assert.equal(requests[1].headers.Authorization, undefined);
         assert.equal(requests[2].headers.Authorization, undefined);
+        assert.equal(requests[1].redirect, 'follow');
+        assert.equal(requests[2].redirect, 'follow');
         assert.equal(
             requests[1].url,
             `https://mirror.example/${raw.assets[0].browser_download_url}`
