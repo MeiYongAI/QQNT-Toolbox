@@ -2521,7 +2521,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             ? `v${currentUpdateState.latestVersion}`
             : text('新版本');
         if (!currentUpdateState.supported) {
-            return text('自动安装目前仅支持 Windows');
+            return text('当前系统暂不支持自动安装');
         }
         switch (currentUpdateState.status) {
             case 'checking':
@@ -2538,7 +2538,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 return text('正在重启 QQ 并安装更新');
             case 'error': {
                 const messages = {
-                    'unsupported-platform': text('自动安装目前仅支持 Windows'),
+                    'unsupported-platform': text('当前系统暂不支持自动安装'),
                     'github-rate-limited': text('GitHub 匿名请求已达限额，可填写令牌后重试'),
                     'invalid-github-token': text('GitHub 令牌无效，请检查后重试'),
                     'invalid-proxy-url': text('代理地址无效，请检查网络设置'),

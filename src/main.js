@@ -639,7 +639,7 @@ function getPluginUpdater() {
             currentVersion: getInstalledPluginVersion(),
             pluginRoot: path.resolve(__dirname, '..'),
             dataDir: getPluginDataDir(),
-            helperSource: path.join(__dirname, 'update-helper.ps1'),
+            helperSource: path.join(__dirname, 'update-helper.js'),
             requestLatestRelease: transport.requestLatestRelease,
             downloadPluginArchive: transport.downloadPluginArchive,
             getRequestOptions: () => {
@@ -2698,7 +2698,10 @@ function installConfigIpc() {
                 process.pid,
                 ...(app.getAppMetrics?.() || []).map(metric => metric.pid)
             ],
-            hostExecutable: process.execPath
+            runtimeExecutable: process.execPath,
+            hostExecutable: process.platform === 'linux' && process.env.APPIMAGE
+                ? process.env.APPIMAGE
+                : process.execPath
         });
         if (!result.ok) {
             return result;

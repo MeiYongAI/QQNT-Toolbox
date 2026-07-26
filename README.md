@@ -20,7 +20,7 @@
 
 - 首次安装时，除悬浮工具箱入口外，所有会修改消息、菜单或界面的功能均为关闭状态。
 - 插件依赖 QQNT 内部接口和页面结构，QQ 更新可能造成部分功能临时失效；更新 QQ 前建议确认最新 Release 和 Issues。
-- 当前主要在 Windows QQNT 上开发和测试。插件清单同时声明支持 Linux 和 macOS，但部分功能及自动更新存在平台限制。
+- 当前主要在 Windows QQNT 上开发和测试。插件清单同时声明支持 Linux 和 macOS，少数依赖 Windows 原生接口的功能会明确标注平台限制。
 - 仅从本仓库 [Releases](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) 获取安装包；更新或排查问题前建议备份 `LiteLoaderQQNT/data/qqnt_toolbox`。
 - 不要同时启用多个插件中的同类功能，重复注入消息菜单、阻止撤回、复读或界面精简可能造成冲突。
 
@@ -75,7 +75,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 - 自动更新不会再按版本创建新目录。已有 `QQNT-Toolbox-v*` 目录会保留当前名称并原位更新；全新手动安装使用固定的 `QQNT-Toolbox` 目录。
 - “其他 > 网络”可统一选择系统代理、直连或手动代理，并配置可选的 GitHub 下载镜像。GitHub 令牌只发送给 GitHub API，不会发送给第三方镜像。
 - 使用旧版更新器的用户需要从 GitHub Releases 手动安装一次新版；项目不再提供 `update.json` 兼容迁移。
-- 自动安装目前仅支持 Windows；Linux 和 macOS 仍可按上面的手动方式更新。
+- Windows、Linux 和 macOS 共用同一套 JavaScript 更新助手；它由 QQ 自带的运行时执行，不要求另外安装 Node.js、PowerShell 或 shell 工具。
 
 ## 快速开始
 

@@ -107,7 +107,7 @@ try {
         'QQNT-Toolbox/src/media-pip.js',
         'QQNT-Toolbox/src/media-pip-preload.js',
         'QQNT-Toolbox/src/media-pip-window.js',
-        'QQNT-Toolbox/src/update-helper.ps1',
+        'QQNT-Toolbox/src/update-helper.js',
         'QQNT-Toolbox/src/media-player-icons/player_fullscreen.png',
         'QQNT-Toolbox/src/media-player-icons/player_minimize.png',
         'QQNT-Toolbox/src/media-player-icons/player_pause_big.png',

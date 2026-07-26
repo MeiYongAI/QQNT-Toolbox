@@ -18,15 +18,16 @@ const MAX_API_BYTES = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 512;
-const INSTALL_PLAN_SCHEMA_VERSION = 3;
+const INSTALL_PLAN_SCHEMA_VERSION = 4;
 const INSTALLER_HANDSHAKE_TIMEOUT_MS = 8000;
+const SUPPORTED_INSTALLER_PLATFORMS = new Set(['win32', 'linux', 'darwin']);
 const REQUIRED_PLUGIN_FILES = Object.freeze([
     'manifest.json',
     'package.json',
     'src/main.js',
     'src/preload.js',
     'src/renderer.js',
-    'src/update-helper.ps1'
+    'src/update-helper.js'
 ]);
 
 function createUpdaterError(reason, message = reason) {
@@ -574,40 +575,24 @@ function normalizeProcessIds(values) {
         .filter(value => Number.isSafeInteger(value) && value > 0))];
 }
 
-function quotePowerShellLiteral(value) {
-    return `'${String(value).replace(/'/g, "''")}'`;
-}
-
-function encodePowerShellCommand(value) {
-    return Buffer.from(String(value), 'utf16le').toString('base64');
-}
-
-async function launchPowerShellInstaller({
-    powershellPath,
+async function launchUpdateInstaller({
+    runtimeExecutable,
     helperPath,
     planPath,
+    platform = process.platform,
     spawnProcess = spawn
 }) {
-    const installerScript = [
-        `& ${quotePowerShellLiteral(helperPath)}`,
-        `-PlanPath ${quotePowerShellLiteral(planPath)}`
-    ].join(' ');
-    const launcherScript = [
-        "$ErrorActionPreference = 'Stop'",
-        `$process = Start-Process -FilePath ${quotePowerShellLiteral(powershellPath)} ` +
-            "-ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', " +
-            `'-EncodedCommand', '${encodePowerShellCommand(installerScript)}') ` +
-            '-WindowStyle Hidden -PassThru',
-        "if (-not $process -or $process.Id -le 0) { throw 'installer-launch-failed' }"
-    ].join('; ');
-    const child = spawnProcess(powershellPath, [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-EncodedCommand',
-        encodePowerShellCommand(launcherScript)
-    ], {
+    if (!SUPPORTED_INSTALLER_PLATFORMS.has(platform)) {
+        throw createUpdaterError('unsupported-platform');
+    }
+    const child = spawnProcess(runtimeExecutable, [helperPath, planPath], {
+        cwd: path.dirname(runtimeExecutable),
+        detached: true,
+        env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: '1',
+            QQNT_TOOLBOX_UPDATE_HELPER: '1'
+        },
         stdio: 'ignore',
         windowsHide: true
     });
@@ -671,7 +656,7 @@ function createPluginUpdater(options = {}) {
     const updateRoot = path.join(dataDir, 'updater');
     const cachePath = path.join(updateRoot, 'release-cache.json');
     const pendingPath = path.join(updateRoot, 'pending-update.json');
-    const helperPath = path.join(updateRoot, 'update-helper.ps1');
+    const helperPath = path.join(updateRoot, 'update-helper.js');
     const planPath = path.join(updateRoot, 'install-plan.json');
     const statusPath = path.join(updateRoot, 'install-status.json');
     const stagingRoot = path.join(updateRoot, 'staging');
@@ -697,7 +682,7 @@ function createPluginUpdater(options = {}) {
     let installerLaunched = false;
     let state = {
         status: 'idle',
-        supported: platform === 'win32',
+        supported: SUPPORTED_INSTALLER_PLATFORMS.has(platform),
         currentVersion,
         latestVersion: '',
         releaseUrl: '',
@@ -746,7 +731,12 @@ function createPluginUpdater(options = {}) {
     }
 
     async function cleanupUpdateArtifacts({ keepPending = false } = {}) {
-        const files = [planPath, statusPath, helperPath];
+        const files = [
+            planPath,
+            statusPath,
+            helperPath,
+            path.join(updateRoot, 'update-helper.ps1')
+        ];
         if (!keepPending) {
             files.push(pendingPath);
         }
@@ -1012,6 +1002,9 @@ function createPluginUpdater(options = {}) {
                 if (!runtime.hostExecutable) {
                     throw createUpdaterError('installer-host-missing');
                 }
+                const runtimeExecutable = path.resolve(String(
+                    runtime.runtimeExecutable || runtime.hostExecutable
+                ));
                 const launchDeadlineAt = Number(now()) + handshakeTimeoutMs;
                 const plan = {
                     schemaVersion: INSTALL_PLAN_SCHEMA_VERSION,
@@ -1040,20 +1033,11 @@ function createPluginUpdater(options = {}) {
                     version: pending.version,
                     updatedAt: Number(now())
                 });
-                const systemRoot = process.env.SystemRoot || 'C:\\Windows';
-                const bundledPowerShell = path.join(
-                    systemRoot,
-                    'System32',
-                    'WindowsPowerShell',
-                    'v1.0',
-                    'powershell.exe'
-                );
-                const executable = options.powershellPath ||
-                    (fsSync.existsSync(bundledPowerShell) ? bundledPowerShell : 'powershell.exe');
-                await launchPowerShellInstaller({
-                    powershellPath: executable,
+                await launchUpdateInstaller({
+                    runtimeExecutable,
                     helperPath,
                     planPath,
+                    platform,
                     spawnProcess
                 });
                 if (typeof options.waitForInstallerHandshake === 'function') {
@@ -1102,7 +1086,7 @@ module.exports = {
     createFetchUpdateTransport,
     createPluginUpdater,
     extractPluginArchive,
-    launchPowerShellInstaller,
+    launchUpdateInstaller,
     normalizeArchiveEntryName,
     normalizeGitHubRelease,
     normalizeVersion,

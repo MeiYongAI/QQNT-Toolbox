@@ -19,10 +19,11 @@ const {
     createFetchUpdateTransport,
     createPluginUpdater,
     extractPluginArchive,
-    launchPowerShellInstaller,
+    launchUpdateInstaller,
     normalizeArchiveEntryName,
     normalizeGitHubRelease
 } = require('../src/plugin-updater');
+const { installUpdate } = require('../src/update-helper');
 
 const execFile = promisify(childProcess.execFile);
 const REQUIRED_TEST_PLUGIN_FILES = [
@@ -31,7 +32,7 @@ const REQUIRED_TEST_PLUGIN_FILES = [
     'src/main.js',
     'src/preload.js',
     'src/renderer.js',
-    'src/update-helper.ps1'
+    'src/update-helper.js'
 ];
 
 function makeFetchResponse(status, body = '', headers = {}) {
@@ -82,7 +83,7 @@ async function writeTestPlugin(pluginRoot, version, marker = '') {
         'src/main.js': 'module.exports = {};',
         'src/preload.js': 'module.exports = {};',
         'src/renderer.js': 'export {};',
-        'src/update-helper.ps1': 'param([string]$PlanPath)',
+        'src/update-helper.js': "'use strict';",
         'marker.txt': marker
     };
     for (const [relativePath, content] of Object.entries(files)) {
@@ -92,22 +93,9 @@ async function writeTestPlugin(pluginRoot, version, marker = '') {
     }
 }
 
-function runPowerShellInstaller(planPath) {
-    const powershell = path.join(
-        process.env.SystemRoot || 'C:\\Windows',
-        'System32',
-        'WindowsPowerShell',
-        'v1.0',
-        'powershell.exe'
-    );
-    return execFile(powershell, [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        path.join(__dirname, '..', 'src', 'update-helper.ps1'),
-        '-PlanPath',
+function runJavaScriptInstaller(planPath) {
+    return execFile(process.execPath, [
+        path.join(__dirname, '..', 'src', 'update-helper.js'),
         planPath
     ]);
 }
@@ -210,6 +198,40 @@ test('reports GitHub anonymous rate limiting distinctly', async () => {
     await assert.rejects(transport.requestLatestRelease(), { reason: 'github-rate-limited' });
 });
 
+test('launches the same JavaScript installer on every supported desktop platform', async () => {
+    for (const platform of ['win32', 'linux', 'darwin']) {
+        let spawnCall = null;
+        await launchUpdateInstaller({
+            runtimeExecutable: process.execPath,
+            helperPath: path.join(__dirname, '..', 'src', 'update-helper.js'),
+            planPath: path.join(os.tmpdir(), 'install-plan.json'),
+            platform,
+            spawnProcess(executable, args, options) {
+                spawnCall = { executable, args, options };
+                return {
+                    once(event, callback) {
+                        if (event === 'spawn') {
+                            setImmediate(callback);
+                        }
+                        return this;
+                    },
+                    unref() {}
+                };
+            }
+        });
+        assert.equal(spawnCall.executable, process.execPath);
+        assert.equal(spawnCall.options.detached, true);
+        assert.equal(spawnCall.options.env.ELECTRON_RUN_AS_NODE, '1');
+    }
+
+    await assert.rejects(launchUpdateInstaller({
+        runtimeExecutable: process.execPath,
+        helperPath: 'helper.js',
+        planPath: 'plan.json',
+        platform: 'freebsd'
+    }), { reason: 'unsupported-platform' });
+});
+
 test('extracts only a complete, rooted plugin package with the expected identity', async () => {
     await withTemporaryDirectory(async directory => {
         const writer = new ZipWriter(new Uint8ArrayWriter());
@@ -219,7 +241,7 @@ test('extracts only a complete, rooted plugin package with the expected identity
             'src/main.js': 'module.exports = {};',
             'src/preload.js': 'module.exports = {};',
             'src/renderer.js': 'export {};',
-            'src/update-helper.ps1': 'param([string]$PlanPath)'
+            'src/update-helper.js': "'use strict';"
         };
         for (const [name, content] of Object.entries(files)) {
             await writer.add(`QQNT-Toolbox/${name}`, new TextReader(content));
@@ -251,7 +273,7 @@ test('stages a Release package and prepares an in-place installation plan', asyn
     await withTemporaryDirectory(async directory => {
         const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox-v0.8.8');
         const dataDir = path.join(directory, 'data');
-        const helperSource = path.join(__dirname, '..', 'src', 'update-helper.ps1');
+        const helperSource = path.join(__dirname, '..', 'src', 'update-helper.js');
         const hostExecutable = path.join(directory, 'QQ.exe');
         const bytes = Buffer.from('verified release');
         const raw = makeGitHubRelease('0.8.9', bytes);
@@ -319,15 +341,20 @@ test('stages a Release package and prepares an in-place installation plan', asyn
             relaunch: false
         });
         assert.equal(activated.status, 'restarting');
-        assert.equal(spawnCall.options.detached, undefined);
-        assert.equal(spawnCall.args.includes('-EncodedCommand'), true);
+        assert.equal(spawnCall.executable, hostExecutable);
+        assert.equal(spawnCall.options.detached, true);
+        assert.equal(spawnCall.options.env.ELECTRON_RUN_AS_NODE, '1');
+        assert.deepEqual(spawnCall.args, [
+            path.join(dataDir, 'updater', 'update-helper.js'),
+            path.join(dataDir, 'updater', 'install-plan.json')
+        ]);
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'old');
 
         const plan = JSON.parse(await fs.readFile(
             path.join(dataDir, 'updater', 'install-plan.json'),
             'utf8'
         ));
-        assert.equal(plan.schemaVersion, 3);
+        assert.equal(plan.schemaVersion, 4);
         assert.equal(path.resolve(plan.pluginRoot), path.resolve(pluginRoot));
         assert.equal(path.basename(plan.pluginRoot), 'QQNT-Toolbox-v0.8.8');
         assert.match(path.basename(plan.preparedPluginRoot), /^\.qqnt-toolbox-update-/);
@@ -359,7 +386,7 @@ test('does not report restart readiness before the installer handshake', async (
             currentVersion: '0.8.8',
             pluginRoot,
             dataDir,
-            helperSource: path.join(__dirname, '..', 'src', 'update-helper.ps1'),
+            helperSource: path.join(__dirname, '..', 'src', 'update-helper.js'),
             platform: 'win32',
             now: () => 1000,
             spawnProcess() {
@@ -392,9 +419,7 @@ test('does not report restart readiness before the installer handshake', async (
     });
 });
 
-test('PowerShell installer replaces contents without changing the plugin directory name', {
-    skip: process.platform !== 'win32'
-}, async () => {
+test('JavaScript installer replaces contents without changing the plugin directory name', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginParent = path.join(directory, "plugin parent's files");
         const pluginRoot = path.join(pluginParent, 'QQNT-Toolbox-v0.8.8');
@@ -411,7 +436,7 @@ test('PowerShell installer replaces contents without changing the plugin directo
         await fs.mkdir(updateRoot, { recursive: true });
         await fs.writeFile(pendingPath, '{}');
         await fs.writeFile(planPath, JSON.stringify({
-            schemaVersion: 3,
+            schemaVersion: 4,
             version: '0.8.9',
             createdAt: Date.now(),
             launchDeadlineAt: Date.now() + 60000,
@@ -430,7 +455,7 @@ test('PowerShell installer replaces contents without changing the plugin directo
             requiredFiles: REQUIRED_TEST_PLUGIN_FILES
         }));
 
-        await runPowerShellInstaller(planPath);
+        await runJavaScriptInstaller(planPath);
 
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'new');
         assert.equal(await fs.readFile(path.join(backupPluginRoot, 'marker.txt'), 'utf8'), 'old');
@@ -451,9 +476,7 @@ test('PowerShell installer replaces contents without changing the plugin directo
     });
 });
 
-test('detached PowerShell installer survives the launcher process', {
-    skip: process.platform !== 'win32'
-}, async () => {
+test('detached JavaScript installer survives the launcher process', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginParent = path.join(directory, "plugin parent's files");
         const pluginRoot = path.join(pluginParent, 'QQNT-Toolbox-v0.8.8');
@@ -464,20 +487,13 @@ test('detached PowerShell installer survives the launcher process', {
         const planPath = path.join(updateRoot, 'install-plan.json');
         const statusPath = path.join(updateRoot, 'install-status.json');
         const launcherPath = path.join(directory, 'launcher.js');
-        const helperPath = path.join(__dirname, '..', 'src', 'update-helper.ps1');
+        const helperPath = path.join(__dirname, '..', 'src', 'update-helper.js');
         const updaterPath = path.join(__dirname, '..', 'src', 'plugin-updater.js');
-        const powershell = path.join(
-            process.env.SystemRoot || 'C:\\Windows',
-            'System32',
-            'WindowsPowerShell',
-            'v1.0',
-            'powershell.exe'
-        );
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
         await writeTestPlugin(preparedPluginRoot, '0.8.9', 'new');
         await fs.mkdir(updateRoot, { recursive: true });
         await fs.writeFile(planPath, JSON.stringify({
-            schemaVersion: 3,
+            schemaVersion: 4,
             version: '0.8.9',
             createdAt: Date.now(),
             launchDeadlineAt: Date.now() + 60000,
@@ -498,14 +514,19 @@ test('detached PowerShell installer survives the launcher process', {
         await fs.writeFile(launcherPath, [
             "'use strict';",
             "const fs = require('node:fs');",
-            "const { launchPowerShellInstaller } = require(process.argv[2]);",
-            'const [planPath, statusPath, helperPath, powershell] = process.argv.slice(3);',
+            "const { launchUpdateInstaller } = require(process.argv[2]);",
+            'const [planPath, statusPath, helperPath] = process.argv.slice(3);',
             "const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));",
             'plan.processIds = [process.pid];',
             'plan.launchDeadlineAt = Date.now() + 60000;',
             "fs.writeFileSync(planPath, JSON.stringify(plan));",
             '(async () => {',
-            'await launchPowerShellInstaller({ powershellPath: powershell, helperPath, planPath });',
+            'await launchUpdateInstaller({',
+            '  runtimeExecutable: process.execPath,',
+            '  helperPath,',
+            '  planPath,',
+            '  platform: process.platform',
+            '});',
             'const deadline = Date.now() + 8000;',
             'const poll = () => {',
             '  try {',
@@ -524,8 +545,7 @@ test('detached PowerShell installer survives the launcher process', {
             updaterPath,
             planPath,
             statusPath,
-            helperPath,
-            powershell
+            helperPath
         ], { timeout: 12000 });
         const status = await waitForInstallStatus(statusPath, 'installed');
         assert.equal(status.status, 'installed');
@@ -533,9 +553,7 @@ test('detached PowerShell installer survives the launcher process', {
     });
 });
 
-test('PowerShell installer preserves the old plugin when the prepared package is invalid', {
-    skip: process.platform !== 'win32'
-}, async () => {
+test('JavaScript installer restores the old plugin when activation fails', async () => {
     await withTemporaryDirectory(async directory => {
         const pluginParent = path.join(directory, 'plugins');
         const pluginRoot = path.join(pluginParent, 'QQNT-Toolbox');
@@ -546,10 +564,10 @@ test('PowerShell installer preserves the old plugin when the prepared package is
         const planPath = path.join(updateRoot, 'install-plan.json');
         const statusPath = path.join(updateRoot, 'install-status.json');
         await writeTestPlugin(pluginRoot, '0.8.8', 'old');
-        await writeTestPlugin(preparedPluginRoot, '0.8.7', 'invalid');
+        await writeTestPlugin(preparedPluginRoot, '0.8.9', 'new');
         await fs.mkdir(updateRoot, { recursive: true });
         await fs.writeFile(planPath, JSON.stringify({
-            schemaVersion: 3,
+            schemaVersion: 4,
             version: '0.8.9',
             createdAt: Date.now(),
             launchDeadlineAt: Date.now() + 60000,
@@ -568,13 +586,24 @@ test('PowerShell installer preserves the old plugin when the prepared package is
             requiredFiles: REQUIRED_TEST_PLUGIN_FILES
         }));
 
-        await runPowerShellInstaller(planPath);
+        let renameCount = 0;
+        const result = await installUpdate(planPath, {
+            async renamePath(source, destination) {
+                renameCount += 1;
+                if (renameCount === 2) {
+                    throw new Error('simulated-activation-failure');
+                }
+                return fs.rename(source, destination);
+            }
+        });
 
+        assert.equal(result.ok, false);
+        assert.equal(renameCount, 3);
         assert.equal(await fs.readFile(path.join(pluginRoot, 'marker.txt'), 'utf8'), 'old');
         await assert.rejects(fs.stat(backupPluginRoot), { code: 'ENOENT' });
         const failedStatus = JSON.parse(await fs.readFile(statusPath, 'utf8'));
         assert.equal(failedStatus.status, 'failed');
-        assert.equal(failedStatus.reason, 'plugin-identity-mismatch');
+        assert.equal(failedStatus.reason, 'simulated-activation-failure');
     });
 });
 
@@ -605,6 +634,7 @@ test('startup removes stale install plans and temporary plugin copies', async ()
         assert.equal((await updater.getState()).status, 'idle');
         await assert.rejects(fs.stat(temporaryRoot), { code: 'ENOENT' });
         await assert.rejects(fs.stat(path.join(updateRoot, 'pending-update.json')), { code: 'ENOENT' });
+        await assert.rejects(fs.stat(path.join(updateRoot, 'update-helper.ps1')), { code: 'ENOENT' });
         await assert.rejects(fs.stat(path.join(updateRoot, 'staging')), { code: 'ENOENT' });
     });
 });
