@@ -114,6 +114,10 @@ const {
 const { createDiagnosticActionRunner, createDiagnosticLogger } = require('./diagnostics');
 const { createFetchUpdateTransport, createPluginUpdater } = require('./plugin-updater');
 const {
+    createDefaultContextMenuOrderConfig,
+    migrateContextMenuOrderConfig
+} = require('./context-menu-order-config');
+const {
     DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN,
     normalizeMessageImageSettings,
     saveMessageImage
@@ -368,11 +372,7 @@ const DEFAULT_CONFIG = {
         openEmojiAsImage: false,
         singleClickMediaViewer: false,
         showFullUnreadCount: false,
-        messageContextMenuOrder: {
-            enabled: false,
-            items: [],
-            catalog: []
-        },
+        contextMenuOrder: createDefaultContextMenuOrderConfig(),
         imageViewerOptimization: false,
         activeQrScan: false,
         singleMediaViewer: false,
@@ -383,6 +383,7 @@ const DEFAULT_CONFIG = {
         goBackMainList: false,
         preventMessageDrag: false,
         preventRecentContactDrag: false,
+        preventChatToolbarHoverExpand: false,
         preventProfileCardHover: false,
         deleteBubbleSkin: false,
         hiddenWeatherBtn: false,
@@ -795,7 +796,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
                 config.interfaceTweaks?.singleForwardGroupIsolation === true,
             preserveChatScrollPosition: config.interfaceTweaks?.preserveChatScrollPosition === true,
             blockWindowShake: config.interfaceTweaks?.blockWindowShake === true,
-            menuOrder: config.interfaceTweaks?.messageContextMenuOrder?.enabled === true,
+            menuOrder: config.interfaceTweaks?.contextMenuOrder?.enabled === true,
             preventProfileCard: config.interfaceTweaks?.preventProfileCardHover === true,
             preventRecentDrag: config.interfaceTweaks?.preventRecentContactDrag === true
         },
@@ -1095,7 +1096,9 @@ function loadConfig() {
             return clonePlain(configCache);
         }
         configCache = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(migrateMessageToImageConfig(
-            migrateQrScanConfig(JSON.parse(fsSync.readFileSync(configPath, 'utf8')))
+            migrateContextMenuOrderConfig(
+                migrateQrScanConfig(JSON.parse(fsSync.readFileSync(configPath, 'utf8')))
+            )
         ))));
         ensureDefaultLocalStickerDirectorySync(configCache.localStickers);
         fsSync.writeFileSync(configPath, JSON.stringify(configCache, null, 2), 'utf8');
@@ -1114,7 +1117,7 @@ async function saveConfig(nextConfig) {
     const wasSingleForwardGroupIsolationEnabled =
         configCache?.interfaceTweaks?.singleForwardGroupIsolation === true;
     const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(
-        migrateMessageToImageConfig(migrateQrScanConfig(nextConfig))
+        migrateMessageToImageConfig(migrateContextMenuOrderConfig(migrateQrScanConfig(nextConfig)))
     )));
     const willDebugBeEnabled = process.env.QQNT_TOOLBOX_DEBUG === '1' || normalizedConfig.debug?.enabled === true;
     if (wasDebugEnabled && !willDebugBeEnabled) {

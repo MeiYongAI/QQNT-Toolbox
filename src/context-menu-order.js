@@ -1,7 +1,39 @@
-const EDITOR_ID = 'qqnt-toolbox-message-menu-order-editor';
-const STYLE_ID = 'qqnt-toolbox-message-menu-order-style';
+const EDITOR_ID = 'qqnt-toolbox-context-menu-order-editor';
+const STYLE_ID = 'qqnt-toolbox-context-menu-order-style';
 const SEPARATOR_ID_PREFIX = 'qq:separator:';
 const OBSOLETE_MESSAGE_CONTEXT_MENU_IDS = new Set(['toolbox:multi-message-to-image']);
+
+export const MENU_SCOPE_DEFINITIONS = Object.freeze([
+    { id: 'message', label: '消息' },
+    { id: 'avatar', label: '头像' },
+    { id: 'recent', label: '会话列表' }
+]);
+
+const MENU_SCOPE_IDS = new Set(MENU_SCOPE_DEFINITIONS.map(item => item.id));
+const MENU_SCOPE_SELECTORS = Object.freeze({
+    avatar: [
+        '.avatar-span',
+        '.avatar',
+        '[class*="avatar" i]',
+        '[data-testid*="avatar" i]',
+        '[data-type*="avatar" i]'
+    ].join(','),
+    message: '.message.vue-component,.message,.ml-item',
+    recent: [
+        '.recent-contact-item',
+        '.recent-contact-list-item',
+        '[class*="recent-contact-item" i]',
+        '[class*="recent-item" i]'
+    ].join(',')
+});
+
+const MESSAGE_MENU_PROVIDER_PROPERTIES = Object.freeze([
+    ['msgCtxMenu', 'message'],
+    ['ctxMenu', ''],
+    ['contextMenu', ''],
+    ['contextMenuRef', ''],
+    ['menuRef', '']
+]);
 
 export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:复制', label: '复制' },
@@ -28,6 +60,35 @@ export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:清屏', label: '清屏' }
 ]);
 
+export const DEFAULT_CONTEXT_MENU_ITEMS = Object.freeze({
+    message: DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS,
+    avatar: Object.freeze([
+        { id: 'qq:@TA', label: '@TA' },
+        { id: 'qq:戳一戳', label: '戳一戳' },
+        { id: 'qq:私聊', label: '私聊' },
+        { id: 'qq:发消息', label: '发消息' },
+        { id: 'qq:查看资料', label: '查看资料' },
+        { id: 'qq:复制QQ号', label: '复制 QQ 号' },
+        { id: 'qq:设置专属头衔', label: '设置专属头衔' },
+        { id: 'qq:禁言', label: '禁言' },
+        { id: 'qq:踢出群聊', label: '踢出群聊' },
+        { id: 'qq:举报', label: '举报' }
+    ]),
+    recent: Object.freeze([
+        { id: 'qq:置顶', label: '置顶' },
+        { id: 'qq:取消置顶', label: '取消置顶' },
+        { id: 'qq:标为未读', label: '标为未读' },
+        { id: 'qq:设为已读', label: '设为已读' },
+        { id: 'qq:消息免打扰', label: '消息免打扰' },
+        { id: 'qq:取消消息免打扰', label: '取消消息免打扰' },
+        { id: 'qq:打开独立聊天窗口', label: '打开独立聊天窗口' },
+        { id: 'qq:移至分组', label: '移至分组' },
+        { id: 'qq:清空聊天记录', label: '清空聊天记录' },
+        { id: 'qq:隐藏会话', label: '隐藏会话' },
+        { id: 'qq:从消息列表删除', label: '从消息列表删除' }
+    ])
+});
+
 const TOOLBOX_ITEM_CLASSES = new Set([
     'qqnt-toolbox-repeat-menu-item',
     'qqnt-toolbox-poke-menu-item',
@@ -37,6 +98,31 @@ const TOOLBOX_ITEM_CLASSES = new Set([
 
 function normalizeText(value) {
     return String(value ?? '').trim();
+}
+
+function normalizeMenuScope(value, fallback = 'message') {
+    return MENU_SCOPE_IDS.has(value) ? value : fallback;
+}
+
+function closestScopeElement(element, scope) {
+    const selector = MENU_SCOPE_SELECTORS[scope];
+    if (!selector || typeof element?.closest !== 'function') {
+        return null;
+    }
+    try {
+        return element.closest(selector);
+    } catch {
+        return null;
+    }
+}
+
+export function classifyContextMenuScope(element) {
+    for (const scope of ['recent', 'avatar', 'message']) {
+        if (closestScopeElement(element, scope)) {
+            return scope;
+        }
+    }
+    return '';
 }
 
 function snapshotEventPath(event) {
@@ -198,6 +284,50 @@ export function describeContextMenuConfigs(items) {
     });
 }
 
+export function describeContextMenuElement(element) {
+    const label = normalizeText(element?.textContent).replace(/\s+/g, ' ').trim();
+    const keyLabel = label.replace(/\s+/g, '').replace(/[.。…]+$/u, '');
+    return keyLabel ? { id: `qq:${keyLabel}`, label, toolbox: false } : null;
+}
+
+export function reorderContextMenuElements(elements, order) {
+    const entries = Array.from(elements || [])
+        .map(element => ({ element, descriptor: describeContextMenuElement(element) }))
+        .filter(entry => entry.descriptor);
+    const sorted = sortContextMenuEntries(entries, order);
+    const groups = new Map();
+    for (const entry of entries) {
+        const parent = entry.element?.parentNode;
+        if (!parent || typeof parent.replaceChildren !== 'function') {
+            continue;
+        }
+        if (!groups.has(parent)) {
+            groups.set(parent, []);
+        }
+        groups.get(parent).push(entry.element);
+    }
+    for (const [parent, originalElements] of groups) {
+        const desiredElements = sorted
+            .filter(entry => entry.element?.parentNode === parent)
+            .map(entry => entry.element);
+        if (desiredElements.length !== originalElements.length ||
+            desiredElements.every((element, index) => element === originalElements[index])) {
+            continue;
+        }
+        const children = Array.from(parent.childNodes || []);
+        const positions = originalElements.map(element => children.indexOf(element));
+        if (positions.some(index => index < 0)) {
+            continue;
+        }
+        const reordered = [...children];
+        positions.forEach((position, index) => {
+            reordered[position] = desiredElements[index];
+        });
+        parent.replaceChildren(...reordered);
+    }
+    return sorted;
+}
+
 function insertContextMenuConfig(items, item) {
     const before = normalizeContextMenuOrder(item?.__qqntToolboxInsertBefore);
     const after = normalizeContextMenuOrder(item?.__qqntToolboxInsertAfter);
@@ -293,8 +423,8 @@ function injectStyle() {
 #${EDITOR_ID} .qqnt-toolbox-menu-order-dialog {
     display: flex;
     flex-direction: column;
-    width: min(380px, calc(100vw - 32px));
-    max-height: min(640px, calc(100vh - 32px));
+    width: min(440px, calc(100vw - 32px));
+    height: min(480px, calc(100vh - 32px));
     overflow: hidden;
     border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
     border-radius: 8px;
@@ -320,6 +450,44 @@ function injectStyle() {
     font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-tabs {
+    display: flex;
+    flex: none;
+    gap: 2px;
+    padding: 8px 12px 0;
+    overflow: hidden;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-tab {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    height: 34px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 6px 6px 0 0;
+    color: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-tab:hover {
+    color: inherit;
+    background: var(--overlay_hover, rgba(127, 127, 127, .10));
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-tab[aria-selected="true"] {
+    color: var(--brand_standard, var(--brand-primary, #2f6bff));
+    font-weight: 600;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-tab[aria-selected="true"]::after {
+    position: absolute;
+    right: 12px;
+    bottom: 0;
+    left: 12px;
+    height: 2px;
+    border-radius: 2px;
+    background: currentColor;
+    content: "";
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-close,
 #${EDITOR_ID} .qqnt-toolbox-menu-order-move {
@@ -356,6 +524,15 @@ function injectStyle() {
     scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: var(--fill_standard_secondary, rgba(127, 127, 127, .30)) transparent;
+}
+#${EDITOR_ID} .qqnt-toolbox-menu-order-empty {
+    display: grid;
+    min-height: 260px;
+    place-items: center;
+    padding: 24px;
+    box-sizing: border-box;
+    color: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    text-align: center;
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-list::-webkit-scrollbar {
     width: 6px;
@@ -481,49 +658,108 @@ function injectStyle() {
     document.head.append(style);
 }
 
-export function createMessageContextMenuOrderController(options) {
-    const builtInIds = new Set(DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS.map(item => item.id));
-    const discoveredItems = new Map(DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS.map(item => [item.id, item]));
+export function createContextMenuOrderController(options) {
+    const runtime = typeof window !== 'undefined' ? window : globalThis;
+    const scopeStates = new Map(MENU_SCOPE_DEFINITIONS.map(({ id }) => {
+        const defaults = DEFAULT_CONTEXT_MENU_ITEMS[id] || [];
+        return [id, {
+            builtInIds: new Set(defaults.map(item => item.id)),
+            discoveredItems: new Map(defaults.map(item => [item.id, item])),
+            lastObservedOrder: []
+        }];
+    }));
     const extensions = new Map();
     const patchedMenus = new WeakMap();
+    const patchedStates = new Set();
     let previousFocus = null;
     let editorCleanup = null;
     let catalogSaveTimer = 0;
-    let lastObservedOrder = [];
+    let nativeMenuRequestId = 0;
+    const nativeMenuTimers = new Set();
 
     function getConfig() {
         const config = options.getConfig?.();
         return config && typeof config === 'object' ? config : {};
     }
 
+    function getScopeConfig(scope) {
+        const config = getConfig();
+        const scoped = config.scopes?.[scope];
+        if (scoped && typeof scoped === 'object') {
+            return scoped;
+        }
+        return scope === 'message' && !config.scopes ? config : {};
+    }
+
+    function getScopeCatalog(scope) {
+        const state = scopeStates.get(scope);
+        return Array.from(state.discoveredItems.values())
+            .filter(item => !state.builtInIds.has(item.id))
+            .slice(0, 160)
+            .map(item => ({
+                id: item.id,
+                label: item.label,
+                toolbox: item.toolbox === true
+            }));
+    }
+
+    function buildScopesConfig(orderOverrides = null) {
+        const scopes = {};
+        for (const { id } of MENU_SCOPE_DEFINITIONS) {
+            const scopeConfig = getScopeConfig(id);
+            const hasOverride = orderOverrides &&
+                Object.prototype.hasOwnProperty.call(orderOverrides, id);
+            scopes[id] = {
+                items: normalizeContextMenuOrder(
+                    hasOverride ? orderOverrides[id] : scopeConfig.items
+                ),
+                catalog: getScopeCatalog(id)
+            };
+        }
+        return scopes;
+    }
+
     function syncConfig() {
-        for (const value of Array.isArray(getConfig().catalog) ? getConfig().catalog : []) {
-            const item = normalizeCatalogItem(value);
-            if (item && !OBSOLETE_MESSAGE_CONTEXT_MENU_IDS.has(item.id) &&
-                !discoveredItems.has(item.id)) {
-                discoveredItems.set(item.id, item);
+        for (const { id } of MENU_SCOPE_DEFINITIONS) {
+            const state = scopeStates.get(id);
+            for (const value of Array.isArray(getScopeConfig(id).catalog)
+                ? getScopeConfig(id).catalog
+                : []) {
+                const item = normalizeCatalogItem(value);
+                if (item && !OBSOLETE_MESSAGE_CONTEXT_MENU_IDS.has(item.id) &&
+                    !state.discoveredItems.has(item.id)) {
+                    state.discoveredItems.set(item.id, item);
+                }
             }
         }
         if (getConfig().enabled !== true) {
+            clearNativeMenuRequest();
             closeEditor();
         }
     }
 
     function scheduleCatalogSave() {
-        window.clearTimeout(catalogSaveTimer);
-        catalogSaveTimer = window.setTimeout(() => {
+        runtime.clearTimeout(catalogSaveTimer);
+        catalogSaveTimer = runtime.setTimeout(() => {
             catalogSaveTimer = 0;
-            const catalog = Array.from(discoveredItems.values())
-                .filter(item => !builtInIds.has(item.id))
-                .slice(0, 120)
-                .map(item => ({ id: item.id, label: item.label, toolbox: item.toolbox === true }));
-            if (JSON.stringify(getConfig().catalog) !== JSON.stringify(catalog)) {
-                Promise.resolve(options.saveCatalog?.(catalog)).catch(() => {});
+            const scopes = buildScopesConfig();
+            const changed = MENU_SCOPE_DEFINITIONS.some(({ id }) =>
+                JSON.stringify(getScopeConfig(id).catalog) !==
+                JSON.stringify(scopes[id].catalog)
+            );
+            if (!changed) {
+                return;
+            }
+            if (typeof options.saveScopes === 'function') {
+                Promise.resolve(options.saveScopes(scopes)).catch(() => {});
+            } else {
+                Promise.resolve(options.saveCatalog?.(scopes.message.catalog)).catch(() => {});
             }
         }, 240);
     }
 
-    function rememberItems(entries) {
+    function rememberItems(scope, entries) {
+        const state = scopeStates.get(normalizeMenuScope(scope));
         let changed = false;
         const order = [];
         for (const entry of entries) {
@@ -531,20 +767,27 @@ export function createMessageContextMenuOrderController(options) {
                 continue;
             }
             order.push(entry.descriptor.id);
-            if (!discoveredItems.has(entry.descriptor.id)) {
-                discoveredItems.set(entry.descriptor.id, entry.descriptor);
+            if (!state.discoveredItems.has(entry.descriptor.id)) {
+                state.discoveredItems.set(entry.descriptor.id, entry.descriptor);
                 changed = true;
             }
         }
-        lastObservedOrder = Array.from(new Set(order));
+        state.lastObservedOrder = Array.from(new Set(order));
         if (changed) {
             scheduleCatalogSave();
         }
     }
 
-    function runExtensionHook(name, value) {
+    function extensionMatchesScope(extension, scope) {
+        return normalizeMenuScope(extension?.scope, 'message') === scope;
+    }
+
+    function runExtensionHook(name, value, scope) {
         let current = value;
         for (const extension of extensions.values()) {
+            if (!extensionMatchesScope(extension, scope)) {
+                continue;
+            }
             try {
                 const next = extension?.[name]?.(current);
                 if (next !== undefined) {
@@ -556,9 +799,12 @@ export function createMessageContextMenuOrderController(options) {
         return current;
     }
 
-    function getExtensionItems(context) {
+    function getExtensionItems(context, scope) {
         const items = [];
         for (const extension of extensions.values()) {
+            if (!extensionMatchesScope(extension, scope)) {
+                continue;
+            }
             try {
                 const next = extension?.getItems?.(context);
                 if (Array.isArray(next)) {
@@ -570,16 +816,89 @@ export function createMessageContextMenuOrderController(options) {
         return items;
     }
 
-    function patchMenu(menu, capturedContext = null) {
+    function getEventElement(event, fallback = null) {
+        if (typeof Element === 'undefined') {
+            return null;
+        }
+        if (fallback instanceof Element) {
+            return fallback;
+        }
+        try {
+            const pathElement = Array.from(event?.composedPath?.() || [])
+                .find(item => item instanceof Element);
+            if (pathElement) {
+                return pathElement;
+            }
+        } catch {
+        }
+        return event?.target instanceof Element ? event.target : null;
+    }
+
+    function isMenuProvider(value) {
+        return value?._?.ctx &&
+            typeof value._.ctx.openMenu === 'function' &&
+            Boolean(Object.getOwnPropertyDescriptor(value._.ctx, 'showMenuConfig'));
+    }
+
+    function unwrapMenuProvider(value) {
+        if (isMenuProvider(value)) {
+            return value;
+        }
+        try {
+            return isMenuProvider(value?.value) ? value.value : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function findMenuCandidatesFromComponent(component, allowDirect = false) {
+        const result = [];
+        const seen = new WeakSet();
+        const add = (value, scope = '') => {
+            const menu = unwrapMenuProvider(value);
+            const context = menu?._?.ctx;
+            if (!context || seen.has(context)) {
+                return;
+            }
+            seen.add(context);
+            result.push({ menu, scope });
+        };
+        for (const host of [component?.proxy, component?.ctx]) {
+            if (!host || (typeof host !== 'object' && typeof host !== 'function')) {
+                continue;
+            }
+            for (const [property, scope] of MESSAGE_MENU_PROVIDER_PROPERTIES) {
+                if (!allowDirect && scope !== 'message') {
+                    continue;
+                }
+                try {
+                    add(host[property], scope);
+                } catch {
+                }
+            }
+            if (allowDirect) {
+                add(host);
+            }
+        }
+        return result;
+    }
+
+    function patchMenu(menu, capturedContext = null, defaultScope = 'message') {
         const menuContext = menu?._?.ctx;
         if (!menuContext) {
             return false;
         }
+        const resolvedDefaultScope = normalizeMenuScope(defaultScope, '');
+        const capturedScope = normalizeMenuScope(capturedContext?.scope, '');
+        if (resolvedDefaultScope !== 'message' && capturedScope !== 'message') {
+            return false;
+        }
         const existingState = patchedMenus.get(menuContext);
         if (existingState) {
-            if (capturedContext) {
+            if (capturedContext && capturedScope) {
                 existingState.pendingSourceEvent = capturedContext.sourceEvent || null;
                 existingState.pendingSourceEventPath = capturedContext.sourceEventPath || [];
+                existingState.pendingTargetElement = capturedContext.targetElement || null;
                 existingState.pendingMessageElement = capturedContext.messageElement || null;
             }
             return true;
@@ -592,12 +911,19 @@ export function createMessageContextMenuOrderController(options) {
         }
         const state = {
             menu,
+            menuContext,
+            originalShowDescriptor: showDescriptor,
+            originalOpenMenu,
+            patchedGet: null,
+            patchedOpenMenu: null,
             sourceEvent: null,
             capturedSourceEvent: null,
             sourceEventPath: [],
+            targetElement: null,
             messageElement: null,
             pendingSourceEvent: capturedContext?.sourceEvent || null,
             pendingSourceEventPath: capturedContext?.sourceEventPath || [],
+            pendingTargetElement: capturedContext?.targetElement || null,
             pendingMessageElement: capturedContext?.messageElement || null,
             originalContext: null,
             context: null,
@@ -609,25 +935,33 @@ export function createMessageContextMenuOrderController(options) {
             if (!Array.isArray(configs)) {
                 return configs;
             }
+            const scope = 'message';
             const hookContext = {
                 menu,
+                scope,
                 sourceEvent: state.capturedSourceEvent || state.sourceEvent,
                 sourceEventPath: state.sourceEventPath,
-                messageElement: state.messageElement,
+                targetElement: state.targetElement,
+                messageElement: scope === 'message' ? state.messageElement : null,
                 originalContext: state.originalContext,
                 context: state.context,
                 options: state.options
             };
-            configs = runExtensionHook('transformItems', { ...hookContext, items: [...configs] })?.items || configs;
-            const additions = getExtensionItems(hookContext);
+            configs = runExtensionHook(
+                'transformItems',
+                { ...hookContext, items: [...configs] },
+                scope
+            )?.items || configs;
+            const additions = getExtensionItems(hookContext, scope);
+            const scopeConfig = getScopeConfig(scope);
             const combined = composeContextMenuConfigs(
                 configs,
                 additions,
-                getConfig().items,
+                scopeConfig.items,
                 getConfig().enabled === true
             );
             if (getConfig().enabled === true) {
-                rememberItems(describeContextMenuConfigs(combined));
+                rememberItems(scope, describeContextMenuConfigs(combined));
             }
             return combined;
         };
@@ -641,77 +975,221 @@ export function createMessageContextMenuOrderController(options) {
                 context: args[2] || null,
                 options: args[3]
             };
-            request = runExtensionHook('beforeOpen', request) || request;
+            const scope = 'message';
+            request = runExtensionHook('beforeOpen', { ...request, scope }, scope) || request;
             const nextArgs = Array.isArray(request.args) ? [...request.args] : [...args];
-            nextArgs[0] = request.sourceEvent;
-            nextArgs[1] = request.items;
-            nextArgs[2] = request.context;
-            nextArgs[3] = request.options;
+            if (nextArgs.length > 0) {
+                nextArgs[0] = request.sourceEvent;
+            }
+            if (nextArgs.length > 1) {
+                nextArgs[1] = request.items;
+            }
+            if (nextArgs.length > 2) {
+                nextArgs[2] = request.context;
+            }
+            if (nextArgs.length > 3) {
+                nextArgs[3] = request.options;
+            }
             state.sourceEvent = request.sourceEvent;
             state.capturedSourceEvent = state.pendingSourceEvent || request.sourceEvent;
             state.sourceEventPath = state.pendingSourceEventPath.length
                 ? state.pendingSourceEventPath
                 : snapshotEventPath(state.capturedSourceEvent);
-            state.messageElement = state.pendingMessageElement;
+            state.targetElement = state.pendingTargetElement ||
+                getEventElement(state.capturedSourceEvent);
+            state.messageElement = scope === 'message'
+                ? state.pendingMessageElement || closestScopeElement(state.targetElement, 'message')
+                : null;
             state.pendingSourceEvent = null;
             state.pendingSourceEventPath = [];
+            state.pendingTargetElement = null;
             state.pendingMessageElement = null;
             state.originalContext = request.originalContext;
             state.context = request.context;
             state.options = request.options;
             return Reflect.apply(originalOpenMenu, this, nextArgs);
         };
+        state.patchedGet = patchedGet;
+        state.patchedOpenMenu = patchedOpenMenu;
         Object.defineProperty(menuContext, 'showMenuConfig', {
             ...showDescriptor,
             get: patchedGet
         });
         menuContext.openMenu = patchedOpenMenu;
         patchedMenus.set(menuContext, state);
+        patchedStates.add(state);
         return true;
     }
 
-    function findMenuFromComponent(component, allowDirect = false) {
-        const candidates = [
-            component?.proxy?.msgCtxMenu,
-            component?.ctx?.msgCtxMenu
-        ];
-        if (allowDirect) {
-            candidates.push(component?.proxy, component?.ctx);
+    function restoreMenuState(state) {
+        if (!state || !patchedStates.has(state)) {
+            return;
         }
-        for (const candidate of candidates) {
-            if (candidate?._?.ctx && typeof candidate._.ctx.openMenu === 'function' &&
-                Object.getOwnPropertyDescriptor(candidate._.ctx, 'showMenuConfig')) {
-                return candidate;
+        const currentDescriptor = Object.getOwnPropertyDescriptor(
+            state.menuContext,
+            'showMenuConfig'
+        );
+        if (currentDescriptor?.get === state.patchedGet) {
+            Object.defineProperty(
+                state.menuContext,
+                'showMenuConfig',
+                state.originalShowDescriptor
+            );
+        }
+        if (state.menuContext.openMenu === state.patchedOpenMenu) {
+            state.menuContext.openMenu = state.originalOpenMenu;
+        }
+        patchedMenus.delete(state.menuContext);
+        patchedStates.delete(state);
+    }
+
+    function clearNativeMenuRequest() {
+        nativeMenuRequestId += 1;
+        for (const timer of nativeMenuTimers) {
+            runtime.clearTimeout(timer);
+        }
+        nativeMenuTimers.clear();
+    }
+
+    function isVisibleNativeMenu(menu) {
+        if (!menu?.isConnected || menu.hidden) {
+            return false;
+        }
+        try {
+            const style = runtime.getComputedStyle?.(menu);
+            if (style?.display === 'none' || style?.visibility === 'hidden') {
+                return false;
             }
+        } catch {
         }
-        return null;
+        return getContextMenuItemElements(menu, true).length > 0;
+    }
+
+    function getMenuDistance(menu, point) {
+        try {
+            const rect = menu.getBoundingClientRect?.();
+            if (!rect || (!rect.width && !rect.height)) {
+                return Number.MAX_SAFE_INTEGER;
+            }
+            const dx = point.x < rect.left
+                ? rect.left - point.x
+                : point.x > rect.right ? point.x - rect.right : 0;
+            const dy = point.y < rect.top
+                ? rect.top - point.y
+                : point.y > rect.bottom ? point.y - rect.bottom : 0;
+            return Math.hypot(dx, dy);
+        } catch {
+            return Number.MAX_SAFE_INTEGER;
+        }
+    }
+
+    function applyNativeMenuOrder(scope, point) {
+        if (getConfig().enabled !== true || typeof document === 'undefined') {
+            return false;
+        }
+        const menus = Array.from(document.querySelectorAll(
+            '.q-context-menu,[role="menu"][class*="context-menu" i]'
+        )).filter(isVisibleNativeMenu);
+        if (!menus.length) {
+            return false;
+        }
+        menus.sort((left, right) => getMenuDistance(left, point) - getMenuDistance(right, point));
+        const menu = menus[0];
+        const elements = getContextMenuItemElements(menu, true);
+        const entries = elements
+            .map(element => ({ element, descriptor: describeContextMenuElement(element) }))
+            .filter(entry => entry.descriptor);
+        if (!entries.length) {
+            return false;
+        }
+        rememberItems(scope, entries);
+        reorderContextMenuElements(elements, getScopeConfig(scope).items);
+        return true;
+    }
+
+    function handleNativeContextMenu(event, element = null, scopeHint = '') {
+        clearNativeMenuRequest();
+        if (getConfig().enabled !== true || typeof Element === 'undefined') {
+            return false;
+        }
+        const target = getEventElement(event, element);
+        const scope = normalizeMenuScope(scopeHint, '') || classifyContextMenuScope(target);
+        if (!scope || scope === 'message') {
+            return false;
+        }
+        const requestId = nativeMenuRequestId;
+        const point = {
+            x: Number(event?.clientX) || 0,
+            y: Number(event?.clientY) || 0
+        };
+        for (const delay of [16, 48, 112, 220]) {
+            const timer = runtime.setTimeout(() => {
+                nativeMenuTimers.delete(timer);
+                if (requestId === nativeMenuRequestId) {
+                    applyNativeMenuOrder(scope, point);
+                }
+            }, delay);
+            nativeMenuTimers.add(timer);
+        }
+        return true;
     }
 
     function prepareFromElement(element, sourceEvent = null) {
-        if (!(element instanceof Element)) {
+        if (typeof Element === 'undefined') {
             return false;
         }
-        const candidates = [element];
-        const message = element.closest?.('.message.vue-component,.message,.ml-item');
-        if (message && message !== element) {
-            candidates.push(message);
+        const target = getEventElement(sourceEvent, element);
+        if (!(target instanceof Element)) {
+            return false;
         }
-        const seen = new WeakSet();
-        for (const candidate of candidates) {
-            for (const start of new Set(candidate?.__VUE__ || [])) {
+        const messageElement = closestScopeElement(target, 'message') || element;
+        if (!(messageElement instanceof Element)) {
+            return false;
+        }
+        const anchors = [];
+        const seenElements = new Set();
+        const addAnchor = value => {
+            if (value instanceof Element && !seenElements.has(value)) {
+                seenElements.add(value);
+                anchors.push(value);
+            }
+        };
+        addAnchor(target);
+        addAnchor(element);
+        addAnchor(messageElement);
+        for (let ancestor = target.parentElement, depth = 0;
+            ancestor && depth < 12;
+            ancestor = ancestor.parentElement, depth += 1) {
+            addAnchor(ancestor);
+        }
+
+        const seenComponents = new WeakSet();
+        for (const anchor of anchors) {
+            const starts = [
+                ...Array.from(anchor?.__VUE__ || []),
+                anchor?.__vueParentComponent
+            ].filter(Boolean);
+            for (const start of new Set(starts)) {
                 for (let component = start, depth = 0; component && depth < 24;
                     component = component.parent, depth += 1) {
-                    if (seen.has(component)) {
+                    if (seenComponents.has(component)) {
                         continue;
                     }
-                    seen.add(component);
-                    const menu = findMenuFromComponent(component, true);
-                    if (menu && patchMenu(menu, {
-                        sourceEvent,
-                        sourceEventPath: snapshotEventPath(sourceEvent),
-                        messageElement: element
-                    })) {
-                        return true;
+                    seenComponents.add(component);
+                    const candidates = findMenuCandidatesFromComponent(component, true);
+                    for (const candidate of candidates) {
+                        if (candidate.scope && candidate.scope !== 'message') {
+                            continue;
+                        }
+                        if (patchMenu(candidate.menu, {
+                            scope: 'message',
+                            sourceEvent,
+                            sourceEventPath: snapshotEventPath(sourceEvent),
+                            targetElement: target,
+                            messageElement
+                        }, 'message')) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -719,15 +1197,61 @@ export function createMessageContextMenuOrderController(options) {
         return false;
     }
 
-    function handleContextMenu(event, messageElement) {
-        return prepareFromElement(messageElement, event);
+    function handleContextMenu(event, element = null) {
+        return prepareFromElement(element || getEventElement(event), event);
+    }
+
+    function patchMessageProviderFromComponent(component, messageElement) {
+        const seen = new WeakSet();
+        for (let current = component, depth = 0; current && depth < 24;
+            current = current.parent, depth += 1) {
+            if (seen.has(current)) {
+                continue;
+            }
+            seen.add(current);
+            for (const candidate of findMenuCandidatesFromComponent(current, true)) {
+                if (candidate.scope && candidate.scope !== 'message') {
+                    continue;
+                }
+                if (patchMenu(candidate.menu, {
+                    scope: 'message',
+                    messageElement
+                }, 'message')) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function getMountedItemScope(component) {
+        const seen = new WeakSet();
+        for (let current = component, depth = 0; current && depth < 16;
+            current = current.parent, depth += 1) {
+            if (seen.has(current)) {
+                continue;
+            }
+            seen.add(current);
+            for (const { menu } of findMenuCandidatesFromComponent(current, true)) {
+                const state = patchedMenus.get(menu._.ctx);
+                if (state) {
+                    return 'message';
+                }
+            }
+        }
+        return '';
     }
 
     function handleVueComponentMount(component, patchProvider = true) {
         if (patchProvider) {
-            const menu = findMenuFromComponent(component);
-            if (menu) {
-                patchMenu(menu);
+            const componentElement = component?.vnode?.el;
+            let messageElement = null;
+            try {
+                messageElement = options.resolveMessageElement?.(componentElement) || null;
+            } catch {
+            }
+            if (typeof Element !== 'undefined' && messageElement instanceof Element) {
+                patchMessageProviderFromComponent(component, messageElement);
             }
         }
         const element = component?.vnode?.el;
@@ -737,9 +1261,13 @@ export function createMessageContextMenuOrderController(options) {
         if (!item) {
             return;
         }
+        const scope = getMountedItemScope(component) || 'message';
         for (const extension of extensions.values()) {
+            if (!extensionMatchesScope(extension, scope)) {
+                continue;
+            }
             try {
-                extension?.onItemMounted?.({ component, item });
+                extension?.onItemMounted?.({ component, item, scope });
             } catch {
             }
         }
@@ -758,8 +1286,9 @@ export function createMessageContextMenuOrderController(options) {
         };
     }
 
-    function getEditorItems() {
+    function getEditorItems(scope, order = getScopeConfig(scope).items) {
         syncConfig();
+        const state = scopeStates.get(scope);
         const ids = [];
         const seen = new Set();
         const append = values => {
@@ -770,16 +1299,16 @@ export function createMessageContextMenuOrderController(options) {
                 }
             }
         };
-        const configuredOrder = normalizeContextMenuOrder(getConfig().items);
-        const separatorReferenceOrder = lastObservedOrder.length
-            ? lastObservedOrder
-            : DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS.map(item => item.id);
+        const configuredOrder = normalizeContextMenuOrder(order);
+        const separatorReferenceOrder = state.lastObservedOrder.length
+            ? state.lastObservedOrder
+            : (DEFAULT_CONTEXT_MENU_ITEMS[scope] || []).map(item => item.id);
         append(configuredOrder.length
             ? mergeObservedSeparators(configuredOrder, separatorReferenceOrder)
-            : lastObservedOrder);
-        append(lastObservedOrder);
-        append(discoveredItems.keys());
-        return ids.map(id => discoveredItems.get(id) || {
+            : state.lastObservedOrder);
+        append(state.lastObservedOrder);
+        append(state.discoveredItems.keys());
+        return ids.map(id => state.discoveredItems.get(id) || {
             id,
             label: id.replace(/^[^:]+:/, '') || id,
             toolbox: id.startsWith('toolbox:')
@@ -798,7 +1327,9 @@ export function createMessageContextMenuOrderController(options) {
         const cleanup = editorCleanup;
         editorCleanup = null;
         cleanup?.();
-        document.getElementById(EDITOR_ID)?.remove();
+        if (typeof document !== 'undefined') {
+            document.getElementById(EDITOR_ID)?.remove();
+        }
         if (previousFocus?.isConnected) {
             previousFocus.focus({ preventScroll: true });
         }
@@ -808,25 +1339,51 @@ export function createMessageContextMenuOrderController(options) {
     function openEditor() {
         closeEditor();
         injectStyle();
+        syncConfig();
         previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         const layer = createElement('div');
         layer.id = EDITOR_ID;
         layer.tabIndex = -1;
         layer.setAttribute('role', 'dialog');
         layer.setAttribute('aria-modal', 'true');
-        layer.setAttribute('aria-label', '消息右键菜单排序');
+        layer.setAttribute('aria-label', '菜单排序管理');
         const dialog = createElement('div', 'qqnt-toolbox-menu-order-dialog');
         const header = createElement('div', 'qqnt-toolbox-menu-order-header');
-        const title = createElement('div', 'qqnt-toolbox-menu-order-title', '消息右键菜单排序');
+        const title = createElement('div', 'qqnt-toolbox-menu-order-title', '菜单排序管理');
         const close = createElement('button', 'qqnt-toolbox-menu-order-close', '×');
         close.type = 'button';
         close.title = '关闭';
         close.setAttribute('aria-label', '关闭');
         header.append(title, close);
 
+        const tabs = createElement('div', 'qqnt-toolbox-menu-order-tabs');
+        tabs.setAttribute('role', 'tablist');
         const list = createElement('div', 'qqnt-toolbox-menu-order-list');
+        list.id = `${EDITOR_ID}-list`;
         list.setAttribute('role', 'list');
-        for (const item of getEditorItems()) {
+        const footer = createElement('div', 'qqnt-toolbox-menu-order-footer');
+        const restore = createElement('button', 'qqnt-toolbox-menu-order-restore', '恢复 QQ 顺序');
+        restore.type = 'button';
+        const footerActions = createElement('div', 'qqnt-toolbox-menu-order-footer-actions');
+        const cancel = createElement('button', 'qqnt-toolbox-menu-order-cancel', '取消');
+        cancel.type = 'button';
+        const save = createElement('button', 'qqnt-toolbox-menu-order-save', '保存');
+        save.type = 'button';
+        footerActions.append(cancel, save);
+        footer.append(restore, footerActions);
+        dialog.append(header, tabs, list, footer);
+        layer.append(dialog);
+        document.body.append(layer);
+
+        const draftOrders = Object.fromEntries(MENU_SCOPE_DEFINITIONS.map(({ id }) => [
+            id,
+            normalizeContextMenuOrder(getScopeConfig(id).items)
+        ]));
+        let activeScope = 'message';
+        let pointerDrag = null;
+        let autoScrollFrame = 0;
+
+        const createRow = item => {
             const row = createElement('div', 'qqnt-toolbox-menu-order-row');
             row.dataset.itemId = item.id;
             row.setAttribute('role', 'listitem');
@@ -850,33 +1407,66 @@ export function createMessageContextMenuOrderController(options) {
             down.title = '下移';
             down.setAttribute('aria-label', `${item.label} 下移`);
             row.append(handle, name, up, down);
-            list.append(row);
+            return row;
+        };
+
+        const updateDraftOrder = () => {
+            draftOrders[activeScope] = Array.from(
+                list.querySelectorAll('.qqnt-toolbox-menu-order-row')
+            ).map(row => row.dataset.itemId).filter(Boolean);
+        };
+
+        const renderScope = scope => {
+            activeScope = normalizeMenuScope(scope, 'message');
+            list.replaceChildren();
+            const items = getEditorItems(activeScope, draftOrders[activeScope]);
+            if (items.length) {
+                list.append(...items.map(createRow));
+                updateMoveButtons(list);
+            } else {
+                const empty = createElement(
+                    'div',
+                    'qqnt-toolbox-menu-order-empty',
+                    '暂无可排序项目'
+                );
+                empty.setAttribute('role', 'status');
+                list.append(empty);
+            }
+            tabs.querySelectorAll('.qqnt-toolbox-menu-order-tab').forEach(tab => {
+                const selected = tab.dataset.scope === activeScope;
+                tab.setAttribute('aria-selected', String(selected));
+                tab.tabIndex = selected ? 0 : -1;
+            });
+            restore.disabled = !getScopeConfig(activeScope).items?.length &&
+                !scopeStates.get(activeScope).lastObservedOrder.length;
+        };
+
+        for (const definition of MENU_SCOPE_DEFINITIONS) {
+            const tab = createElement(
+                'button',
+                'qqnt-toolbox-menu-order-tab',
+                definition.label
+            );
+            tab.type = 'button';
+            tab.dataset.scope = definition.id;
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-controls', list.id);
+            tab.addEventListener('click', () => {
+                if (definition.id !== activeScope) {
+                    renderScope(definition.id);
+                }
+            });
+            tabs.append(tab);
         }
-        updateMoveButtons(list);
-
-        const footer = createElement('div', 'qqnt-toolbox-menu-order-footer');
-        const restore = createElement('button', 'qqnt-toolbox-menu-order-restore', '恢复 QQ 顺序');
-        restore.type = 'button';
-        const footerActions = createElement('div', 'qqnt-toolbox-menu-order-footer-actions');
-        const cancel = createElement('button', 'qqnt-toolbox-menu-order-cancel', '取消');
-        cancel.type = 'button';
-        const save = createElement('button', 'qqnt-toolbox-menu-order-save', '保存');
-        save.type = 'button';
-        footerActions.append(cancel, save);
-        footer.append(restore, footerActions);
-        dialog.append(header, list, footer);
-        layer.append(dialog);
-        document.body.append(layer);
-
-        let pointerDrag = null;
-        let autoScrollFrame = 0;
+        renderScope(activeScope);
 
         const updatePointerDrag = clientY => {
             if (!pointerDrag?.started) {
                 return;
             }
             pointerDrag.clientY = clientY;
-            pointerDrag.ghost.style.transform = `translate3d(0, ${clientY - pointerDrag.startY}px, 0)`;
+            pointerDrag.ghost.style.transform =
+                `translate3d(0, ${clientY - pointerDrag.startY}px, 0)`;
             const rows = Array.from(list.querySelectorAll('.qqnt-toolbox-menu-order-row'))
                 .filter(row => row !== pointerDrag.row);
             const insertionIndex = getDragInsertionIndex(
@@ -910,7 +1500,7 @@ export function createMessageContextMenuOrderController(options) {
                     updatePointerDrag(pointerDrag.clientY);
                 }
             }
-            autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
+            autoScrollFrame = runtime.requestAnimationFrame(runAutoScroll);
         };
 
         const startPointerDrag = () => {
@@ -936,7 +1526,7 @@ export function createMessageContextMenuOrderController(options) {
             pointerDrag.ghost = ghost;
             pointerDrag.row.dataset.dragging = 'true';
             list.dataset.dragging = 'true';
-            autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
+            autoScrollFrame = runtime.requestAnimationFrame(runAutoScroll);
         };
 
         const finishPointerDrag = () => {
@@ -949,13 +1539,16 @@ export function createMessageContextMenuOrderController(options) {
                 drag.handle.releasePointerCapture(drag.pointerId);
             }
             if (autoScrollFrame) {
-                window.cancelAnimationFrame(autoScrollFrame);
+                runtime.cancelAnimationFrame(autoScrollFrame);
                 autoScrollFrame = 0;
             }
             drag.ghost?.remove();
             drag.row.removeAttribute('data-dragging');
             list.removeAttribute('data-dragging');
             updateMoveButtons(list);
+            if (drag.started) {
+                updateDraftOrder();
+            }
         };
         editorCleanup = finishPointerDrag;
 
@@ -1015,10 +1608,13 @@ export function createMessageContextMenuOrderController(options) {
                 row.nextElementSibling?.after(row);
             }
             updateMoveButtons(list);
+            updateDraftOrder();
             row.scrollIntoView?.({ block: 'nearest' });
         };
         list.addEventListener('click', event => {
-            const button = event.target.closest?.('.qqnt-toolbox-menu-order-move[data-direction]');
+            const button = event.target.closest?.(
+                '.qqnt-toolbox-menu-order-move[data-direction]'
+            );
             const row = button?.closest?.('.qqnt-toolbox-menu-order-row');
             if (!button || !row || button.disabled) {
                 return;
@@ -1035,24 +1631,23 @@ export function createMessageContextMenuOrderController(options) {
             moveRow(row, event.key === 'ArrowUp' ? 'up' : 'down');
             handle.focus({ preventScroll: true });
         });
-        const closeEditorWithCleanup = () => {
-            closeEditor();
-        };
+
+        const closeEditorWithCleanup = () => closeEditor();
         close.addEventListener('click', closeEditorWithCleanup);
         cancel.addEventListener('click', closeEditorWithCleanup);
-        restore.addEventListener('click', async () => {
+        restore.addEventListener('click', () => {
             finishPointerDrag();
-            restore.disabled = true;
-            await options.saveOrder?.([]);
-            closeEditor();
+            draftOrders[activeScope] = [];
+            renderScope(activeScope);
         });
         save.addEventListener('click', async () => {
             finishPointerDrag();
             save.disabled = true;
-            const order = Array.from(list.querySelectorAll('.qqnt-toolbox-menu-order-row'))
-                .map(row => row.dataset.itemId)
-                .filter(Boolean);
-            await options.saveOrder?.(order);
+            if (typeof options.saveScopes === 'function') {
+                await options.saveScopes(buildScopesConfig(draftOrders));
+            } else {
+                await options.saveOrder?.(draftOrders.message);
+            }
             closeEditor();
         });
         layer.addEventListener('keydown', event => {
@@ -1065,8 +1660,12 @@ export function createMessageContextMenuOrderController(options) {
     }
 
     function dispose() {
-        window.clearTimeout(catalogSaveTimer);
+        runtime.clearTimeout(catalogSaveTimer);
+        clearNativeMenuRequest();
         extensions.clear();
+        for (const state of Array.from(patchedStates)) {
+            restoreMenuState(state);
+        }
         closeEditor();
     }
 
@@ -1074,6 +1673,7 @@ export function createMessageContextMenuOrderController(options) {
         closeEditor,
         dispose,
         handleContextMenu,
+        handleNativeContextMenu,
         handleVueComponentMount,
         openEditor,
         patchMenu,
@@ -1082,3 +1682,5 @@ export function createMessageContextMenuOrderController(options) {
         syncConfig
     });
 }
+
+export const createMessageContextMenuOrderController = createContextMenuOrderController;

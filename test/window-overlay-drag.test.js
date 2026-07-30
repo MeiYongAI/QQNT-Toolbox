@@ -16,7 +16,7 @@ test('Toolbox overlays exclude the QQ native title-bar drag region', () => {
         'src/fake-forward-editor.css',
         'src/auto-reaction-editor.js',
         'src/recall-filter-editor.js',
-        'src/message-context-menu-order.js',
+        'src/context-menu-order.js',
         'src/local-sticker-manager.css',
         'src/local-sticker-panel.css'
     ]) {
@@ -42,7 +42,7 @@ test('close-button dialogs ignore backdrop clicks and support Escape', () => {
     const modalSources = [
         readSource('src/fake-forward-editor.js'),
         readSource('src/local-sticker-manager.js'),
-        readSource('src/message-context-menu-order.js'),
+        readSource('src/context-menu-order.js'),
         readSource('src/qr-result-dialog.js')
     ];
 
@@ -61,4 +61,23 @@ test('the floating Toolbox closes with Escape after higher modals handle it', ()
     assert.match(renderer, /element\.getClientRects\(\)\.length > 0/);
     assert.match(renderer, /window\.addEventListener\('keydown', handleFloatingPanelEscape, true\)/);
     assert.doesNotMatch(renderer, /function handleFloatingPanelEscape[\s\S]*?event\.defaultPrevented[\s\S]*?function installPanelEvents/);
+});
+
+test('chat toolbar hover blocking targets only the three native expandable entries', () => {
+    const renderer = readSource('src/renderer.js');
+    const main = readSource('src/main.js');
+
+    for (const id of [
+        'id-func-bar-expression',
+        'id-func-bar-screenshot',
+        'id-func-bar-folder'
+    ]) {
+        assert.match(renderer, new RegExp(`['"]${id}['"]`));
+    }
+    assert.match(main, /preventChatToolbarHoverExpand: false/);
+    assert.match(renderer, /禁止输入栏悬停展开/);
+    assert.match(renderer, /function handleChatToolbarHover[\s\S]*?\.closest\('\.chat-func-bar'\)/);
+    assert.match(renderer, /\['pointerover', 'pointerenter', 'mouseover', 'mouseenter'\]/);
+    assert.match(renderer, /document\.addEventListener\(eventName, handleChatToolbarHover, true\)/);
+    assert.doesNotMatch(renderer, /addEventListener\('click', handleChatToolbarHover/);
 });

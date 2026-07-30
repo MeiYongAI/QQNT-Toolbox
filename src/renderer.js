@@ -1,8 +1,8 @@
 import {
     closeNativeContextMenu,
-    createMessageContextMenuOrderController,
+    createContextMenuOrderController,
     getContextMenuItemElements
-} from './message-context-menu-order.js';
+} from './context-menu-order.js';
 import {
     matchesControlLabelValue,
     normalizeDynamicControlLabel
@@ -23,6 +23,7 @@ import {
     getMessageImageSenderMetadata
 } from './message-to-image.js';
 import { createMessageImageManager } from './message-image-manager.js';
+import { createReplyAtCleanupTracker } from './reply-at-cleanup.js';
 import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
@@ -100,6 +101,11 @@ let handleToolboxVueComponentMount = () => {};
         '[class*="group-member"] [class*="viewport-list__inner"] > *',
         '.recent-contact-item .main-info'
     ].join(',');
+    const CHAT_TOOLBAR_HOVER_TRIGGER_IDS = new Set([
+        'id-func-bar-expression',
+        'id-func-bar-screenshot',
+        'id-func-bar-folder'
+    ]);
     const DEFAULT_PANEL_STATE = {
         x: null,
         y: null,
@@ -229,10 +235,13 @@ let handleToolboxVueComponentMount = () => {};
             openEmojiAsImage: false,
             singleClickMediaViewer: false,
             showFullUnreadCount: false,
-            messageContextMenuOrder: {
+            contextMenuOrder: {
                 enabled: false,
-                items: [],
-                catalog: []
+                scopes: {
+                    message: { items: [], catalog: [] },
+                    avatar: { items: [], catalog: [] },
+                    recent: { items: [], catalog: [] }
+                }
             },
             imageViewerOptimization: false,
             activeQrScan: false,
@@ -244,6 +253,7 @@ let handleToolboxVueComponentMount = () => {};
             goBackMainList: false,
             preventMessageDrag: false,
             preventRecentContactDrag: false,
+            preventChatToolbarHoverExpand: false,
             preventProfileCardHover: false,
             deleteBubbleSkin: false,
             hiddenWeatherBtn: false,
@@ -269,7 +279,7 @@ let handleToolboxVueComponentMount = () => {};
     let repeatResizeObserver = null;
     let repeatRefreshTimer = 0;
     let pokeMenuRequestId = 0;
-    let messageContextMenuOrderController = null;
+    let contextMenuOrderController = null;
     let messageContextMenuActionsInstalled = false;
     let messageImageController = null;
     let reactionLimitController = null;
@@ -288,6 +298,7 @@ let handleToolboxVueComponentMount = () => {};
     let preventDragActive = false;
     let replyAtEditor = null;
     let replyAtCleanupBusy = false;
+    const replyAtCleanupTracker = createReplyAtCleanupTracker();
     let imageViewerDrag = null;
     let emojiImageOpenUntil = 0;
     const nativeMediaDispatchEvents = new WeakSet();
@@ -680,16 +691,22 @@ let handleToolboxVueComponentMount = () => {};
         return getByPath(currentConfig, path) === true;
     }
 
-    function getMessageContextMenuOrderController() {
-        if (!messageContextMenuOrderController) {
-            messageContextMenuOrderController = createMessageContextMenuOrderController({
-                getConfig: () => getByPath(currentConfig, 'interfaceTweaks.messageContextMenuOrder'),
-                saveOrder: items => setConfigValue('interfaceTweaks.messageContextMenuOrder.items', items),
-                saveCatalog: catalog => setConfigValue('interfaceTweaks.messageContextMenuOrder.catalog', catalog)
+    function getContextMenuOrderController() {
+        if (!contextMenuOrderController) {
+            contextMenuOrderController = createContextMenuOrderController({
+                getConfig: () => getByPath(currentConfig, 'interfaceTweaks.contextMenuOrder'),
+                saveScopes: scopes => setConfigValue('interfaceTweaks.contextMenuOrder.scopes', scopes),
+                resolveMessageElement: element => {
+                    const messageElement = getMessageElementFromElement(element);
+                    return messageElement && findMessageRecordFromElement(messageElement)
+                        ? messageElement
+                        : null;
+                }
             });
-            window.__qqntToolboxMessageContextMenu = messageContextMenuOrderController;
+            window.__qqntToolboxContextMenu = contextMenuOrderController;
+            window.__qqntToolboxMessageContextMenu = contextMenuOrderController;
         }
-        return messageContextMenuOrderController;
+        return contextMenuOrderController;
     }
 
     function getReactionLimitController() {
@@ -2155,10 +2172,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('以图片方式打开表情'), text('点击商城表情时按图片打开'), 'interfaceTweaks.openEmojiAsImage'),
                 createSwitchItem(text('单击查看媒体'), text('单击消息中的图片或视频即可打开'), 'interfaceTweaks.singleClickMediaViewer'),
                 createSwitchItem(text('显示完整未读数'), text('消息列表未读数不再以 99+ 封顶'), 'interfaceTweaks.showFullUnreadCount'),
-                createSwitchItem(text('自定义消息菜单排序'), text('调整消息右键菜单中的全部项目'), 'interfaceTweaks.messageContextMenuOrder.enabled'),
-                createActionItem(text('菜单顺序'), '', 'editMessageContextMenuOrder', {
+                createSwitchItem(text('自定义菜单排序'), text('分别调整消息、头像与会话列表右键菜单'), 'interfaceTweaks.contextMenuOrder.enabled'),
+                createActionItem(text('菜单管理'), '', 'editContextMenuOrder', {
                     label: text('编辑'),
-                    requires: 'interfaceTweaks.messageContextMenuOrder.enabled',
+                    requires: 'interfaceTweaks.contextMenuOrder.enabled',
                     child: true
                 }),
                 createSwitchItem(text('图片查看器优化'), text('仅优化 QQ 原生查看器：点击空白关闭、拖动窗口'), 'interfaceTweaks.imageViewerOptimization'),
@@ -2174,6 +2191,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('侧键返回主列表'), text('鼠标侧键返回会话列表'), 'interfaceTweaks.goBackMainList'),
                 createSwitchItem(text('阻止消息窗口拖拽操作'), text('减少误选和误拖'), 'interfaceTweaks.preventMessageDrag'),
                 createSwitchItem(text('阻止消息列表拖拽'), text('防止拖出独立聊天窗口'), 'interfaceTweaks.preventRecentContactDrag'),
+                createSwitchItem(text('禁止输入栏悬停展开'), text('表情、截图与文件仅点击打开'), 'interfaceTweaks.preventChatToolbarHoverExpand'),
                 createSwitchItem(text('禁止悬停显示资料卡'), text('用户与群资料卡'), 'interfaceTweaks.preventProfileCardHover'),
                 createSwitchItem(text('删除消息气泡装扮'), '', 'interfaceTweaks.deleteBubbleSkin'),
                 createSwitchItem(text('隐藏天气按钮'), '', 'interfaceTweaks.hiddenWeatherBtn'),
@@ -3051,8 +3069,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 result = await bridge?.clearRecallCache?.();
             } else if (action === 'manageRecallFilterPeers') {
                 getRecallFilterEditor().open(button);
-            } else if (action === 'editMessageContextMenuOrder') {
-                getMessageContextMenuOrderController().openEditor();
+            } else if (action === 'editContextMenuOrder') {
+                getContextMenuOrderController().openEditor();
             } else if (action === 'chooseMessageImageDirectory') {
                 if (typeof bridge?.chooseMessageImageDirectory !== 'function') {
                     throw new Error('The message image directory bridge is unavailable.');
@@ -3563,6 +3581,26 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
     }
 
+    function handleChatToolbarHover(event) {
+        if (!isConfigEnabled('interfaceTweaks.preventChatToolbarHoverExpand')) {
+            return;
+        }
+        const trigger = (event.composedPath?.() || [event.target]).find(item =>
+            item instanceof Element && CHAT_TOOLBAR_HOVER_TRIGGER_IDS.has(item.id)
+        );
+        if (!trigger?.closest('.chat-func-bar')) {
+            return;
+        }
+        event.stopPropagation();
+        event.stopImmediatePropagation?.();
+    }
+
+    function installChatToolbarHoverBlocker() {
+        for (const eventName of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter']) {
+            document.addEventListener(eventName, handleChatToolbarHover, true);
+        }
+    }
+
     function normalizeUnreadCount(value) {
         const candidate = value && typeof value === 'object' && 'value' in value ? value.value : value;
         const count = Number(candidate);
@@ -3859,7 +3897,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     }
 
     function cleanupReplyAt(editor) {
-        if (!isConfigEnabled('messageTweaks.removeReplyAt') || replyAtCleanupBusy) {
+        if (replyAtCleanupBusy) {
             return;
         }
         const model = editor?.model;
@@ -3868,8 +3906,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!model || !root) {
             return;
         }
-        const hasReply = Array.from(root.getChildren?.() || []).some(child => child.is?.('element', 'msg-reply'));
-        if (!hasReply) {
+        const replyElement = Array.from(root.getChildren?.() || [])
+            .find(child => child.is?.('element', 'msg-reply')) || null;
+        if (!replyAtCleanupTracker.shouldCleanup(
+            editor,
+            replyElement,
+            isConfigEnabled('messageTweaks.removeReplyAt')
+        )) {
             return;
         }
         replyAtCleanupBusy = true;
@@ -7300,13 +7343,13 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (messageContextMenuActionsInstalled) {
             return;
         }
-        const controller = getMessageContextMenuOrderController();
+        const controller = getContextMenuOrderController();
         controller.registerExtension({
             id: 'toolbox-message-actions',
             getItems: getToolboxMessageContextMenuItems,
             onItemMounted: decorateToolboxMessageContextMenuItem
         });
-        handleToolboxVueComponentMount = component => controller.handleVueComponentMount(component, false);
+        handleToolboxVueComponentMount = component => controller.handleVueComponentMount(component);
         messageContextMenuActionsInstalled = true;
     }
 
@@ -7329,7 +7372,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } finally {
             configReady = true;
             messageImageController?.sync();
-            getMessageContextMenuOrderController().syncConfig();
+            getContextMenuOrderController().syncConfig();
             syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
@@ -7349,7 +7392,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             currentConfig = normalizeRendererConfig(config);
             configReady = true;
             messageImageController?.sync();
-            getMessageContextMenuOrderController().syncConfig();
+            getContextMenuOrderController().syncConfig();
             syncReactionLimitFeature();
             syncMessageBadgeObserver(true);
             refreshConfigViews();
@@ -7465,7 +7508,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         const pokeOwnership = pokeRecord
             ? getPokeRecordOwnership(pokeRecord)
             : 'not-poke';
-        const menuPrepared = getMessageContextMenuOrderController().handleContextMenu(event, messageTarget);
+        const menuController = getContextMenuOrderController();
+        const messageMenuPrepared = messageTarget
+            ? menuController.handleContextMenu(event, messageTarget)
+            : false;
+        const nativeMenuPrepared = menuController.handleNativeContextMenu(
+            event,
+            event.target,
+            avatar ? 'avatar' : messageTarget ? 'message' : ''
+        );
+        const menuPrepared = messageMenuPrepared || nativeMenuPrepared;
         if (messageTarget && shouldUseContextRepeat() && isForwardRecordWindow() &&
             Array.isArray(directRecord?.elements) &&
             directRecord.elements.some(element => Number(element?.elementType) === 16)) {
@@ -7605,6 +7657,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
 
     loadConfig().then(subscribeConfig).catch(() => {});
     loadUpdateState().then(subscribeUpdateState).catch(() => {});
+    installChatToolbarHoverBlocker();
     installProfileCardHoverBlocker();
     installPokeInteractions();
     installRepeatEntrypoints();
