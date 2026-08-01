@@ -2,14 +2,14 @@
 
 面向 LiteLoaderQQNT 的 QQNT 功能扩展，集中提供消息处理、本地贴纸、媒体预览、语音工具、阻止撤回、互动功能和界面调整。
 
-**[下载最新版本](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) · [安装与更新](#安装与更新) · [功能概览](#功能概览) · [问题反馈](https://github.com/MeiYongAI/QQNT-Toolbox/issues)**
+**[下载最新版本](https://github.com/SammySnake-d/QQNT-Toolbox/releases/latest) · [安装与更新](#安装与更新) · [功能概览](#功能概览) · [问题反馈](https://github.com/SammySnake-d/QQNT-Toolbox/issues)**
 
 > [!CAUTION]
 > **传播与官方渠道**
 >
 > - 不要在国内平台宣传、推荐或传播本插件。
 > - 不要在 QQ 官方群聊中发送任何能明显看出你使用了第三方插件的截图、录屏或其他内容，也不要将此类材料提交到 QQ 官方客服与反馈渠道。
-> - 插件问题请仅通过本仓库的 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 反馈，不要将第三方插件导致的现象提交给 QQ 官方渠道。
+> - 插件问题请仅通过本仓库的 [Issues](https://github.com/SammySnake-d/QQNT-Toolbox/issues) 反馈，不要将第三方插件导致的现象提交给 QQ 官方渠道。
 
 > [!WARNING]
 > **第三方插件风险**
@@ -21,7 +21,7 @@
 - 首次安装时，除悬浮工具箱入口外，所有会修改消息、菜单或界面的功能均为关闭状态。
 - 插件依赖 QQNT 内部接口和页面结构，QQ 更新可能造成部分功能临时失效；更新 QQ 前建议确认最新 Release 和 Issues。
 - 当前主要在 Windows QQNT 上开发和测试。插件清单同时声明支持 Linux 和 macOS，少数依赖 Windows 原生接口的功能会明确标注平台限制。
-- 仅从本仓库 [Releases](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) 获取安装包；更新或排查问题前建议备份 `LiteLoaderQQNT/data/qqnt_toolbox`。
+- 仅从本仓库 [Releases](https://github.com/SammySnake-d/QQNT-Toolbox/releases/latest) 获取安装包；更新或排查问题前建议备份 `LiteLoaderQQNT/data/qqnt_toolbox`。
 - 不要同时启用多个插件中的同类功能，重复注入消息菜单、阻止撤回、复读或界面精简可能造成冲突。
 
 ## 安装与更新
@@ -51,7 +51,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 ### 手动安装
 
 1. 完全退出 QQ。
-2. 从 [Releases](https://github.com/MeiYongAI/QQNT-Toolbox/releases/latest) 下载最新的 `QQNT-Toolbox-v*.zip`。
+2. 从 [Releases](https://github.com/SammySnake-d/QQNT-Toolbox/releases/latest) 下载最新的 `QQNT-Toolbox-v*.zip`。
 3. 解压后，将其中的 `QQNT-Toolbox` 文件夹放到 `LiteLoaderQQNT/plugins`。
 4. 确认最终路径中直接存在 `manifest.json`：
 
@@ -94,7 +94,7 @@ C:\ffmpeg\bin\ffmpeg.exe
 | 消息与发送 | 文件发送修复、NoSeq 提示、消息转图片、消息复读、伪造合并转发、移除回复 @、自定义图片外显 |
 | 本地贴纸 | 本地贴纸包、最近使用、入口替换、点击直发、Telegram 贴纸下载 |
 | 媒体与语音 | TG 样式媒体预览、语音消息发送、语音库、语音保存与转发 |
-| 阻止撤回 | 消息保留、可选标记、黑白名单、撤回记录持久化与独立查看器 |
+| 阻止撤回 | 消息保留、图片提前暂存、白名单群文件自动下载、撤回记录持久化与独立查看器 |
 | 娱乐互动 | 表情回应解限、回应面板保持、自动回应、戳戳、窗口抖动 |
 | 界面与菜单 | 消息、头像与会话列表菜单排序、完整未读数、二维码识别、单窗口预览、界面精简 |
 | 维护与诊断 | 插件内更新、配置持久化、诊断报告、日志轮转与隐私脱敏 |
@@ -261,15 +261,21 @@ Telegram 下载结果直接保存在所选贴纸目录内，不建立额外缓�
 - 防撤回范围可设为全部、黑名单或白名单；名单管理会读取完整的 QQ 好友与已加入群列表，可搜索、筛选并勾选。
 - 拦截自己的撤回操作。
 - 持久化保存撤回记录，使其在切换会话或重启后仍可查看。
-- 恢复并归档被撤回图片到插件数据目录。
+- 原消息到达时提前暂存图片，撤回后再原子晋升到持久归档，减少快速撤回导致的图片丢失。
+- 共用的保护窗口可配置为 5 分钟到 30 天，默认 24 小时；未撤回消息的图片和文件到期自动清理。
+- 每账号暂存容量默认 5 GB，可用 MB/GB 配置；容量不足时暂停新任务，不淘汰仍在保护窗口内的资产。
 - 打开 Lite-Tools 风格的独立撤回消息窗口，左侧选择会话，右侧查看撤回内容；支持图片预览、语音播放和定位原消息。
 - 清理全部本地撤回缓存。
 
-撤回记录、图片和内存缓存均按当前 QQ 账号隔离，切换账号不会看到或清理其他账号的数据。缺失本地缓存的撤回图片会通过腾讯图片 CDN 恢复；点击定位前会先将当前消息的图片归档到本地，避免原聊天页面持续加载。为补齐腾讯 CDN 所需的全局 `rkey`，插件使用与 lite-tools 相同的 `rkey.furrycloud.top` 服务，该请求不包含 QQ 号、消息内容或图片地址。
+“群文件防撤回下载”使用独立群白名单。只有功能已开启、消息来自白名单群、文件大小落在配置闭区间内时才会自动下载；默认范围为 `0.5 KB ～ 600 MB`，按 1024 进制换算，边界包含在内。文件名、扩展名、MIME 和内容类型不参与判定，ZIP、JS、TXT 和无扩展名文件按同一规则处理。未撤回文件只保留在暂存区，发生撤回后才进入持久归档，并一直保留到手动清理。
+
+撤回记录、暂存、图片和文件归档均按当前 QQ 账号隔离，切换账号不会看到或清理其他账号的数据。图片优先复用已经存在的本地内容，不完整时立即调用 QQ native 下载；带有效鉴权的腾讯 CDN 地址只作为最后回退，不把缺少 `rkey` 的链接当作长期归档。
+
+启用消息防撤回，或启用群文件自动下载并选中至少一个群时，插件会持有 Electron `prevent-app-suspension`，允许屏幕熄灭但阻止空闲系统休眠。macOS 还提供“接电关盖继续运行”：首次开启会请求管理员权限安装独立 helper，只在外接电源时请求 `disablesleep`；关闭功能、退出 QQ、helper 重启和卸载都会恢复安装前设置。设置页会显示 helper 安装、请求和错误状态。
 
 已经成功恢复并保存的消息会在聊天列表刷新或重新定位时继续替换 QQ 的撤回占位；后续切换开关或黑白名单只影响新撤回消息，历史恢复消息会保留到手动清理撤回缓存。
 
-阻止撤回只能处理插件启用后捕获到的消息和撤回事件，无法恢复插件安装前已经撤回的内容。自定义颜色修改后，可能需要切换会话或重新加载消息才能看到变化。
+阻止撤回只能处理插件运行期间捕获到的消息和撤回事件，无法恢复插件安装前已经撤回的内容。保护窗口到期后再发生的管理员删除也不在有界暂存范围内；需要覆盖更长时间时应增大保护窗口和暂存容量。自定义颜色修改后，可能需要切换会话或重新加载消息才能看到变化。
 
 ### 戳戳
 
@@ -350,7 +356,11 @@ qqnt_toolbox
 ├─ updater                     # 下载并校验通过的待安装更新
 ├─ file-retry                  # 发生文件发送修复时按需创建，临时变体 24 小时后清理
 ├─ prevent-recall
-│  └─ <QQ号>                  # 该账号的撤回记录和被撤回图片
+│  └─ <QQ号>
+│     ├─ staging              # 未撤回候选的有界图片/文件暂存
+│     ├─ images               # 已撤回图片持久归档
+│     ├─ files                # 已撤回群文件持久归档
+│     └─ candidates           # restart-safe 消息候选日志
 └─ voice\library\voices       # 语音库文件和文件夹
 ```
 
@@ -381,11 +391,11 @@ qqnt_toolbox
 
 ### QQ 更新后部分功能失效
 
-本插件使用 QQNT 内部接口和 DOM 结构，QQ 更新可能改变这些实现。请查看 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 或最新 Release；反馈问题时可以临时开启诊断记录，并附上导出的诊断报告。
+本插件使用 QQNT 内部接口和 DOM 结构，QQ 更新可能改变这些实现。请查看 [Issues](https://github.com/SammySnake-d/QQNT-Toolbox/issues) 或最新 Release；反馈问题时可以临时开启诊断记录，并附上导出的诊断报告。
 
 ### 如何安全反馈问题
 
-- 只在本仓库 [Issues](https://github.com/MeiYongAI/QQNT-Toolbox/issues) 反馈插件问题，不要前往 QQ 官方群聊、客服或反馈渠道提交第三方插件相关材料。
+- 只在本仓库 [Issues](https://github.com/SammySnake-d/QQNT-Toolbox/issues) 反馈插件问题，不要前往 QQ 官方群聊、客服或反馈渠道提交第三方插件相关材料。
 - 写明操作系统、QQ 版本、LiteLoaderQQNT 版本、Toolbox 版本、复现步骤和相关功能开关。
 - 优先附上内置“导出诊断报告”的结果，不要上传 `config.json`、整个数据目录或包含账号、群号、好友信息的未处理截图。
 - 截图和录屏前请遮挡账号、群聊、联系人、文件路径及其他隐私信息。

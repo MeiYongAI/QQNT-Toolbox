@@ -3,16 +3,20 @@
   "type": "extension",
   "name": "QQNT Toolbox",
   "slug": "qqnt_toolbox",
-  "description": "LiteLoaderQQNT 工具箱，包含文件发送修复、消息复读、本地贴纸、语音库、阻止撤回、表情回应、戳戳和界面调整。",
-  "version": "0.9.1",
+  "description": "LiteLoaderQQNT 工具箱，包含文件发送修复、消息复读、本地贴纸、语音库、消息/图片/群文件防撤回、表情回应、戳戳和界面调整。",
+  "version": "0.10.0",
   "authors": [
     {
       "name": "MeiYongAI",
       "link": "https://github.com/MeiYongAI"
+    },
+    {
+      "name": "SammySnake-d",
+      "link": "https://github.com/SammySnake-d"
     }
   ],
   "repository": {
-    "repo": "MeiYongAI/QQNT-Toolbox",
+    "repo": "SammySnake-d/QQNT-Toolbox",
     "branch": "main"
   },
   "platform": [

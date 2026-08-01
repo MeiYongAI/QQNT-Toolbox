@@ -347,10 +347,19 @@ export function createRecallFilterEditor(options = {}) {
         close();
         injectStyle();
         previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        const selectedContacts = (options.getSelected?.() || []).map(normalizeRecallFilterContact).filter(Boolean);
+        const allowedChatTypes = new Set(
+            (Array.isArray(options.allowedChatTypes) ? options.allowedChatTypes : [1, 2])
+                .map(Number)
+                .filter(value => value === 1 || value === 2)
+        );
+        const selectedContacts = (options.getSelected?.() || [])
+            .map(normalizeRecallFilterContact)
+            .filter(contact => contact && allowedChatTypes.has(contact.chatType));
         const selectedKeys = new Set(selectedContacts.map(contact => contact.key));
         let contacts = mergeRecallFilterContacts([], selectedContacts);
-        let filter = 'all';
+        let filter = allowedChatTypes.size === 1
+            ? (allowedChatTypes.has(2) ? 'group' : 'private')
+            : 'all';
         let query = '';
         let disposed = false;
         let loading = true;
@@ -361,7 +370,8 @@ export function createRecallFilterEditor(options = {}) {
         layer.tabIndex = -1;
         layer.setAttribute('role', 'dialog');
         layer.setAttribute('aria-modal', 'true');
-        layer.setAttribute('aria-label', '防撤回名单');
+        const editorTitle = normalizeText(options.title) || '防撤回名单';
+        layer.setAttribute('aria-label', editorTitle);
         const themeRoot = themeSource?.closest?.('#qqnt-toolbox-settings, #qqnt-toolbox-panel');
         let textColor = '';
         if (themeRoot instanceof Element) {
@@ -374,14 +384,16 @@ export function createRecallFilterEditor(options = {}) {
         }
         const page = createElement('div', 'qqnt-toolbox-recall-filter-page');
         const header = createElement('div', 'qqnt-toolbox-recall-filter-header');
-        const title = createElement('div', 'qqnt-toolbox-recall-filter-title', '防撤回名单');
+        const title = createElement('div', 'qqnt-toolbox-recall-filter-title', editorTitle);
         header.append(title);
 
         const toolbar = createElement('div', 'qqnt-toolbox-recall-filter-toolbar');
         const search = createElement('input', 'qqnt-toolbox-recall-filter-search');
         search.type = 'search';
-        search.placeholder = '搜索群或好友';
-        search.setAttribute('aria-label', '搜索群或好友');
+        const searchPlaceholder = normalizeText(options.searchPlaceholder) ||
+            (allowedChatTypes.size === 1 && allowedChatTypes.has(2) ? '搜索群聊' : '搜索群或好友');
+        search.placeholder = searchPlaceholder;
+        search.setAttribute('aria-label', searchPlaceholder);
         const tabs = createElement('div', 'qqnt-toolbox-recall-filter-tabs');
         for (const [value, label] of [['all', '全部'], ['group', '群聊'], ['private', '好友']]) {
             const tab = createElement('button', 'qqnt-toolbox-recall-filter-tab', label);
@@ -390,13 +402,17 @@ export function createRecallFilterEditor(options = {}) {
             tab.dataset.active = String(value === filter);
             tabs.append(tab);
         }
-        toolbar.append(search, tabs);
+        toolbar.append(search);
+        if (allowedChatTypes.size > 1) {
+            toolbar.append(tabs);
+        }
         const mode = options.getMode?.();
-        const modeText = createElement('div', 'qqnt-toolbox-recall-filter-mode', mode === 'blacklist'
-            ? '所选群和好友不启用防撤回'
-            : mode === 'whitelist'
-                ? '仅所选群和好友启用防撤回'
-                : '当前为全部生效，名单将在切换模式后使用');
+        const modeText = createElement('div', 'qqnt-toolbox-recall-filter-mode',
+            normalizeText(options.modeText) || (mode === 'blacklist'
+                ? '所选群和好友不启用防撤回'
+                : mode === 'whitelist'
+                    ? '仅所选群和好友启用防撤回'
+                    : '当前为全部生效，名单将在切换模式后使用'));
         const list = createElement('div', 'qqnt-toolbox-recall-filter-list');
         const footer = createElement('div', 'qqnt-toolbox-recall-filter-footer');
         const count = createElement('div', 'qqnt-toolbox-recall-filter-count');
@@ -475,7 +491,8 @@ export function createRecallFilterEditor(options = {}) {
             try {
                 const loaded = await options.getContacts?.();
                 if (!disposed) {
-                    contacts = mergeRecallFilterContacts(loaded, selectedContacts);
+                    contacts = mergeRecallFilterContacts(loaded, selectedContacts)
+                        .filter(contact => allowedChatTypes.has(contact.chatType));
                 }
             } catch {
                 loadFailed = true;

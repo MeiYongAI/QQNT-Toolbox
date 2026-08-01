@@ -11,7 +11,7 @@ const {
     ZipReader
 } = require('@zip.js/zip.js');
 
-const DEFAULT_REPOSITORY = 'MeiYongAI/QQNT-Toolbox';
+const DEFAULT_REPOSITORY = 'SammySnake-d/QQNT-Toolbox';
 const DEFAULT_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const MAX_API_BYTES = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;

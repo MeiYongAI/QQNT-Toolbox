@@ -112,14 +112,19 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.recallPoke({ id: 'recall-poke' });
     await api.viewRecallMessages();
     await api.getRecallContacts();
+    await api.getAntiRecallStatus();
+    await api.uninstallClosedLidHelper();
     await api.getUpdateState();
     await api.checkForUpdates({ force: true });
     await api.prepareUpdate();
     await api.restartForUpdate();
     const unsubscribeUpdate = api.onUpdateStateChanged(() => {});
+    const unsubscribeAntiRecall = api.onAntiRecallStatusChanged(() => {});
     const unsubscribe = api.onConfigChanged(() => {});
-    assert.equal(runtime.listeners.length, 2);
+    assert.equal(runtime.listeners.length, 3);
     unsubscribeUpdate();
+    assert.equal(runtime.listeners.length, 2);
+    unsubscribeAntiRecall();
     assert.equal(runtime.listeners.length, 1);
     unsubscribe();
     assert.equal(runtime.listeners.length, 0);
@@ -156,6 +161,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:recall-poke',
         'qqnt-toolbox:view-recall-messages',
         'qqnt-toolbox:get-recall-contacts',
+        'qqnt-toolbox:get-anti-recall-status',
+        'qqnt-toolbox:uninstall-closed-lid-helper',
         'qqnt-toolbox:get-update-state',
         'qqnt-toolbox:check-update',
         'qqnt-toolbox:prepare-update',
