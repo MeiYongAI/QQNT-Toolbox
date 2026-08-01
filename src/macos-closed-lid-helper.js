@@ -112,9 +112,10 @@ class MacClosedLidHelper {
         this.pid = Number.isInteger(options.pid) ? options.pid : process.pid;
         this.dataDir = path.resolve(options.dataDir || path.join(os.tmpdir(), 'qqnt-toolbox-power'));
         this.execFile = options.execFile || promisify(childProcess.execFile);
+        this.pathExists = options.pathExists || fs.existsSync;
         this.requestPath = path.join(this.dataDir, `request-${this.uid}`);
         this.requested = false;
-        this.installed = fs.existsSync(HELPER_PATH) && fs.existsSync(PLIST_PATH);
+        this.installed = this.pathExists(HELPER_PATH) && this.pathExists(PLIST_PATH);
         this.lastError = '';
     }
 
@@ -167,17 +168,23 @@ class MacClosedLidHelper {
             throw new Error('closed-lid-helper-unsupported');
         }
         await fsp.mkdir(this.dataDir, { recursive: true });
-        const helperSource = path.join(this.dataDir, `${HELPER_LABEL}.sh`);
-        const plistSource = path.join(this.dataDir, `${HELPER_LABEL}.plist`);
-        await fsp.writeFile(helperSource, createHelperScript(this.uid, this.requestPath), { mode: 0o700 });
-        await fsp.writeFile(plistSource, createLaunchDaemonPlist(this.uid, this.requestPath), { mode: 0o600 });
+        const helperContent = createHelperScript(this.uid, this.requestPath);
+        const plistContent = createLaunchDaemonPlist(this.uid, this.requestPath);
+        const helperTemporaryPath = `${HELPER_PATH}.new`;
+        const plistTemporaryPath = `${PLIST_PATH}.new`;
         const command = [
             `/bin/mkdir -p ${shellQuote(STATE_DIR)}`,
             `/usr/sbin/chown root:wheel ${shellQuote(STATE_DIR)}`,
             `/bin/chmod 700 ${shellQuote(STATE_DIR)}`,
-            `/usr/bin/install -o root -g wheel -m 755 ${shellQuote(helperSource)} ${shellQuote(HELPER_PATH)}`,
-            `/usr/bin/install -o root -g wheel -m 644 ${shellQuote(plistSource)} ${shellQuote(PLIST_PATH)}`,
-            `/bin/launchctl bootout system/${HELPER_LABEL} >/dev/null 2>&1 || true`,
+            `/usr/bin/printf '%s' ${shellQuote(helperContent)} > ${shellQuote(helperTemporaryPath)}`,
+            `/usr/sbin/chown root:wheel ${shellQuote(helperTemporaryPath)}`,
+            `/bin/chmod 755 ${shellQuote(helperTemporaryPath)}`,
+            `/bin/mv -f ${shellQuote(helperTemporaryPath)} ${shellQuote(HELPER_PATH)}`,
+            `/usr/bin/printf '%s' ${shellQuote(plistContent)} > ${shellQuote(plistTemporaryPath)}`,
+            `/usr/sbin/chown root:wheel ${shellQuote(plistTemporaryPath)}`,
+            `/bin/chmod 644 ${shellQuote(plistTemporaryPath)}`,
+            `/bin/mv -f ${shellQuote(plistTemporaryPath)} ${shellQuote(PLIST_PATH)}`,
+            `(/bin/launchctl bootout system/${HELPER_LABEL} >/dev/null 2>&1 || true)`,
             `/bin/launchctl bootstrap system ${shellQuote(PLIST_PATH)}`,
             `/bin/launchctl enable system/${HELPER_LABEL}`,
             `/bin/launchctl kickstart -k system/${HELPER_LABEL}`
@@ -186,7 +193,7 @@ class MacClosedLidHelper {
             '-e',
             `do shell script "${appleScriptString(command)}" with administrator privileges`
         ]);
-        this.installed = fs.existsSync(HELPER_PATH) && fs.existsSync(PLIST_PATH);
+        this.installed = this.pathExists(HELPER_PATH) && this.pathExists(PLIST_PATH);
         if (!this.installed) {
             throw new Error('closed-lid-helper-install-not-observed');
         }
@@ -196,6 +203,9 @@ class MacClosedLidHelper {
 
     async setEnabled(enabled) {
         try {
+            if (enabled && (this.platform !== 'darwin' || !Number.isInteger(this.uid))) {
+                throw new Error('closed-lid-helper-unsupported');
+            }
             if (enabled && !this.installed) {
                 await this.install();
             }

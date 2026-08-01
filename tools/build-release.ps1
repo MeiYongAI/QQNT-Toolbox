@@ -142,6 +142,7 @@ try {
         'QQNT-Toolbox/src/anti-recall-staging.js',
         'QQNT-Toolbox/src/macos-closed-lid-helper.js',
         'QQNT-Toolbox/src/prevent-recall.js',
+        'QQNT-Toolbox/src/recall-contacts.js',
         'QQNT-Toolbox/src/recall-filter-editor.js',
         'QQNT-Toolbox/src/qq-data-root.js',
         'QQNT-Toolbox/src/recall-image-url.js',

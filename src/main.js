@@ -44,6 +44,7 @@ const {
 } = require('./anti-recall-preservation-config');
 const { AntiRecallStaging, applyAssetPath } = require('./anti-recall-staging');
 const { MacClosedLidHelper } = require('./macos-closed-lid-helper');
+const { loadRecallGroupContacts } = require('./recall-contacts');
 const {
     createRepeatMessageHandler,
     mapWithConcurrency
@@ -1286,9 +1287,7 @@ function isAntiRecallBackgroundActive(config = getConfig()) {
 
 function getMacClosedLidHelper() {
     if (!antiRecallPowerState.helper) {
-        antiRecallPowerState.helper = new MacClosedLidHelper({
-            dataDir: path.join(getPluginDataDir(), 'power-helper')
-        });
+        antiRecallPowerState.helper = new MacClosedLidHelper();
         antiRecallPowerState.helperStatus = antiRecallPowerState.helper.getStatus();
     }
     return antiRecallPowerState.helper;
@@ -1607,30 +1606,14 @@ async function getRecallBuddyContacts(browserWindow) {
     }
 }
 
-async function getRecallGroupContacts(browserWindow) {
-    const waiter = createNativeEventWaiter(browserWindow, (response, result) => {
-        const command = normalizeText(response?.cmdName || result?.cmdName);
-        return command.endsWith('KernelGroupListener/onGroupListUpdate');
-    }, 10000);
-    try {
-        const response = await qqNativeInvoke(
-            browserWindow,
-            'ntApi',
-            'nodeIKernelGroupService/getGroupList',
-            [false],
-            true,
-            8000
-        );
-        const immediate = normalizeRecallGroupContacts(response);
-        if (immediate.length) {
-            waiter.cancel();
-            return immediate;
-        }
-        return normalizeRecallGroupContacts(await waiter.promise);
-    } catch (error) {
-        waiter.cancel();
-        throw error;
-    }
+async function getRecallGroupContacts() {
+    const groupService = getQqWrapperSession()?.getGroupService?.();
+    const contacts = await loadRecallGroupContacts(groupService, { timeoutMs: 8000 });
+    recordDiagnostic('info', 'recall.group-list-loaded', {
+        source: 'wrapper',
+        contactCount: contacts.length
+    });
+    return contacts;
 }
 
 async function getRecallContactCandidates(browserWindow) {
@@ -1638,7 +1621,7 @@ async function getRecallContactCandidates(browserWindow) {
         return [];
     }
     const results = await Promise.allSettled([
-        getRecallGroupContacts(browserWindow),
+        getRecallGroupContacts(),
         getRecallBuddyContacts(browserWindow)
     ]);
     const contacts = [];

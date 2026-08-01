@@ -68,6 +68,29 @@ test('stopping a request removes the wake path so launchd can let the helper exi
     assert.equal(helper.getStatus().requested, false);
 });
 
+test('installer writes embedded helper content without asking root to read the app container', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-power-install-'));
+    let script = '';
+    const helper = new MacClosedLidHelper({
+        platform: 'darwin',
+        uid: 501,
+        pid: 100,
+        dataDir: root,
+        pathExists: () => true,
+        execFile: async (_file, args) => {
+            script = args[1];
+        }
+    });
+
+    await helper.install();
+
+    assert.match(script, /\/usr\/bin\/printf/);
+    assert.doesNotMatch(script, /\/usr\/bin\/install/);
+    assert.doesNotMatch(script, new RegExp(`${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/com\\.qqnt-toolbox\\.closed-lid\\.(?:sh|plist)`));
+    assert.match(script, /\(\/bin\/launchctl bootout system\/com\.qqnt-toolbox\.closed-lid .*\|\| true\)/);
+    assert.ok(script.indexOf('/usr/bin/printf') < script.indexOf('/bin/launchctl bootstrap'));
+});
+
 test('uninstall restores pmset only when this helper recorded an applied change', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-power-uninstall-'));
     let script = '';
