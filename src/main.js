@@ -25,6 +25,12 @@ const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const {
+    buildRecallViewerData,
+    getViewerFileUrl,
+    getViewerRemoteUrl
+} = require('./recall-viewer-data');
+const { clearRecallAccountCache } = require('./recall-cache-clear');
+const {
     RECOVERED_RECORD_ACTIONS,
     getRecallInfo,
     getRecoveredRecordAction,
@@ -42,6 +48,10 @@ const {
     normalizeAntiRecallPreservationConfig,
     normalizeReceivedFileAutoDownloadConfig
 } = require('./anti-recall-preservation-config');
+const {
+    createPreservationDownloadPayload,
+    getPreservationDownloadTimeout
+} = require('./anti-recall-native-download');
 const { AntiRecallStaging, applyAssetPath } = require('./anti-recall-staging');
 const { MacClosedLidHelper } = require('./macos-closed-lid-helper');
 const { loadRecallGroupContacts } = require('./recall-contacts');
@@ -209,6 +219,7 @@ const {
     CHANNEL_ANTI_RECALL_STATUS_CHANGED,
     CHANNEL_GET_RECALL_VIEWER_DATA,
     CHANNEL_GET_RECALL_AUDIO_PREVIEW,
+    CHANNEL_OPEN_RECALL_VIEWER_FILE,
     CHANNEL_JUMP_RECALL_MESSAGE,
     CHANNEL_GET_UPDATE_STATE,
     CHANNEL_CHECK_UPDATE,
@@ -3260,11 +3271,25 @@ function installConfigIpc() {
         return await openPreventRecallMessages(accountUin);
     });
     ipcMain.handle(CHANNEL_GET_RECALL_VIEWER_DATA, async event => {
-        const browserWindow = BrowserWindow.fromWebContents(event.sender);
-        const accountUin = await resolveRecallAccount(browserWindow);
-        return await getRecallViewerData(accountUin);
+        try {
+            const browserWindow = BrowserWindow.fromWebContents(event.sender);
+            const accountUin = await resolveRecallAccount(browserWindow);
+            return await getRecallViewerData(accountUin);
+        } catch (error) {
+            recordDiagnostic('error', 'recall.viewer-data-failed', {
+                error: error?.message || String(error)
+            });
+            throw error;
+        }
     });
     ipcMain.handle(CHANNEL_GET_RECALL_AUDIO_PREVIEW, (_event, payload) => getRecallAudioPreview(payload));
+    ipcMain.handle(CHANNEL_OPEN_RECALL_VIEWER_FILE, (event, payload) => {
+        if (!recallViewerWindow || recallViewerWindow.isDestroyed() ||
+            event.sender !== recallViewerWindow.webContents) {
+            throw new Error('Recall viewer window was not found.');
+        }
+        return openRecallViewerFile(payload);
+    });
     ipcMain.handle(CHANNEL_JUMP_RECALL_MESSAGE, (_event, payload) => jumpToRecallMessage(payload));
 }
 
@@ -5809,18 +5834,20 @@ function getRecallStateBrowserWindow(accountUin) {
     ) || null;
 }
 
-function getPreservationQueue(accountUin) {
+function getPreservationQueue(accountUin, assetKind) {
     const normalized = normalizeUin(accountUin);
-    let queue = preservationDownloadQueues.get(normalized);
+    const kind = assetKind === 'file' ? 'file' : 'image';
+    const queueKey = `${normalized}:${kind}`;
+    let queue = preservationDownloadQueues.get(queueKey);
     if (!queue) {
         queue = { active: 0, pending: [] };
-        preservationDownloadQueues.set(normalized, queue);
+        preservationDownloadQueues.set(queueKey, queue);
     }
     return queue;
 }
 
-function pumpPreservationQueue(accountUin) {
-    const queue = getPreservationQueue(accountUin);
+function pumpPreservationQueue(accountUin, assetKind) {
+    const queue = getPreservationQueue(accountUin, assetKind);
     while (queue.active < 2 && queue.pending.length) {
         const entry = queue.pending.shift();
         queue.active += 1;
@@ -5829,16 +5856,22 @@ function pumpPreservationQueue(accountUin) {
             .then(entry.resolve, entry.reject)
             .finally(() => {
                 queue.active -= 1;
-                pumpPreservationQueue(accountUin);
+                pumpPreservationQueue(accountUin, assetKind);
             });
     }
 }
 
-function enqueuePreservationTask(accountUin, run) {
+function enqueuePreservationTask(accountUin, assetKind, run, priority = false) {
     const normalized = normalizeUin(accountUin);
     return new Promise((resolve, reject) => {
-        getPreservationQueue(normalized).pending.push({ run, resolve, reject });
-        pumpPreservationQueue(normalized);
+        const pending = getPreservationQueue(normalized, assetKind).pending;
+        const entry = { run, resolve, reject };
+        if (priority) {
+            pending.unshift(entry);
+        } else {
+            pending.push(entry);
+        }
+        pumpPreservationQueue(normalized, assetKind);
     });
 }
 
@@ -5889,6 +5922,7 @@ function createRecallStaging(recallState) {
 function createRecallState(accountUin) {
     const state = {
         accountUin: normalizeUin(accountUin),
+        generation: 1,
         imageDownloads: new Map(),
         liveMessages: new Map(),
         recalledMessages: new Map(),
@@ -5941,7 +5975,7 @@ function getPreservationAssetElement(candidate, asset) {
     ) || elements[Number(asset?.elementIndex) || 0] || null;
 }
 
-async function resolvePreservationAssetSource(browserWindow, candidate, asset) {
+async function resolvePreservationAssetSource(browserWindow, candidate, asset, destinationPath = '') {
     const element = getPreservationAssetElement(candidate, asset);
     const media = asset.kind === 'image' ? element?.picElement : element?.fileElement;
     if (!element || !media) {
@@ -5963,24 +5997,64 @@ async function resolvePreservationAssetSource(browserWindow, candidate, asset) {
             existing = '';
         }
     }
+    const payload = createPreservationDownloadPayload(candidate.record, element, media, destinationPath);
+    if (!payload) {
+        throw new Error('The message asset download identity is incomplete.');
+    }
+    const identity = {
+        msgId: normalizeText(candidate.record?.msgId),
+        elementId: normalizeText(element?.elementId)
+    };
+    const item = {
+        type: asset.kind,
+        identity,
+        fileSize: expectedBytes
+    };
+    const timeoutMs = getPreservationDownloadTimeout(expectedBytes);
+    const deadline = Date.now() + timeoutMs;
+    const waiter = createNativeEventWaiter(browserWindow, (response, result) => {
+        const cmdName = normalizeText(result?.cmdName || response?.cmdName);
+        return /nodeIKernelMsgListener\/onRichMediaDownloadComplete$/i.test(cmdName) &&
+            Boolean(findInlineMediaDownloadInfo(result, item) || findInlineMediaDownloadInfo(response, item));
+    }, timeoutMs);
     try {
-        return await downloadForwardDetailMedia(
+        await qqNativeInvoke(
             browserWindow,
-            candidate.record,
-            element,
-            media,
-            asset.kind === 'image' ? 'anti-recall-image.jpg' : 'anti-recall-file.bin',
-            asset.kind === 'image' ? '.jpg' : '.bin'
+            'ntApi',
+            'nodeIKernelMsgService/downloadRichMedia',
+            payload,
+            false
         );
-    } catch (error) {
-        if (existing) {
-            recordDiagnostic('warn', 'recall.asset-native-fallback-local', {
-                kind: asset.kind,
-                error: error?.message || String(error)
-            });
-            return existing;
+        const event = await waiter.promise;
+        const info = findInlineMediaDownloadInfo(event, item);
+        if (!info) {
+            throw new Error('QQ completed a different message asset download.');
         }
-        throw error;
+        const errorCode = Number(info.fileErrCode);
+        if (Number.isFinite(errorCode) && errorCode !== 0) {
+            throw new Error(`QQ message asset download failed: ${info.fileErrMsg || errorCode}`);
+        }
+        const filePath = getAbsoluteFilePathCandidate([
+            info.filePath,
+            info.commonFileInfo?.filePath
+        ]);
+        if (!filePath) {
+            throw new Error('QQ completed the message asset download without a local path.');
+        }
+        if (destinationPath &&
+            normalizeComparablePath(path.resolve(filePath)) !== normalizeComparablePath(path.resolve(destinationPath))) {
+            throw new Error('QQ ignored the plugin-owned message asset download destination.');
+        }
+        await waitForCompletedInlineMediaFile(
+            browserWindow,
+            item,
+            filePath,
+            expectedBytes,
+            Math.max(1, deadline - Date.now())
+        );
+        return filePath;
+    } finally {
+        waiter.cancel();
     }
 }
 
@@ -6023,7 +6097,17 @@ function queuePreservationAsset(browserWindow, recallState, candidateKey, assetI
     if (active) {
         return active;
     }
-    const task = enqueuePreservationTask(recallState.accountUin, async () => {
+    const queuedCandidate = recallState.staging?.getCandidate(candidateKey);
+    const queuedAsset = queuedCandidate?.assets?.[assetId];
+    if (!queuedCandidate || !queuedAsset) {
+        return Promise.resolve(null);
+    }
+    const generation = recallState.generation;
+    const task = enqueuePreservationTask(recallState.accountUin, queuedAsset.kind, async () => {
+        if (recallState.generation !== generation ||
+            recallStates.get(recallState.accountUin) !== recallState) {
+            return { ok: false, reason: 'cache-cleared', state: 'canceled', path: '' };
+        }
         const candidate = recallState.staging?.getCandidate(candidateKey);
         const asset = candidate?.assets?.[assetId];
         if (!candidate || !asset || asset.state === 'promoted' || asset.state === 'staged') {
@@ -6046,8 +6130,22 @@ function queuePreservationAsset(browserWindow, recallState, candidateKey, assetI
             return admission;
         }
         try {
-            const sourcePath = await resolvePreservationAssetSource(browserWindow, candidate, asset);
-            const result = await recallState.staging.stageAssetFromPath(candidateKey, assetId, sourcePath);
+            const sourcePath = await resolvePreservationAssetSource(
+                browserWindow,
+                candidate,
+                asset,
+                admission.acquisitionPath
+            );
+            if (recallState.generation !== generation ||
+                recallStates.get(recallState.accountUin) !== recallState) {
+                if (recallState.staging?.isOwnedAcquisitionPath(sourcePath)) {
+                    await fs.rm(sourcePath, { recursive: true, force: true }).catch(() => {});
+                }
+                return { ok: false, reason: 'cache-cleared', state: 'canceled', path: '' };
+            }
+            const result = recallState.staging.isOwnedAcquisitionPath(sourcePath)
+                ? await recallState.staging.adoptOwnedAcquisition(candidateKey, assetId, sourcePath)
+                : await recallState.staging.stageAssetFromPath(candidateKey, assetId, sourcePath);
             syncPreservationCandidateRecord(recallState, candidateKey);
             recordDiagnostic(result.ok ? 'info' : 'warn', 'recall.asset-staged', {
                 kind: asset.kind,
@@ -6067,7 +6165,7 @@ function queuePreservationAsset(browserWindow, recallState, candidateKey, assetI
             });
             return null;
         }
-    }).finally(() => {
+    }, queuedCandidate.recalled === true).finally(() => {
         if (preservationAssetTasks.get(taskKey) === task) {
             preservationAssetTasks.delete(taskKey);
         }
@@ -6108,6 +6206,17 @@ function processAntiRecallPreservationIntake(browserWindow, context) {
         if (!preserveMessage && !fileTargets.length) {
             continue;
         }
+        const imageTargets = preserveMessage
+            ? getRecordElements(record).map((element, index) => ({ element, index }))
+                .filter(target => target.element?.picElement)
+            : [];
+        if (!imageTargets.length && !fileTargets.length) {
+            // Text-only snapshots already live in recallState.liveMessages. Keeping
+            // them out of the disk-backed asset journal avoids one synchronous file
+            // transaction per incoming chat message and prevents high-traffic accounts
+            // from stalling QQ's message renderer.
+            continue;
+        }
         const candidateKey = msgId;
         recallState.staging.observeCandidate({
             key: candidateKey,
@@ -6117,11 +6226,8 @@ function processAntiRecallPreservationIntake(browserWindow, context) {
             record
         });
         if (preserveMessage) {
-            for (const [index, element] of getRecordElements(record).entries()) {
-                const pic = element?.picElement;
-                if (!pic) {
-                    continue;
-                }
+            for (const { element, index } of imageTargets) {
+                const pic = element.picElement;
                 const assetId = `image:${normalizeText(element.elementId) || index}`;
                 recallState.staging.registerAsset(candidateKey, {
                     id: assetId,
@@ -6412,6 +6518,7 @@ function scheduleRecallImageLocalization(recallState, record) {
         return Promise.resolve(false);
     }
     const msgId = getRecallKey(record);
+    const generation = recallState.generation;
     if (!msgId) {
         return Promise.resolve(false);
     }
@@ -6431,6 +6538,15 @@ function scheduleRecallImageLocalization(recallState, record) {
         }
         return job.then(targetPath => {
             if (!targetPath) {
+                return false;
+            }
+            if (recallState.generation !== generation ||
+                recallStates.get(recallState.accountUin) !== recallState) {
+                if (recallState.staging?.isOwnedArchivePath('image', targetPath)) {
+                    return fs.rm(targetPath, { recursive: true, force: true })
+                        .catch(() => {})
+                        .then(() => false);
+                }
                 return false;
             }
             const current = recallState.liveMessages.get(msgId) || recallState.recalledMessages.get(msgId) || record;
@@ -6479,6 +6595,43 @@ function persistRecallRecord(recallState, record, allowUpdate = false) {
     }
 }
 
+function getArchivedRecallFilePath(record, element, recallState = null) {
+    const elementId = normalizeText(element?.elementId);
+    const fileElement = element?.fileElement;
+    const paths = [
+        record?.qqnt_toolbox_archived_files?.[elementId],
+        fileElement?.qqnt_toolbox_archive_path,
+        fileElement?.filePath,
+        fileElement?.sourcePath,
+        fileElement?.originPath,
+        fileElement?.localPath,
+        fileElement?.path
+    ].map(normalizeText).filter(Boolean);
+    if (!recallState?.staging) {
+        return paths[0] || '';
+    }
+    return paths.find(filePath => recallState.staging.isOwnedArchivePath('file', filePath)) || '';
+}
+
+function normalizeArchivedRecallFileStates(record, recallState) {
+    let changed = false;
+    for (const [index, element] of getRecordElements(record).entries()) {
+        if (!element?.fileElement) {
+            continue;
+        }
+        const filePath = getArchivedRecallFilePath(record, element, recallState);
+        if (!filePath) {
+            continue;
+        }
+        changed = applyAssetPath(record, {
+            kind: 'file',
+            elementIndex: index,
+            elementId: normalizeText(element.elementId)
+        }, filePath) || changed;
+    }
+    return changed;
+}
+
 function loadPersistedRecallCache(recallState) {
     if (!recallState?.accountUin) {
         return;
@@ -6513,6 +6666,7 @@ function loadPersistedRecallCache(recallState) {
             if (storedAccount && storedAccount !== recallState.accountUin) {
                 continue;
             }
+            normalizeArchivedRecallFileStates(record, recallState);
             recallState.recalledMessages.set(msgId, record);
             recallState.persistedIds.add(msgId);
         }
@@ -6555,6 +6709,7 @@ function getRecoveredRecallRecord(recallState, record, browserWindow) {
         return null;
     }
     const recovered = cloneRecallRecord(cached);
+    normalizeArchivedRecallFileStates(recovered, recallState);
     if (getConfig().interfaceTweaks.deleteBubbleSkin) {
         deleteBubbleSkinFromRecord(recovered);
     }
@@ -6589,7 +6744,9 @@ function preserveRecoveredRecallMetadata(recallState, record) {
     for (const [index, element] of getRecordElements(stored).entries()) {
         const elementId = normalizeText(element?.elementId);
         const imagePath = element?.picElement ? getPicSourcePath(element.picElement) : '';
-        const filePath = element?.fileElement ? getFileSourcePath(element.fileElement) : '';
+        const filePath = element?.fileElement
+            ? getArchivedRecallFilePath(stored, element, recallState)
+            : '';
         if (imagePath) {
             applyAssetPath(record, {
                 kind: 'image',
@@ -6662,19 +6819,22 @@ async function clearPreventRecallCache(accountUin) {
     const recallState = getRecallState(accountUin);
     const rootDirectory = path.resolve(getPreventRecallRootDir());
     const accountDirectory = path.resolve(getPreventRecallDir(accountUin));
-    if (!recallState || path.dirname(accountDirectory) !== rootDirectory) {
-        throw new Error('Invalid recall cache directory.');
-    }
-    recallState.liveMessages.clear();
-    recallState.recalledMessages.clear();
-    recallState.persistedIds.clear();
-    recallState.imageDownloads.clear();
-    recallState.staging?.clear();
-    await fs.rm(accountDirectory, { recursive: true, force: true });
-    await fs.mkdir(accountDirectory, { recursive: true });
-    await fs.writeFile(getPreventRecallCachePath(accountUin), Buffer.alloc(0));
-    recallState.staging?.initialize();
-    return { success: true };
+    const cachePath = path.resolve(getPreventRecallCachePath(accountUin));
+    const result = await clearRecallAccountCache({
+        rootDirectory,
+        accountDirectory,
+        cachePath,
+        state: recallState
+    });
+    recallStates.delete(recallState.accountUin);
+    const freshState = getRecallState(recallState.accountUin);
+    recallViewerRecordIndex.clear();
+    recordDiagnostic('info', 'recall.cache-cleared', {
+        accountUin: recallState.accountUin,
+        generation: result.generation,
+        candidateCount: freshState?.staging?.getStatus()?.candidateCount || 0
+    });
+    return result;
 }
 
 async function openPreventRecallDir(accountUin) {
@@ -6714,314 +6874,9 @@ async function getAllPreventRecallRecords(accountUin) {
         if (storedAccount && storedAccount !== recallState.accountUin) {
             continue;
         }
-        if (localizeRecallImages(recallState, record)) {
-            persistRecallRecord(recallState, record, true);
-        }
         addRecord(record);
     }
     return Array.from(recordsByKey.values());
-}
-
-function getRecallDisplayName(record) {
-    const mark = record?.qqnt_toolbox_recall || {};
-    return normalizeText(mark.origMsgSenderRemark) ||
-        normalizeText(mark.origMsgSenderMemRemark) ||
-        normalizeText(mark.origMsgSenderNick) ||
-        normalizeText(record?.sendRemarkName) ||
-        normalizeText(record?.sendMemberName) ||
-        normalizeText(record?.sendNickName) ||
-        normalizeText(record?.senderNick) ||
-        normalizeText(record?.senderUid) ||
-        normalizeText(record?.senderUin) ||
-        '未知发送者';
-}
-
-function getRecallOperatorName(record) {
-    const mark = record?.qqnt_toolbox_recall || {};
-    return normalizeText(mark.operatorRemark) ||
-        normalizeText(mark.operatorMemRemark) ||
-        normalizeText(mark.operatorNick) ||
-        '未知用户';
-}
-
-function getRecallPeerName(record) {
-    const chatType = Number(record?.chatType);
-    if (chatType === 2) {
-        return normalizeText(record?.peerName) || normalizeText(record?.peerUin) || normalizeText(record?.peerUid) || '未知群聊';
-    }
-    return normalizeText(record?.peerName) ||
-        normalizeText(record?.sendRemarkName) ||
-        normalizeText(record?.sendNickName) ||
-        normalizeText(record?.peerUin) ||
-        normalizeText(record?.peerUid) ||
-        '未知会话';
-}
-
-function getQqNumber(...values) {
-    for (const value of values) {
-        const number = normalizeText(value);
-        if (/^[1-9]\d+$/.test(number)) {
-            return number;
-        }
-    }
-    return '';
-}
-
-function getUserAvatarUrl(...values) {
-    const uin = getQqNumber(...values);
-    return uin ? `https://q.qlogo.cn/headimg_dl?dst_uin=${uin}&spec=100` : '';
-}
-
-function getRecallPeerAvatarUrl(record) {
-    const peerUin = getQqNumber(record?.peerUin, record?.peer?.peerUin, record?.peerUid);
-    if (!peerUin) {
-        return '';
-    }
-    if (Number(record?.chatType) === 2) {
-        return `https://p.qlogo.cn/gh/${peerUin}/${peerUin}/100/`;
-    }
-    return getUserAvatarUrl(peerUin);
-}
-
-function getViewerFileUrl(...values) {
-    const candidates = [];
-    const seen = new WeakSet();
-    const collect = (value, depth = 0) => {
-        if (value === undefined || value === null || depth > 2) {
-            return;
-        }
-        if (typeof value === 'string') {
-            candidates.push(value);
-            return;
-        }
-        if (ArrayBuffer.isView(value)) {
-            return;
-        }
-        if (typeof value === 'object') {
-            if (seen.has(value)) {
-                return;
-            }
-            seen.add(value);
-        }
-        if (Array.isArray(value)) {
-            value.forEach(item => collect(item, depth + 1));
-            return;
-        }
-        if (value instanceof Map) {
-            value.forEach(item => collect(item, depth + 1));
-            return;
-        }
-        if (typeof value === 'object') {
-            Object.values(value).forEach(item => collect(item, depth + 1));
-        }
-    };
-    values.forEach(value => collect(value));
-    for (const candidate of candidates) {
-        if (/^https?:\/\//i.test(candidate)) {
-            continue;
-        }
-        const filePath = normalizePathText(candidate);
-        try {
-            if (filePath && fsSync.existsSync(filePath) && fsSync.statSync(filePath).isFile()) {
-                return pathToFileURL(filePath).href;
-            }
-        } catch {
-        }
-    }
-    return '';
-}
-
-function getViewerRemoteUrl(...values) {
-    const queue = [...values];
-    const seen = new WeakSet();
-    while (queue.length) {
-        const value = queue.shift();
-        if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
-            return value;
-        }
-        if (ArrayBuffer.isView(value)) {
-            continue;
-        }
-        if (value && typeof value === 'object') {
-            if (seen.has(value)) {
-                continue;
-            }
-            seen.add(value);
-        }
-        if (Array.isArray(value)) {
-            queue.push(...value);
-        } else if (value instanceof Map) {
-            queue.push(...value.values());
-        } else if (value && typeof value === 'object') {
-            queue.push(...Object.values(value));
-        }
-    }
-    return '';
-}
-
-function getMessageContentText(value) {
-    if (value === undefined || value === null) {
-        return '';
-    }
-    const content = String(value);
-    return content === 'undefined' || content === 'null' ? '' : content;
-}
-
-function getReplyPreview(reply) {
-    const direct = getMessageContentText(reply?.sourceMsgText);
-    if (direct.trim()) {
-        return direct;
-    }
-    return (Array.isArray(reply?.sourceMsgTextElems) ? reply.sourceMsgTextElems : [])
-        .map(item => getMessageContentText(item?.textElemContent) || (item?.picElem ? '[图片]' : ''))
-        .filter(Boolean)
-        .join(' ');
-}
-
-function getArkViewerCard(arkElement) {
-    let data = {};
-    try {
-        data = JSON.parse(normalizeText(arkElement?.bytesData));
-    } catch {
-    }
-    const metadata = data?.meta && typeof data.meta === 'object'
-        ? Object.values(data.meta).find(value => value && typeof value === 'object') || {}
-        : {};
-    return {
-        type: 'card',
-        title: normalizeText(metadata.title) || normalizeText(data.prompt) || normalizeText(arkElement?.prompt) || '卡片消息',
-        subtitle: normalizeText(metadata.desc) || normalizeText(data.desc) || normalizeText(arkElement?.appName) || normalizeText(arkElement?.appView),
-        image: getViewerRemoteUrl(metadata.preview, metadata.icon)
-    };
-}
-
-async function getRecallViewerContent(record) {
-    const parts = [];
-    for (const [elementIndex, element] of getRecordElements(record).entries()) {
-        const textContent = getMessageContentText(element?.textElement?.content);
-        if (textContent) {
-            const atType = Number(element?.textElement?.atType) || 0;
-            parts.push({
-                type: atType ? 'mention' : 'text',
-                text: textContent,
-                atType,
-                atUid: normalizeText(element.textElement.atUid),
-                atNtUid: normalizeText(element.textElement.atNtUid)
-            });
-            continue;
-        }
-        if (element?.picElement) {
-            const imagePath = getPicSourcePath(element.picElement);
-            let remoteUrl = '';
-            if (!imagePath) {
-                remoteUrl = await resolveRecallImageUrl(element.picElement).catch(error => {
-                    warn('recall image URL resolution failed:', error?.message || error);
-                    return '';
-                });
-            }
-            parts.push({
-                type: 'image',
-                src: imagePath ? pathToFileURL(imagePath).href : remoteUrl,
-                name: normalizeText(element.picElement.summary) || normalizeText(element.picElement.fileName) || '图片',
-                width: Number(element.picElement.picWidth) || 0,
-                height: Number(element.picElement.picHeight) || 0
-            });
-            continue;
-        }
-        if (element?.pttElement) {
-            parts.push({
-                type: 'voice',
-                elementIndex,
-                name: normalizeText(element.pttElement.fileName) || '语音消息',
-                duration: Number(element.pttElement.duration) || 0,
-                transcript: getMessageContentText(element.pttElement.text),
-                waves: (Array.isArray(element.pttElement.waveAmplitudes) ? element.pttElement.waveAmplitudes : [])
-                    .slice(0, 36)
-                    .map(value => Math.abs(Number(value) || 0))
-            });
-            continue;
-        }
-        if (element?.fileElement) {
-            parts.push({
-                type: 'file',
-                name: normalizeText(element.fileElement.fileName) || '文件',
-                size: Number(element.fileElement.fileSize) || 0,
-                path: getViewerFileUrl(element.fileElement.filePath, element.fileElement.sourcePath)
-            });
-            continue;
-        }
-        if (element?.videoElement) {
-            parts.push({
-                type: 'video',
-                name: normalizeText(element.videoElement.fileName) || '视频',
-                size: Number(element.videoElement.fileSize) || 0,
-                duration: Number(element.videoElement.duration || element.videoElement.fileTime) || 0,
-                width: Number(element.videoElement.thumbWidth) || 0,
-                height: Number(element.videoElement.thumbHeight) || 0,
-                src: getViewerFileUrl(element.videoElement.filePath, element.videoElement.sourcePath),
-                poster: getViewerFileUrl(element.videoElement.thumbPath, element.videoElement.coverPath)
-            });
-            continue;
-        }
-        if (element?.replyElement) {
-            parts.push({
-                type: 'reply',
-                text: getReplyPreview(element.replyElement) || '[消息]',
-                sender: normalizeText(element.replyElement.senderUid) || normalizeText(element.replyElement.anonymousNickName)
-            });
-            continue;
-        }
-        if (element?.marketFaceElement) {
-            parts.push({
-                type: 'face',
-                name: normalizeText(element.marketFaceElement.faceName) || '表情',
-                src: getViewerFileUrl(
-                    element.marketFaceElement.staticFacePath,
-                    element.marketFaceElement.dynamicFacePath
-                ) || getViewerRemoteUrl(element.marketFaceElement)
-            });
-            continue;
-        }
-        if (element?.faceElement) {
-            parts.push({
-                type: 'face',
-                name: normalizeText(element.faceElement.faceName) || normalizeText(element.faceElement.faceText) || 'QQ 表情',
-                src: ''
-            });
-            continue;
-        }
-        if (element?.arkElement) {
-            parts.push(getArkViewerCard(element.arkElement));
-            continue;
-        }
-        if (element?.markdownElement) {
-            const flash = element.markdownElement.mdExtInfo?.flashTransferInfo;
-            parts.push({
-                type: 'card',
-                title: normalizeText(flash?.name) || normalizeText(element.markdownElement.mdSummary) || 'Markdown 消息',
-                subtitle: flash?.fileSize ? `${Number(flash.fileSize) || 0}` : '',
-                image: getViewerRemoteUrl(flash?.thnumbnail, flash?.thumbnail)
-            });
-            continue;
-        }
-        if (element?.multiForwardMsgElement) {
-            parts.push({
-                type: 'forward',
-                xml: normalizeText(element.multiForwardMsgElement.xmlContent),
-                name: normalizeText(element.multiForwardMsgElement.fileName)
-            });
-            continue;
-        }
-        if (element?.grayTipElement) {
-            parts.push({ type: 'notice', text: getMessageContentText(element.grayTipElement.content) || '系统消息' });
-            continue;
-        }
-        parts.push({
-            type: 'unsupported',
-            text: `暂不支持的消息类型 (${Number(element?.elementType) || 0})`
-        });
-    }
-    return { parts };
 }
 
 async function getRecallViewerData(accountUin) {
@@ -7029,56 +6884,23 @@ async function getRecallViewerData(accountUin) {
     if (!normalizedAccount) {
         throw new Error('Current QQ account was not found.');
     }
+    const startedAt = Date.now();
     const records = await getAllPreventRecallRecords(normalizedAccount);
-    const chats = new Map();
     recallViewerRecordIndex.clear();
     for (const record of records) {
-        const peerUid = normalizeText(record?.peerUid || record?.peer?.peerUid);
-        if (!peerUid) {
-            continue;
-        }
-        const chatType = Number(record?.chatType) || 0;
-        const key = `${chatType}:${peerUid}`;
-        const mark = record?.qqnt_toolbox_recall || {};
         const msgId = normalizeText(record?.msgId);
         if (msgId) {
             recallViewerRecordIndex.set(msgId, record);
         }
-        const message = {
-            msgId,
-            peerUid,
-            peerUin: normalizeText(record?.peerUin),
-            chatType,
-            sender: getRecallDisplayName(record),
-            senderUin: getQqNumber(record?.senderUin),
-            senderUid: normalizeText(record?.senderUid),
-            avatarUrl: getUserAvatarUrl(record?.senderUin),
-            operator: getRecallOperatorName(record),
-            msgTime: Number(record?.msgTime) || 0,
-            recallTime: Number(mark.recallTime || record?.recallTime) || 0,
-            ...await getRecallViewerContent(record)
-        };
-        let chat = chats.get(key);
-        if (!chat) {
-            chat = {
-                key,
-                peerUid,
-                peerUin: message.peerUin,
-                peerName: getRecallPeerName(record),
-                avatarUrl: getRecallPeerAvatarUrl(record),
-                chatType,
-                latestTime: 0,
-                messages: []
-            };
-            chats.set(key, chat);
-        }
-        chat.latestTime = Math.max(chat.latestTime, message.recallTime || message.msgTime);
-        chat.messages.push(message);
     }
-    for (const chat of chats.values()) {
-        chat.messages.sort((left, right) => (right.recallTime || right.msgTime) - (left.recallTime || left.msgTime));
-    }
-    return Array.from(chats.values()).sort((left, right) => right.latestTime - left.latestTime);
+    const chats = buildRecallViewerData(records);
+    recordDiagnostic('info', 'recall.viewer-data-loaded', {
+        accountUin: normalizedAccount,
+        recordCount: records.length,
+        chatCount: chats.length,
+        durationMs: Date.now() - startedAt
+    });
+    return chats;
 }
 
 async function getRecallAudioPreview(payload = {}) {
@@ -7095,6 +6917,23 @@ async function getRecallAudioPreview(payload = {}) {
         title: preview.title,
         duration: preview.duration
     };
+}
+
+async function openRecallViewerFile(payload = {}) {
+    const msgId = normalizeText(payload.msgId);
+    const elementIndex = Number(payload.elementIndex);
+    const record = recallViewerRecordIndex.get(msgId);
+    const fileElement = record?.elements?.[elementIndex]?.fileElement;
+    const fileUrl = getViewerFileUrl(fileElement?.filePath, fileElement?.sourcePath);
+    if (!record || !fileElement || !fileUrl) {
+        throw new Error('Archived file is unavailable.');
+    }
+    const filePath = fileURLToPath(fileUrl);
+    const reason = await shell.openPath(filePath);
+    if (reason) {
+        throw new Error(reason);
+    }
+    return { success: true };
 }
 
 function getRecallJumpWindowScore(browserWindow) {

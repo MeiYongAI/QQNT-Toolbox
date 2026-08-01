@@ -1,6 +1,6 @@
 # 评审状态
 
-overall_status: implementation_complete_pending_live_acceptance
+overall_status: implementation_complete_live_smoke_passed
 
 ## 模块
 
@@ -8,7 +8,7 @@ overall_status: implementation_complete_pending_live_acceptance
 | --- | --- | --- |
 | file-download-policy | automated | `src/anti-recall-preservation-config.js` |
 | received-file-intake | source + contract test | `processAntiRecallPreservationIntake()` |
-| file-download-runner | source complete; current QQNT live route pending | `queuePreservationAsset()` / `downloadRichMediaInVisit` |
+| file-download-runner | live-confirmed for 18.13 MB single-copy route | `queuePreservationAsset()` / `downloadRichMedia` |
 | durable-archive | automated | `src/anti-recall-staging.js` |
 | recall-image-reliability | source complete; fast-recall live pending | receipt-stage image acquisition and promotion |
 | staging-lifecycle | automated | restart, capacity, reservation, one-timer and expiry tests |
@@ -39,7 +39,7 @@ overall_status: implementation_complete_pending_live_acceptance
 
 ## 剩余实机证明
 
-- 捕获当前 QQNT 普通群文件手动下载与自动下载的请求、返回值和最终绝对路径，确认 `downloadRichMediaInVisit` 对普通文件的真实参数与完成行为。
+- 已确认当前 QQNT 的 18.13 MB 普通群文件自动下载遵守插件私有目标路径，撤回后显示原生“已下载”加红边，右键只有原生 Finder 菜单，悬浮 Finder 入口路由正确。
 - 真实验证 ZIP、JS、TXT、无扩展名、511/512 B、600 MB、下载中撤回和管理员延迟撤回。
 - 真实验证快速图片撤回、QQ 重启、容量暂停/恢复和撤回后路径回写。
 - 真实触发管理员安装 helper，并在 AC 接电关盖区间接收、撤回文字/图片/文件；同时用 `pmset`/系统日志证明没有进入 sleep，最后验证关闭、退出、崩溃和卸载恢复。

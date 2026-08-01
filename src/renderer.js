@@ -2602,7 +2602,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createActionItem(text('查看撤回消息'), text('查看当前账号的撤回数据'), 'viewRecallMessages', {
                     label: text('查看')
                 }),
-                createActionItem(text('清理撤回缓存'), text('清理当前账号的内存和本地数据'), 'clearRecallCache', {
+                createActionItem(text('清理撤回缓存'), text('清理当前账号的消息记录、图片、文件和暂存数据'), 'clearRecallCache', {
                     label: text('清理'),
                     danger: true
                 }),
@@ -3575,6 +3575,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         if (action === 'manageAutoDownloadGroups') {
             getAutoDownloadPeerEditor().open(button);
+            return;
+        }
+        if (action === 'clearRecallCache' && !window.confirm(
+            text('将永久删除当前账号的撤回消息、归档图片、归档文件和暂存数据。确定继续吗？')
+        )) {
             return;
         }
         showPanelActionFeedback(button, text('处理中'), 'pending', 0);

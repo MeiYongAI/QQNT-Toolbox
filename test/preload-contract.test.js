@@ -223,10 +223,12 @@ test('exposes the standalone recall viewer preload API', async () => {
     assert.ok(api);
     await api.getData();
     await api.getAudioPreview({ msgId: '1', elementIndex: 0 });
+    await api.openFile({ msgId: '1', elementIndex: 1 });
     await api.jumpToMessage({ msgId: '1' });
     assert.deepEqual(runtime.invocations.map(item => item[0]), [
         'qqnt-toolbox:get-recall-viewer-data',
         'qqnt-toolbox:get-recall-audio-preview',
+        'qqnt-toolbox:open-recall-viewer-file',
         'qqnt-toolbox:jump-recall-message'
     ]);
 });

@@ -14,7 +14,7 @@ const {
 function createMemoryJournal(seed = []) {
     const values = new Map(seed.map(value => [value.key, structuredClone(value)]));
     return {
-        load: () => Array.from(values.values()).map(structuredClone),
+        load: () => Array.from(values.values()).map(value => structuredClone(value)),
         write: value => values.set(value.key, structuredClone(value)),
         remove: key => values.delete(key),
         clear: () => values.clear(),
@@ -73,6 +73,25 @@ test('file journal atomically restores arbitrary message records and removes cor
     assert.deepEqual(journal.load(), []);
 });
 
+test('startup removes legacy disk candidates that do not own any staged assets', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-empty-candidates-'));
+    const journal = createMemoryJournal([{
+        key: '12345:text-only',
+        msgId: 'text-only',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+        generation: 1,
+        recalled: false,
+        record: createRecord('text-only'),
+        assets: {}
+    }]);
+    const manager = createManager(root, { journal });
+    manager.initialize();
+    assert.deepEqual(manager.listCandidates(), []);
+    assert.equal(journal.values.size, 0);
+});
+
 test('stages within capacity, pauses without eviction, and promotes by atomic rename', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-staging-'));
     const manager = createManager(root, { capacityBytes: 8 });
@@ -104,6 +123,8 @@ test('stages within capacity, pauses without eviction, and promotes by atomic re
 
     const admitted = manager.beginAssetAcquisition('12345:message-1', 'image-1');
     assert.equal(admitted.ok, true);
+    assert.equal(admitted.acquisitionPath, '');
+    assert.equal(manager.getCandidate('12345:message-1').assets['image-1'].acquisitionPath, '');
     assert.equal(manager.getStatus().reservedBytes, 0);
     const staged = await manager.stageAssetFromPath('12345:message-1', 'image-1', imageSource);
     assert.equal(staged.state, 'staged');
@@ -123,7 +144,10 @@ test('stages within capacity, pauses without eviction, and promotes by atomic re
     const direct = await manager.stageAssetFromPath('12345:message-1', 'file-1', fileSource);
     assert.equal(direct.state, 'promoted');
     assert.equal(fs.existsSync(direct.path), true);
-    assert.equal(manager.getCandidate('12345:message-1').record.elements[1].fileElement.filePath, direct.path);
+    const archivedFile = manager.getCandidate('12345:message-1').record.elements[1].fileElement;
+    assert.equal(archivedFile.filePath, direct.path);
+    assert.equal(archivedFile.qqnt_toolbox_archive_path, undefined);
+    assert.equal(manager.getCandidate('12345:message-1').record.qqnt_toolbox_archived_files['file-1'], direct.path);
     assert.equal(manager.completeCandidate('12345:message-1'), true);
 });
 
@@ -141,12 +165,14 @@ test('reserves declared file bytes before native acquisition and rejects mismatc
         id: 'file-1', kind: 'file', elementIndex: 1, elementId: 'file-1', fileName: 'sample.zip',
         expectedBytes: 8
     });
-    assert.deepEqual(manager.beginAssetAcquisition('12345:message-1', 'file-1'), {
+    const admission = manager.beginAssetAcquisition('12345:message-1', 'file-1');
+    assert.deepEqual(admission, {
         ok: true,
         reason: '',
         state: 'acquiring',
         direct: false,
-        reservedBytes: 8
+        reservedBytes: 8,
+        acquisitionPath: manager.getAcquisitionPath('12345:message-1', 'file-1')
     });
     assert.equal(manager.getStatus().reservedBytes, 8);
     const source = path.join(root, 'wrong-size.zip');
@@ -155,6 +181,169 @@ test('reserves declared file bytes before native acquisition and rejects mismatc
     assert.equal(result.reason, 'size-mismatch');
     assert.equal(manager.getStatus().reservedBytes, 0);
     assert.equal(manager.getCandidate('12345:message-1').assets['file-1'].actualBytes, 7);
+});
+
+test('adopts a plugin-owned native download without copying and promotes the same inode on recall', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-owned-acquisition-'));
+    const manager = createManager(root, { capacityBytes: 8 });
+    manager.observeCandidate({
+        key: '12345:message-1',
+        msgId: 'message-1',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        record: createRecord()
+    });
+    manager.registerAsset('12345:message-1', {
+        id: 'file-1', kind: 'file', elementIndex: 1, elementId: 'file-1', fileName: 'sample.zip',
+        expectedBytes: 8
+    });
+    const admission = manager.beginAssetAcquisition('12345:message-1', 'file-1');
+    fs.writeFileSync(admission.acquisitionPath, Buffer.alloc(8, 7));
+    const downloadedInode = fs.statSync(admission.acquisitionPath).ino;
+
+    const staged = await manager.adoptOwnedAcquisition(
+        '12345:message-1',
+        'file-1',
+        admission.acquisitionPath
+    );
+    assert.equal(staged.state, 'staged');
+    assert.equal(fs.existsSync(admission.acquisitionPath), false);
+    assert.equal(fs.statSync(staged.path).ino, downloadedInode);
+    const stagedFile = manager.getCandidate('12345:message-1').record.elements[1].fileElement;
+    assert.equal(stagedFile.filePath, staged.path);
+    assert.equal(stagedFile.qqnt_toolbox_archive_path, undefined);
+    assert.equal(manager.getCandidate('12345:message-1').record.qqnt_toolbox_archived_files['file-1'], staged.path);
+    assert.equal(stagedFile.transferStatus, 4);
+    assert.equal(stagedFile.progress, 0);
+    assert.equal(stagedFile.invalidState, 0);
+
+    const promoted = manager.promoteCandidateSync('12345:message-1').candidate.assets['file-1'];
+    assert.equal(promoted.state, 'promoted');
+    assert.equal(fs.existsSync(staged.path), false);
+    assert.equal(fs.statSync(promoted.archivePath).ino, downloadedInode);
+    const archivedFile = manager.getCandidate('12345:message-1').record.elements[1].fileElement;
+    assert.equal(archivedFile.filePath, promoted.archivePath);
+    assert.equal(archivedFile.qqnt_toolbox_archive_path, undefined);
+    assert.equal(manager.getCandidate('12345:message-1').record.qqnt_toolbox_archived_files['file-1'], promoted.archivePath);
+    assert.equal(archivedFile.transferStatus, 4);
+});
+
+test('promotes directly when recall arrives while the owned download is being adopted', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-owned-recall-race-'));
+    const manager = createManager(root, { capacityBytes: 8 });
+    manager.observeCandidate({
+        key: '12345:message-1',
+        msgId: 'message-1',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        record: createRecord()
+    });
+    manager.registerAsset('12345:message-1', {
+        id: 'file-1', kind: 'file', elementIndex: 1, elementId: 'file-1', fileName: 'sample.zip',
+        expectedBytes: 8
+    });
+    const admission = manager.beginAssetAcquisition('12345:message-1', 'file-1');
+    fs.writeFileSync(admission.acquisitionPath, Buffer.alloc(8, 9));
+    const downloadedInode = fs.statSync(admission.acquisitionPath).ino;
+    const originalRename = fs.promises.rename;
+    let recallInjected = false;
+    fs.promises.rename = async (sourcePath, targetPath) => {
+        if (!recallInjected && sourcePath === admission.acquisitionPath) {
+            recallInjected = true;
+            manager.promoteCandidateSync('12345:message-1');
+        }
+        return await originalRename(sourcePath, targetPath);
+    };
+    let result;
+    try {
+        result = await manager.adoptOwnedAcquisition(
+            '12345:message-1',
+            'file-1',
+            admission.acquisitionPath
+        );
+    } finally {
+        fs.promises.rename = originalRename;
+    }
+
+    assert.equal(recallInjected, true);
+    assert.equal(result.state, 'promoted');
+    assert.equal(result.path.startsWith(path.join(root, 'files') + path.sep), true);
+    assert.equal(fs.statSync(result.path).ino, downloadedInode);
+    assert.equal(fs.existsSync(admission.acquisitionPath), false);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'staging')).filter(name => name !== '.acquiring'), []);
+    assert.equal(manager.getStatus().usedBytes, 0);
+    const archivedFile = manager.getCandidate('12345:message-1').record.elements[1].fileElement;
+    assert.equal(archivedFile.filePath, result.path);
+    assert.equal(archivedFile.qqnt_toolbox_archive_path, undefined);
+    assert.equal(manager.getCandidate('12345:message-1').record.qqnt_toolbox_archived_files['file-1'], result.path);
+    assert.equal(archivedFile.transferStatus, 4);
+});
+
+test('rejects acquisition paths outside plugin ownership without touching the external file', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-owned-reject-'));
+    const manager = createManager(root, { capacityBytes: 8 });
+    manager.observeCandidate({
+        key: '12345:message-1', msgId: 'message-1', receivedAt: Date.now(), record: createRecord()
+    });
+    manager.registerAsset('12345:message-1', {
+        id: 'file-1', kind: 'file', elementIndex: 1, elementId: 'file-1', fileName: 'sample.zip',
+        expectedBytes: 8
+    });
+    manager.beginAssetAcquisition('12345:message-1', 'file-1');
+    const external = path.join(root, 'user-download.zip');
+    fs.writeFileSync(external, Buffer.alloc(8));
+    const result = await manager.adoptOwnedAcquisition('12345:message-1', 'file-1', external);
+    assert.equal(result.reason, 'acquisition-path-not-owned');
+    assert.equal(fs.existsSync(external), true);
+    assert.equal(manager.getStatus().reservedBytes, 0);
+});
+
+test('accepts file actions only for paths inside the plugin archive directory', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-owned-archive-path-'));
+    const manager = createManager(root);
+    const archived = path.join(root, 'files', 'sample.zip');
+    const sibling = path.join(root, 'files-other', 'sample.zip');
+    assert.equal(manager.isOwnedArchivePath('file', archived), true);
+    assert.equal(manager.isOwnedArchivePath('file', sibling), false);
+    assert.equal(manager.isOwnedArchivePath('image', archived), false);
+    assert.equal(manager.isOwnedArchivePath('file', 'sample.zip'), false);
+});
+
+test('failure, expiry, and startup sweep remove plugin-owned acquisition files', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-owned-cleanup-'));
+    let now = 1000;
+    const deferred = [];
+    const manager = createManager(root, {
+        now: () => now,
+        windowMs: 100,
+        defer: callback => deferred.push(callback)
+    });
+    manager.observeCandidate({
+        key: '12345:message-1', msgId: 'message-1', receivedAt: now, record: createRecord()
+    });
+    manager.registerAsset('12345:message-1', {
+        id: 'file-1', kind: 'file', elementIndex: 1, elementId: 'file-1', fileName: 'sample.zip',
+        expectedBytes: 8
+    });
+    const first = manager.beginAssetAcquisition('12345:message-1', 'file-1');
+    fs.writeFileSync(first.acquisitionPath, Buffer.alloc(3));
+    manager.failAssetAcquisition('12345:message-1', 'file-1', 'native-failed');
+    assert.equal(fs.existsSync(first.acquisitionPath), false);
+
+    const second = manager.beginAssetAcquisition('12345:message-1', 'file-1');
+    fs.writeFileSync(second.acquisitionPath, Buffer.alloc(3));
+    now = 1200;
+    manager.drainExpired();
+    while (deferred.length) deferred.shift()();
+    assert.equal(fs.existsSync(second.acquisitionPath), false);
+
+    const orphanRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-owned-orphan-'));
+    const orphanDir = path.join(orphanRoot, 'staging', '.acquiring');
+    fs.mkdirSync(orphanDir, { recursive: true });
+    const orphan = path.join(orphanDir, 'orphan.zip');
+    fs.writeFileSync(orphan, Buffer.alloc(1));
+    createManager(orphanRoot).initialize();
+    assert.equal(fs.existsSync(orphan), false);
 });
 
 test('capacity admission blocks before acquisition and recalled assets bypass staging capacity', () => {
