@@ -218,6 +218,8 @@ test('ships both QQ native and Toolbox entries in the initial editor catalog', a
     assert.ok(ids.has('toolbox:voice-save'));
     assert.ok(ids.has('toolbox:qr-scan'));
     assert.ok(ids.has('toolbox:poke-recall'));
+    assert.equal(ids.has('toolbox:reveal-archived-file'), false);
+    assert.equal(ids.has('toolbox:open-archived-file'), false);
     assert.ok(ids.has('qq:separator:1'));
     for (const scope of ['message', 'avatar', 'recent']) {
         assert.ok(DEFAULT_CONTEXT_MENU_ITEMS[scope].length > 0, scope);

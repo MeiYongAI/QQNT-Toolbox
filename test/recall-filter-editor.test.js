@@ -39,3 +39,10 @@ test('uses a standalone selectable page instead of inline chips', () => {
     assert.doesNotMatch(moduleSource, /qqnt-toolbox-recall-filter-(?:back|refresh)/);
     assert.doesNotMatch(moduleSource, /position:\s*absolute/);
 });
+
+test('can constrain the reusable selector to group chats only', () => {
+    assert.match(moduleSource, /allowedChatTypes/);
+    assert.match(moduleSource, /allowedChatTypes\.has\(contact\.chatType\)/);
+    assert.match(moduleSource, /allowedChatTypes\.size === 1/);
+    assert.match(moduleSource, /搜索群聊/);
+});

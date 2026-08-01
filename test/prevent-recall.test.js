@@ -141,7 +141,8 @@ test('wires selectable recall markers and a shared outline color into the render
     assert.doesNotMatch(renderer, /qqnt-toolbox-recall-filter-chip/);
     const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
     assert.match(main, /nodeIKernelBuddyService\/getBuddyListV2/);
-    assert.match(main, /nodeIKernelGroupService\/getGroupList/);
+    assert.match(main, /loadRecallGroupContacts\(groupService/);
+    assert.match(main, /getGroupService\?\.\(\)/);
     assert.match(main, /getProfileService\?\.\(\)/);
     assert.match(main, /getCoreAndBaseInfo\('nodeStore', buddyUids\)/);
     assert.match(main, /recalledMessages\.has\(msgId\)/);

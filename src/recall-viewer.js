@@ -1,5 +1,6 @@
 (() => {
     const api = window.qqntToolboxRecallViewer;
+    const chatSearch = document.getElementById('chat-search');
     const chatList = document.getElementById('chat-list');
     const messageList = document.getElementById('message-list');
     const chatTypeLabels = new Map([[1, '私'], [2, '群'], [100, '临']]);
@@ -354,7 +355,7 @@
         return voice;
     }
 
-    function createFileCard(part) {
+    function createFileCard(message, part) {
         const card = createElement('div', 'file-card');
         const copy = createElement('div', 'file-copy');
         copy.appendChild(createElement('div', 'file-title', part.name || '文件'));
@@ -362,8 +363,26 @@
         if (size) {
             copy.appendChild(createElement('div', 'file-size', size));
         }
-        const action = createElement('span', 'file-download');
-        action.setAttribute('aria-hidden', 'true');
+        const action = createElement('button', 'file-open', part.path ? '打开' : '未归档');
+        action.type = 'button';
+        action.disabled = !part.path;
+        if (part.path) {
+            action.addEventListener('click', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                action.disabled = true;
+                try {
+                    await api.openFile({
+                        msgId: message.msgId,
+                        elementIndex: part.elementIndex
+                    });
+                } catch {
+                    showToast('归档文件打开失败');
+                } finally {
+                    action.disabled = false;
+                }
+            });
+        }
         card.append(copy, action);
         return card;
     }
@@ -472,7 +491,7 @@
             return createElement('div', 'reply-preview', part.text || '[消息]');
         }
         if (part.type === 'file') {
-            return createFileCard(part);
+            return createFileCard(message, part);
         }
         if (part.type === 'video') {
             return createVideoPart(part);
@@ -590,8 +609,24 @@
             showEmpty(messageList, '请选择左侧会话');
             return;
         }
+        const query = String(chatSearch?.value || '').trim().toLocaleLowerCase();
+        const visibleChats = query ? chats.filter(chat => {
+            const searchable = [chat.peerName, chat.peerUin, chat.peerUid];
+            for (const message of chat.messages || []) {
+                searchable.push(message.sender);
+                for (const part of message.parts || []) {
+                    searchable.push(part.name, part.text, part.title);
+                }
+            }
+            return searchable.some(value => String(value || '').toLocaleLowerCase().includes(query));
+        }) : chats;
+        if (!visibleChats.length) {
+            showEmpty(chatList, '没有匹配的撤回数据');
+            showEmpty(messageList, '请调整搜索关键词');
+            return;
+        }
         const fragment = document.createDocumentFragment();
-        for (const chat of chats) {
+        for (const chat of visibleChats) {
             const button = createElement('button', 'chat-item');
             button.type = 'button';
             button.dataset.key = chat.key;
@@ -600,8 +635,15 @@
             button.appendChild(createAvatar(chat.avatarUrl, label, 'chat-avatar'));
             const copy = createElement('span', 'chat-copy');
             copy.appendChild(createElement('span', 'chat-name', label));
-            if (chat.peerUin) {
-                copy.appendChild(createElement('span', 'chat-uin', chat.peerUin));
+            const fileCount = (chat.messages || []).reduce((count, message) =>
+                count + (message.parts || []).filter(part => part.type === 'file').length, 0
+            );
+            if (chat.peerUin || fileCount) {
+                const meta = createElement('span', 'chat-uin', chat.peerUin);
+                if (fileCount) {
+                    meta.appendChild(createElement('span', 'chat-file-count', `文件 ${fileCount}`));
+                }
+                copy.appendChild(meta);
             }
             button.appendChild(copy);
             const tag = chatTypeLabels.get(Number(chat.chatType));
@@ -612,10 +654,10 @@
             fragment.appendChild(button);
         }
         chatList.replaceChildren(fragment);
-        if (selectedKey && chats.some(chat => chat.key === selectedKey)) {
+        if (selectedKey && visibleChats.some(chat => chat.key === selectedKey)) {
             selectChat(selectedKey);
         } else {
-            selectChat(chats[0].key);
+            selectChat(visibleChats[0].key);
         }
     }
 
@@ -633,5 +675,6 @@
         }
     }
 
+    chatSearch?.addEventListener('input', renderChats);
     load();
 })();

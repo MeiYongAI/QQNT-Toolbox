@@ -116,6 +116,7 @@ let handleToolboxVueComponentMount = () => {};
             messages: false,
             localStickers: false,
             preventRecall: false,
+            receivedFiles: false,
             entertainment: false,
             network: false,
             updater: false,
@@ -229,6 +230,19 @@ let handleToolboxVueComponentMount = () => {};
                 dark: '#c70000'
             }
         },
+        antiRecallPreservation: {
+            stagingWindow: { value: 24, unit: 'HOUR' },
+            stagingCapacity: { value: '5', unit: 'GB' },
+            closedLidEnabled: false
+        },
+        receivedFileAutoDownload: {
+            enabled: false,
+            groups: [],
+            sizeRange: {
+                min: { value: '0.5', unit: 'KB' },
+                max: { value: '600', unit: 'MB' }
+            }
+        },
         interfaceTweaks: {
             inlineMediaViewer: false,
             inlineMediaBackground: 'black',
@@ -275,6 +289,7 @@ let handleToolboxVueComponentMount = () => {};
         }
     };
     let currentConfig = clonePlain(DEFAULT_CONFIG);
+    let currentAntiRecallStatus = null;
     let configReady = false;
     let repeatResizeObserver = null;
     let repeatRefreshTimer = 0;
@@ -286,6 +301,7 @@ let handleToolboxVueComponentMount = () => {};
     let fakeForwardEditor = null;
     let windowShakeSending = false;
     let recallFilterEditor = null;
+    let autoDownloadPeerEditor = null;
     let autoReactionEditor = null;
     let localStickerController = null;
     let localStickerManager = null;
@@ -387,6 +403,14 @@ let handleToolboxVueComponentMount = () => {};
         };
     }
 
+    function normalizeDecimalSizeSetting(value, fallback, units) {
+        const rawValue = String(value?.value ?? '').trim();
+        const unit = String(value?.unit || '').trim().toUpperCase();
+        return /^(0|[1-9]\d*)(?:\.\d{1,3})?$/.test(rawValue) && units.includes(unit)
+            ? { value: rawValue, unit }
+            : { ...fallback };
+    }
+
     function normalizeRendererConfig(value) {
         const config = mergeConfig(value);
         config.messageTweaks.messageToImageDirectory = String(
@@ -411,6 +435,39 @@ let handleToolboxVueComponentMount = () => {};
             }
         }
         config.preventRecall.filterPeers = Array.from(peers.values());
+        const downloadGroups = new Map();
+        for (const source of Array.isArray(config.receivedFileAutoDownload.groups)
+            ? config.receivedFileAutoDownload.groups
+            : []) {
+            const peer = getRecallPeerDescriptor(source);
+            if (peer?.chatType === 2 && !downloadGroups.has(peer.key) && downloadGroups.size < 256) {
+                downloadGroups.set(peer.key, peer);
+            }
+        }
+        config.receivedFileAutoDownload.groups = Array.from(downloadGroups.values());
+        config.receivedFileAutoDownload.sizeRange = {
+            min: normalizeDecimalSizeSetting(
+                config.receivedFileAutoDownload.sizeRange?.min,
+                DEFAULT_CONFIG.receivedFileAutoDownload.sizeRange.min,
+                ['B', 'KB', 'MB', 'GB']
+            ),
+            max: normalizeDecimalSizeSetting(
+                config.receivedFileAutoDownload.sizeRange?.max,
+                DEFAULT_CONFIG.receivedFileAutoDownload.sizeRange.max,
+                ['B', 'KB', 'MB', 'GB']
+            )
+        };
+        const windowValue = Number(config.antiRecallPreservation.stagingWindow?.value);
+        const windowUnit = String(config.antiRecallPreservation.stagingWindow?.unit || '').toUpperCase();
+        config.antiRecallPreservation.stagingWindow = Number.isSafeInteger(windowValue) &&
+            ['MINUTE', 'HOUR', 'DAY'].includes(windowUnit)
+            ? { value: windowValue, unit: windowUnit }
+            : { ...DEFAULT_CONFIG.antiRecallPreservation.stagingWindow };
+        config.antiRecallPreservation.stagingCapacity = normalizeDecimalSizeSetting(
+            config.antiRecallPreservation.stagingCapacity,
+            DEFAULT_CONFIG.antiRecallPreservation.stagingCapacity,
+            ['MB', 'GB']
+        );
         const emojiIds = new Set();
         for (const value of Array.isArray(config.entertainment.autoReaction.emojiIds)
             ? config.entertainment.autoReaction.emojiIds
@@ -741,6 +798,22 @@ let handleToolboxVueComponentMount = () => {};
             });
         }
         return recallFilterEditor;
+    }
+
+    function getAutoDownloadPeerEditor() {
+        if (!autoDownloadPeerEditor) {
+            autoDownloadPeerEditor = createRecallFilterEditor({
+                title: text('自动下载群白名单'),
+                searchPlaceholder: text('搜索群聊'),
+                modeText: text('仅所选群聊中的普通文件会按大小范围进入防撤回暂存'),
+                allowedChatTypes: [2],
+                getContacts: async () => (await (getBridge()?.getRecallContacts?.() || []))
+                    .filter(contact => Number(contact?.chatType) === 2),
+                getSelected: () => currentConfig.receivedFileAutoDownload.groups,
+                save: groups => setConfigValue('receivedFileAutoDownload.groups', groups)
+            });
+        }
+        return autoDownloadPeerEditor;
     }
 
     function getAutoReactionEditor() {
@@ -1341,6 +1414,59 @@ let handleToolboxVueComponentMount = () => {};
     cursor: default;
     opacity: .58;
 }
+#${PANEL_ID} .qqnt-toolbox-range-controls,
+#${PANEL_ID} .qqnt-toolbox-size-control {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+#${PANEL_ID} .qqnt-toolbox-range-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+#${PANEL_ID} .qqnt-toolbox-size-input,
+#${PANEL_ID} .qqnt-toolbox-size-unit {
+    height: 28px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .22)));
+    border-radius: 6px;
+    outline: 0;
+    color: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    background: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .12)));
+    font: inherit;
+    font-size: 12px;
+}
+#${PANEL_ID} .qqnt-toolbox-size-input {
+    width: 58px;
+    padding: 0 6px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    user-select: text;
+}
+#${PANEL_ID} .qqnt-toolbox-size-unit {
+    min-width: 58px;
+    padding: 0 4px;
+}
+#${PANEL_ID} .qqnt-toolbox-size-input:focus,
+#${PANEL_ID} .qqnt-toolbox-size-unit:focus {
+    border-color: var(--brand_standard, var(--brand-primary, #2f6bff));
+}
+#${PANEL_ID} .qqnt-toolbox-item[data-invalid="true"] .qqnt-toolbox-size-input,
+#${PANEL_ID} .qqnt-toolbox-item[data-invalid="true"] .qqnt-toolbox-size-unit {
+    border-color: #e5484d;
+}
+#${PANEL_ID} .qqnt-toolbox-item[data-invalid="true"] .qqnt-toolbox-item-meta {
+    color: #e5484d;
+}
+#${PANEL_ID} .qqnt-toolbox-size-input:disabled,
+#${PANEL_ID} .qqnt-toolbox-size-unit:disabled {
+    cursor: default;
+    opacity: .58;
+}
+#${PANEL_ID} .qqnt-toolbox-range-separator {
+    color: var(--text-secondary, var(--text-02, #6b7280));
+}
 #${PANEL_ID} .qqnt-toolbox-shortcut-button {
     flex: none;
     min-width: 96px;
@@ -1903,6 +2029,99 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return item;
     }
 
+    function createCompositeInput(valueRole, unitRole, units, options = {}) {
+        const control = createElement('div', 'qqnt-toolbox-size-control');
+        const input = createElement('input', 'qqnt-toolbox-size-input');
+        input.type = 'text';
+        input.inputMode = options.integer ? 'numeric' : 'decimal';
+        input.maxLength = String(options.maxLength || 12);
+        input.dataset.valueRole = valueRole;
+        input.setAttribute('aria-label', options.label || valueRole);
+        const select = createElement('select', 'qqnt-toolbox-size-unit');
+        select.dataset.unitRole = unitRole;
+        select.setAttribute('aria-label', `${options.label || valueRole}单位`);
+        for (const unit of units) {
+            const option = createElement('option', '', options.labels?.[unit] || unit);
+            option.value = unit;
+            select.append(option);
+        }
+        control.append(input, select);
+        return control;
+    }
+
+    function createFileSizeRangeItem() {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.fileSizeRangeItem = 'true';
+        applyItemOptions(item, { requires: 'receivedFileAutoDownload.enabled' });
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(
+            createElement('div', 'qqnt-toolbox-item-name', text('文件大小范围')),
+            createElement('div', 'qqnt-toolbox-item-meta', text('闭区间，默认 0.5 KB ～ 600 MB'))
+        );
+        const controls = createElement('div', 'qqnt-toolbox-range-controls');
+        controls.append(
+            createCompositeInput('file-min-value', 'file-min-unit', ['B', 'KB', 'MB', 'GB'], {
+                label: text('文件下限')
+            }),
+            createElement('span', 'qqnt-toolbox-range-separator', '—'),
+            createCompositeInput('file-max-value', 'file-max-unit', ['B', 'KB', 'MB', 'GB'], {
+                label: text('文件上限')
+            })
+        );
+        item.append(itemMain, controls);
+        return item;
+    }
+
+    function createStagingWindowItem() {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.stagingWindowItem = 'true';
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(
+            createElement('div', 'qqnt-toolbox-item-name', text('防撤回保护窗口')),
+            createElement('div', 'qqnt-toolbox-item-meta', text('消息、图片和文件共用，范围 5 分钟～30 天'))
+        );
+        item.append(itemMain, createCompositeInput(
+            'staging-window-value',
+            'staging-window-unit',
+            ['MINUTE', 'HOUR', 'DAY'],
+            {
+                integer: true,
+                label: text('保护窗口'),
+                labels: { MINUTE: text('分钟'), HOUR: text('小时'), DAY: text('天') }
+            }
+        ));
+        return item;
+    }
+
+    function createStagingCapacityItem() {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.stagingCapacityItem = 'true';
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(
+            createElement('div', 'qqnt-toolbox-item-name', text('暂存总容量')),
+            createElement('div', 'qqnt-toolbox-item-meta', text('每账号默认 5 GB；满额暂停，不淘汰保护期内资产'))
+        );
+        item.append(itemMain, createCompositeInput(
+            'staging-capacity-value',
+            'staging-capacity-unit',
+            ['MB', 'GB'],
+            { label: text('暂存总容量') }
+        ));
+        return item;
+    }
+
+    function createAntiRecallStatusItem() {
+        const item = createElement('div', 'qqnt-toolbox-item');
+        item.dataset.antiRecallStatusItem = 'true';
+        const itemMain = createElement('div', 'qqnt-toolbox-item-main');
+        itemMain.append(
+            createElement('div', 'qqnt-toolbox-item-name', text('后台与暂存状态')),
+            createElement('div', 'qqnt-toolbox-item-meta', text('正在读取'))
+        );
+        item.append(itemMain);
+        return item;
+    }
+
     function createShortcutItem(name, meta, configPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.configPath = configPath;
@@ -2383,10 +2602,47 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createActionItem(text('查看撤回消息'), text('查看当前账号的撤回数据'), 'viewRecallMessages', {
                     label: text('查看')
                 }),
-                createActionItem(text('清理撤回缓存'), text('清理当前账号的内存和本地数据'), 'clearRecallCache', {
+                createActionItem(text('清理撤回缓存'), text('清理当前账号的消息记录、图片、文件和暂存数据'), 'clearRecallCache', {
                     label: text('清理'),
                     danger: true
-                })
+                }),
+                createStagingWindowItem(),
+                createStagingCapacityItem(),
+                createSwitchItem(
+                    text('接电关盖继续运行'),
+                    text('macOS 首次开启需要管理员授权；关闭、退出或卸载时恢复系统设置'),
+                    'antiRecallPreservation.closedLidEnabled'
+                ),
+                createActionItem(
+                    text('卸载关盖 helper'),
+                    text('停止关盖模式并移除系统 helper，恢复安装前设置'),
+                    'uninstallClosedLidHelper',
+                    { label: text('卸载'), danger: true }
+                ),
+                createAntiRecallStatusItem()
+            ]),
+            createSection('receivedFiles', text('群文件防撤回下载'), [
+                createSwitchItem(
+                    text('启用文件自动下载'),
+                    text('仅处理实时收到的白名单群普通文件'),
+                    'receivedFileAutoDownload.enabled'
+                ),
+                createActionItem(
+                    text('群白名单'),
+                    text('未选择群时不会下载'),
+                    'manageAutoDownloadGroups',
+                    {
+                        label: text('管理'),
+                        requires: 'receivedFileAutoDownload.enabled'
+                    }
+                ),
+                createFileSizeRangeItem(),
+                createActionItem(
+                    text('打开防撤回归档'),
+                    text('撤回后的图片和文件一直保留到手动清理'),
+                    'openRecallDir',
+                    { label: text('打开') }
+                )
             ]),
             createSection('entertainment', text('娱乐互动'), [
                 createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),
@@ -2638,6 +2894,247 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         return tail ? `…\\${tail}` : `…${filePath.slice(-38)}`;
     }
 
+    function parseExactBytesDraft(value, unit, allowedUnits) {
+        const textValue = String(value || '').trim();
+        const normalizedUnit = String(unit || '').toUpperCase();
+        const factors = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+        const match = textValue.match(/^(0|[1-9]\d*)(?:\.(\d{1,3}))?$/);
+        if (!match || !allowedUnits.includes(normalizedUnit)) {
+            return null;
+        }
+        const fraction = match[2] || '';
+        const scale = 10n ** BigInt(fraction.length);
+        const numerator = BigInt(match[1]) * scale + BigInt(fraction || '0');
+        const byteNumerator = numerator * BigInt(factors[normalizedUnit]);
+        if (byteNumerator % scale !== 0n) {
+            return null;
+        }
+        const bytes = byteNumerator / scale;
+        return bytes <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(bytes) : null;
+    }
+
+    function setCompositeValue(root, valueRole, unitRole, setting) {
+        const input = root.querySelector(`[data-value-role="${valueRole}"]`);
+        const select = root.querySelector(`[data-unit-role="${unitRole}"]`);
+        if (input && document.activeElement !== input) {
+            input.value = String(setting?.value ?? '');
+        }
+        if (select) {
+            select.value = String(setting?.unit || '');
+        }
+    }
+
+    function formatByteCount(value) {
+        const bytes = Math.max(0, Number(value) || 0);
+        for (const [unit, factor] of [['GB', 1024 ** 3], ['MB', 1024 ** 2], ['KB', 1024]]) {
+            if (bytes >= factor) {
+                return `${(bytes / factor).toFixed(bytes % factor ? 1 : 0)} ${unit}`;
+            }
+        }
+        return `${bytes} B`;
+    }
+
+    function updateAntiRecallConfigUi(panel) {
+        const rangeItem = panel.querySelector('.qqnt-toolbox-item[data-file-size-range-item="true"]');
+        if (rangeItem) {
+            const disabled = !areRequirementsEnabled(rangeItem.dataset.requires) ||
+                (!configReady && Boolean(getBridge()));
+            rangeItem.dataset.disabled = String(disabled);
+            setCompositeValue(
+                rangeItem,
+                'file-min-value',
+                'file-min-unit',
+                currentConfig.receivedFileAutoDownload.sizeRange.min
+            );
+            setCompositeValue(
+                rangeItem,
+                'file-max-value',
+                'file-max-unit',
+                currentConfig.receivedFileAutoDownload.sizeRange.max
+            );
+            rangeItem.querySelectorAll('input, select').forEach(control => {
+                control.disabled = disabled;
+            });
+            if (rangeItem.dataset.invalid !== 'true') {
+                const meta = rangeItem.querySelector('.qqnt-toolbox-item-meta');
+                if (meta) {
+                    const range = currentConfig.receivedFileAutoDownload.sizeRange;
+                    meta.textContent = `${range.min.value} ${range.min.unit} ～ ${range.max.value} ${range.max.unit}（闭区间）`;
+                }
+            }
+        }
+        const windowItem = panel.querySelector('.qqnt-toolbox-item[data-staging-window-item="true"]');
+        if (windowItem) {
+            setCompositeValue(
+                windowItem,
+                'staging-window-value',
+                'staging-window-unit',
+                currentConfig.antiRecallPreservation.stagingWindow
+            );
+            if (windowItem.dataset.invalid !== 'true') {
+                const labels = { MINUTE: text('分钟'), HOUR: text('小时'), DAY: text('天') };
+                const setting = currentConfig.antiRecallPreservation.stagingWindow;
+                const meta = windowItem.querySelector('.qqnt-toolbox-item-meta');
+                if (meta) {
+                    meta.textContent = `当前 ${setting.value} ${labels[setting.unit] || setting.unit}；消息、图片和文件共用`;
+                }
+            }
+        }
+        const capacityItem = panel.querySelector('.qqnt-toolbox-item[data-staging-capacity-item="true"]');
+        if (capacityItem) {
+            setCompositeValue(
+                capacityItem,
+                'staging-capacity-value',
+                'staging-capacity-unit',
+                currentConfig.antiRecallPreservation.stagingCapacity
+            );
+            if (capacityItem.dataset.invalid !== 'true') {
+                const meta = capacityItem.querySelector('.qqnt-toolbox-item-meta');
+                const staging = currentAntiRecallStatus?.staging;
+                const occupied = Math.max(0, Number(staging?.usedBytes) || 0) +
+                    Math.max(0, Number(staging?.reservedBytes) || 0);
+                const configured = parseExactBytesDraft(
+                    currentConfig.antiRecallPreservation.stagingCapacity.value,
+                    currentConfig.antiRecallPreservation.stagingCapacity.unit,
+                    ['MB', 'GB']
+                );
+                if (meta) {
+                    meta.textContent = configured < occupied
+                        ? `当前占用 ${formatByteCount(occupied)}，新容量更低时暂停新任务但不删除已有资产`
+                        : text('每账号独立；满额暂停，不淘汰保护期内资产');
+                }
+            }
+        }
+        const groupItem = panel.querySelector('.qqnt-toolbox-item[data-action="manageAutoDownloadGroups"]');
+        const groupMeta = groupItem?.querySelector('.qqnt-toolbox-item-meta');
+        if (groupMeta) {
+            const count = currentConfig.receivedFileAutoDownload.groups.length;
+            groupMeta.textContent = count ? `已选择 ${count} 个群` : text('未选择群，当前不会下载');
+        }
+        const closedLidStatus = currentAntiRecallStatus?.power?.closedLid;
+        const closedLidItem = panel.querySelector(
+            '.qqnt-toolbox-item[data-config-path="antiRecallPreservation.closedLidEnabled"]'
+        );
+        if (closedLidItem && closedLidStatus?.supported === false) {
+            closedLidItem.dataset.disabled = 'true';
+            const switchButton = closedLidItem.querySelector('.qqnt-toolbox-switch');
+            if (switchButton) {
+                switchButton.disabled = true;
+            }
+            const meta = closedLidItem.querySelector('.qqnt-toolbox-item-meta');
+            if (meta) {
+                meta.textContent = text('仅 macOS 支持接电关盖 helper');
+            }
+        }
+        const uninstallItem = panel.querySelector('.qqnt-toolbox-item[data-action="uninstallClosedLidHelper"]');
+        const uninstallButton = uninstallItem?.querySelector('.qqnt-toolbox-action');
+        if (uninstallItem && uninstallButton && !panelActionFeedbackTimers.has(uninstallButton)) {
+            const canUninstall = closedLidStatus?.supported !== false && closedLidStatus?.installed === true;
+            uninstallItem.dataset.disabled = String(!canUninstall);
+            uninstallButton.disabled = !canUninstall;
+        }
+        const statusItem = panel.querySelector('.qqnt-toolbox-item[data-anti-recall-status-item="true"]');
+        const statusMeta = statusItem?.querySelector('.qqnt-toolbox-item-meta');
+        if (statusMeta) {
+            const staging = currentAntiRecallStatus?.staging;
+            const power = currentAntiRecallStatus?.power;
+            const pieces = [];
+            if (staging) {
+                pieces.push(
+                    `${formatByteCount(staging.usedBytes)} + 预留 ${formatByteCount(staging.reservedBytes)} / ` +
+                    `${formatByteCount(staging.capacityBytes)}`
+                );
+                pieces.push(`${staging.candidateCount || 0} 条候选`);
+                if (staging.blockedCount) {
+                    pieces.push(`${staging.blockedCount} 个因容量暂停`);
+                }
+                if (staging.nextExpiryAt) {
+                    pieces.push(`最近到期 ${new Date(staging.nextExpiryAt).toLocaleString()}`);
+                }
+            }
+            pieces.push(power?.blockerActive ? text('空闲防睡眠已启用') : text('空闲防睡眠未启用'));
+            if (currentConfig.antiRecallPreservation.closedLidEnabled) {
+                const closedLid = power?.closedLid;
+                if (closedLid?.requested) {
+                    pieces.push(text('接电关盖 helper 已请求运行'));
+                } else if (closedLid?.lastError === 'closed-lid-helper-install-required') {
+                    pieces.push(text('关盖 helper 等待管理员安装'));
+                } else if (closedLid?.lastError === 'closed-lid-helper-unsupported') {
+                    pieces.push(text('当前系统不支持接电关盖 helper'));
+                } else if (closedLid?.lastError) {
+                    pieces.push(`${text('关盖 helper 错误')}：${closedLid.lastError}`);
+                } else if (closedLid?.installed) {
+                    pieces.push(text('关盖 helper 已安装，等待防撤回任务'));
+                } else {
+                    pieces.push(text('关盖 helper 未运行'));
+                }
+            }
+            statusMeta.textContent = pieces.join(' · ');
+        }
+    }
+
+    async function commitFileSizeRange(panel) {
+        const item = panel.querySelector('.qqnt-toolbox-item[data-file-size-range-item="true"]');
+        if (!item) {
+            return;
+        }
+        const read = role => item.querySelector(`[data-value-role="${role}"]`)?.value.trim();
+        const unit = role => item.querySelector(`[data-unit-role="${role}"]`)?.value;
+        const next = {
+            min: { value: read('file-min-value'), unit: unit('file-min-unit') },
+            max: { value: read('file-max-value'), unit: unit('file-max-unit') }
+        };
+        const minBytes = parseExactBytesDraft(next.min.value, next.min.unit, ['B', 'KB', 'MB', 'GB']);
+        const maxBytes = parseExactBytesDraft(next.max.value, next.max.unit, ['B', 'KB', 'MB', 'GB']);
+        const valid = Number.isSafeInteger(minBytes) && minBytes >= 1 &&
+            Number.isSafeInteger(maxBytes) && maxBytes >= minBytes && maxBytes <= 600 * 1024 ** 2;
+        const meta = item.querySelector('.qqnt-toolbox-item-meta');
+        if (!valid) {
+            item.dataset.invalid = 'true';
+            if (meta) {
+                meta.textContent = text('范围非法：必须精确到整数 B，且 1 B ≤ 下限 ≤ 上限 ≤ 600 MB');
+            }
+            return;
+        }
+        delete item.dataset.invalid;
+        await setConfigValue('receivedFileAutoDownload.sizeRange', next);
+    }
+
+    async function commitStagingWindow(panel) {
+        const item = panel.querySelector('.qqnt-toolbox-item[data-staging-window-item="true"]');
+        const value = Number(item?.querySelector('[data-value-role="staging-window-value"]')?.value.trim());
+        const unit = item?.querySelector('[data-unit-role="staging-window-unit"]')?.value;
+        const factors = { MINUTE: 60 * 1000, HOUR: 60 * 60 * 1000, DAY: 24 * 60 * 60 * 1000 };
+        const milliseconds = Number.isSafeInteger(value) ? value * (factors[unit] || 0) : 0;
+        if (!item || milliseconds < 5 * 60 * 1000 || milliseconds > 30 * 24 * 60 * 60 * 1000) {
+            item?.setAttribute('data-invalid', 'true');
+            const meta = item?.querySelector('.qqnt-toolbox-item-meta');
+            if (meta) {
+                meta.textContent = text('保护窗口非法：必须是整数，换算后范围为 5 分钟～30 天');
+            }
+            return;
+        }
+        delete item.dataset.invalid;
+        await setConfigValue('antiRecallPreservation.stagingWindow', { value, unit });
+    }
+
+    async function commitStagingCapacity(panel) {
+        const item = panel.querySelector('.qqnt-toolbox-item[data-staging-capacity-item="true"]');
+        const value = item?.querySelector('[data-value-role="staging-capacity-value"]')?.value.trim();
+        const unit = item?.querySelector('[data-unit-role="staging-capacity-unit"]')?.value;
+        const bytes = parseExactBytesDraft(value, unit, ['MB', 'GB']);
+        if (!item || !Number.isSafeInteger(bytes) || bytes <= 0) {
+            item?.setAttribute('data-invalid', 'true');
+            const meta = item?.querySelector('.qqnt-toolbox-item-meta');
+            if (meta) {
+                meta.textContent = text('容量非法：仅支持 MB/GB，最多三位小数且必须精确到整数 B');
+            }
+            return;
+        }
+        delete item.dataset.invalid;
+        await setConfigValue('antiRecallPreservation.stagingCapacity', { value, unit });
+    }
+
     function updateConfigUi(panel = document.getElementById(PANEL_ID)) {
         if (!panel) {
             return;
@@ -2779,6 +3276,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 meta.title = directory;
             }
         });
+        updateAntiRecallConfigUi(panel);
         updatePluginUpdaterUi(panel);
         updateGroupUi(panel);
     }
@@ -2929,6 +3427,21 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             setConfigBoolean(configPath, item?.dataset.inverted === 'true' ? !nextChecked : nextChecked);
         });
         panel.addEventListener('change', event => {
+            const composite = event.target.closest?.(
+                '.qqnt-toolbox-item[data-file-size-range-item="true"], ' +
+                '.qqnt-toolbox-item[data-staging-window-item="true"], ' +
+                '.qqnt-toolbox-item[data-staging-capacity-item="true"]'
+            );
+            if (composite && panel.contains(composite)) {
+                if (composite.dataset.fileSizeRangeItem === 'true') {
+                    commitFileSizeRange(panel);
+                } else if (composite.dataset.stagingWindowItem === 'true') {
+                    commitStagingWindow(panel);
+                } else {
+                    commitStagingCapacity(panel);
+                }
+                return;
+            }
             const numberInput = event.target.closest?.('.qqnt-toolbox-number-input[data-config-path]');
             if (numberInput && panel.contains(numberInput) && !numberInput.disabled) {
                 const fallback = Number(getByPath(DEFAULT_CONFIG, numberInput.dataset.configPath)) || 1;
@@ -2961,6 +3474,19 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             setConfigValue(colorInput.dataset.configPath, normalizeColorHex(colorInput.value, fallback));
         });
         panel.addEventListener('input', event => {
+            const sizeInput = event.target.closest?.('.qqnt-toolbox-size-input[data-value-role]');
+            if (sizeInput && panel.contains(sizeInput) && !sizeInput.disabled) {
+                const integer = sizeInput.dataset.valueRole === 'staging-window-value';
+                const normalized = integer
+                    ? sizeInput.value.replace(/\D/g, '').slice(0, 5)
+                    : sizeInput.value.replace(/[^\d.]/g, '')
+                        .replace(/^(\d*\.?\d{0,3}).*$/, '$1')
+                        .slice(0, 12);
+                if (sizeInput.value !== normalized) {
+                    sizeInput.value = normalized;
+                }
+                return;
+            }
             const numberInput = event.target.closest?.('.qqnt-toolbox-number-input[data-config-path]');
             if (!numberInput || !panel.contains(numberInput) || numberInput.disabled) {
                 return;
@@ -3003,7 +3529,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             }
             const input = event.target.closest?.(
                 '.qqnt-toolbox-password-input[data-config-path], .qqnt-toolbox-text-input[data-config-path], ' +
-                '.qqnt-toolbox-number-input[data-config-path]'
+                '.qqnt-toolbox-number-input[data-config-path], .qqnt-toolbox-size-input[data-value-role]'
             );
             if (input && event.key === 'Enter') {
                 input.blur();
@@ -3047,6 +3573,15 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             getMessageImageManager().open(button);
             return;
         }
+        if (action === 'manageAutoDownloadGroups') {
+            getAutoDownloadPeerEditor().open(button);
+            return;
+        }
+        if (action === 'clearRecallCache' && !window.confirm(
+            text('将永久删除当前账号的撤回消息、归档图片、归档文件和暂存数据。确定继续吗？')
+        )) {
+            return;
+        }
         showPanelActionFeedback(button, text('处理中'), 'pending', 0);
         try {
             let result = null;
@@ -3069,6 +3604,12 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 result = await bridge?.clearRecallCache?.();
             } else if (action === 'manageRecallFilterPeers') {
                 getRecallFilterEditor().open(button);
+            } else if (action === 'uninstallClosedLidHelper') {
+                if (typeof bridge?.uninstallClosedLidHelper !== 'function') {
+                    throw new Error('The closed-lid helper bridge is unavailable.');
+                }
+                result = await bridge.uninstallClosedLidHelper();
+                currentAntiRecallStatus = result;
             } else if (action === 'editContextMenuOrder') {
                 getContextMenuOrderController().openEditor();
             } else if (action === 'chooseMessageImageDirectory') {
@@ -3124,6 +3665,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 openDiagnosticDir: text('已打开'),
                 clearDiagnosticLog: text('已清空'),
                 clearRecallCache: text('已清理'),
+                uninstallClosedLidHelper: text('已卸载'),
                 chooseMessageImageDirectory: text('已选择'),
                 checkPluginUpdate: result?.status === 'available' ? text('有更新') : text('已检查'),
                 preparePluginUpdate: result?.status === 'restarting' ? text('正在重启') : text('已下载')
@@ -7402,6 +7944,29 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         });
     }
 
+    async function loadAntiRecallStatus() {
+        const bridge = await waitForBridge();
+        if (typeof bridge?.getAntiRecallStatus !== 'function') {
+            return;
+        }
+        try {
+            currentAntiRecallStatus = await bridge.getAntiRecallStatus();
+            refreshConfigViews();
+        } catch {
+        }
+    }
+
+    function subscribeAntiRecallStatus() {
+        const bridge = getBridge();
+        if (typeof bridge?.onAntiRecallStatusChanged !== 'function') {
+            return;
+        }
+        bridge.onAntiRecallStatusChanged(status => {
+            currentAntiRecallStatus = status;
+            refreshConfigViews();
+        });
+    }
+
     async function loadUpdateState() {
         const bridge = await waitForBridge();
         if (typeof bridge?.getUpdateState !== 'function') {
@@ -7429,7 +7994,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (!(view instanceof HTMLElement)) {
             return;
         }
-        await Promise.all([loadConfig(), injectSettingsStyle()]);
+        await Promise.all([loadConfig(), loadAntiRecallStatus(), injectSettingsStyle()]);
         stopShortcutCapture();
         document.getElementById(SETTINGS_ID)?.remove();
         createPanel({ settings: true, mount: view });
@@ -7656,6 +8221,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     getMessageImageController().install();
 
     loadConfig().then(subscribeConfig).catch(() => {});
+    loadAntiRecallStatus().then(subscribeAntiRecallStatus).catch(() => {});
     loadUpdateState().then(subscribeUpdateState).catch(() => {});
     installChatToolbarHoverBlocker();
     installProfileCardHoverBlocker();
