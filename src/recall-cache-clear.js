@@ -28,7 +28,7 @@ async function clearRecallAccountCache({
     state.recalledMessages?.clear();
     state.persistedIds?.clear();
     state.imageDownloads?.clear();
-    state.staging?.clear();
+    await state.staging?.clear();
     state.staging?.close();
 
     await fs.rm(account, { recursive: true, force: true });

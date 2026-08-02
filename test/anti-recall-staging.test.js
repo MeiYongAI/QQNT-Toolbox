@@ -475,6 +475,183 @@ test('recovers staged candidates and accounts actual bytes after restart', async
     assert.equal(recovered[0].record.elements[0].picElement.filePath.endsWith('.png'), true);
 });
 
+test('startup rejects external managed paths and rewrites the recovered journal state', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-journal-paths-'));
+    const externalStaging = path.join(root, 'outside-staging.png');
+    const externalArchive = path.join(root, 'outside-archive.zip');
+    fs.writeFileSync(externalStaging, Buffer.from('staging-external'));
+    fs.writeFileSync(externalArchive, Buffer.from('archive-external'));
+    const key = '12345:external-paths';
+    const journal = createMemoryJournal([{
+        key,
+        msgId: 'external-paths',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: true,
+        record: createRecord('external-paths'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                elementIndex: 0,
+                elementId: 'image-1',
+                fileName: 'sample.png',
+                actualBytes: 16,
+                state: 'staged',
+                sourcePath: externalStaging,
+                stagingPath: externalStaging
+            },
+            'file-1': {
+                id: 'file-1',
+                kind: 'file',
+                elementIndex: 1,
+                elementId: 'file-1',
+                fileName: 'sample.zip',
+                actualBytes: 16,
+                state: 'promoted',
+                sourcePath: externalArchive,
+                archivePath: externalArchive
+            }
+        }
+    }]);
+    const manager = createManager(root, { journal });
+    const [recovered] = manager.initialize();
+
+    assert.equal(fs.readFileSync(externalStaging, 'utf8'), 'staging-external');
+    assert.equal(fs.readFileSync(externalArchive, 'utf8'), 'archive-external');
+    assert.equal(recovered.assets['image-1'].state, 'observed');
+    assert.equal(recovered.assets['image-1'].stagingPath, '');
+    assert.equal(recovered.assets['image-1'].actualBytes, 0);
+    assert.equal(recovered.assets['file-1'].state, 'observed');
+    assert.equal(recovered.assets['file-1'].archivePath, '');
+    assert.equal(recovered.assets['file-1'].actualBytes, 0);
+    assert.equal(journal.values.get(key).assets['image-1'].stagingPath, '');
+    assert.equal(journal.values.get(key).assets['file-1'].archivePath, '');
+    manager.close();
+});
+
+test('startup rejects a reparse point at the deterministic staging path', t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-journal-reparse-'));
+    const externalDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-journal-target-'));
+    const externalMarker = path.join(externalDirectory, 'marker.txt');
+    fs.writeFileSync(externalMarker, Buffer.from('external-marker'));
+    const key = '12345:reparse-path';
+    const candidate = {
+        key,
+        msgId: 'reparse-path',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: true,
+        record: createRecord('reparse-path'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                elementIndex: 0,
+                elementId: 'image-1',
+                fileName: 'sample.png',
+                actualBytes: 15,
+                state: 'staged',
+                sourcePath: path.join(root, 'source.png'),
+                stagingPath: ''
+            }
+        }
+    };
+    const journal = createMemoryJournal([candidate]);
+    const manager = createManager(root, { journal });
+    fs.mkdirSync(path.join(root, 'staging'), { recursive: true });
+    const asset = candidate.assets['image-1'];
+    asset.stagingPath = manager.getAssetPath(candidate, asset, false, asset.sourcePath);
+    journal.write(candidate);
+    try {
+        fs.symlinkSync(externalDirectory, asset.stagingPath, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+        t.skip(`reparse points are unavailable: ${error.code || error.message}`);
+        return;
+    }
+
+    const [recovered] = manager.initialize();
+    assert.equal(fs.readFileSync(externalMarker, 'utf8'), 'external-marker');
+    assert.equal(recovered.assets['image-1'].state, 'observed');
+    assert.equal(recovered.assets['image-1'].stagingPath, '');
+    assert.equal(fs.lstatSync(asset.stagingPath).isSymbolicLink(), true);
+    manager.close();
+});
+
+test('cleanup and promotion revalidate staging ownership before mutating files', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-managed-recheck-'));
+    const manager = createManager(root);
+    manager.initialize();
+    const externalCleanup = path.join(root, 'external-cleanup.png');
+    const externalPromotion = path.join(root, 'external-promotion.png');
+    const externalPromotedArchive = path.join(root, 'external-promoted.zip');
+    fs.writeFileSync(externalCleanup, Buffer.from('keep-cleanup'));
+    fs.writeFileSync(externalPromotion, Buffer.from('keep-promotion'));
+    fs.writeFileSync(externalPromotedArchive, Buffer.from('keep-promoted'));
+    const cleanupCandidate = {
+        key: '12345:cleanup',
+        record: createRecord('cleanup'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                fileName: 'sample.png',
+                sourcePath: externalCleanup,
+                state: 'staged',
+                stagingPath: externalCleanup,
+                actualBytes: 12
+            }
+        }
+    };
+    manager.deleteCandidateFiles(cleanupCandidate);
+    assert.equal(fs.readFileSync(externalCleanup, 'utf8'), 'keep-cleanup');
+    assert.equal(cleanupCandidate.assets['image-1'].stagingPath, '');
+
+    manager.observeCandidate({
+        key: '12345:promotion',
+        msgId: 'promotion',
+        receivedAt: Date.now(),
+        record: createRecord('promotion')
+    });
+    manager.registerAsset('12345:promotion', {
+        id: 'image-1',
+        kind: 'image',
+        elementIndex: 0,
+        elementId: 'image-1',
+        fileName: 'sample.png',
+        sourcePath: externalPromotion
+    });
+    manager.registerAsset('12345:promotion', {
+        id: 'file-1',
+        kind: 'file',
+        elementIndex: 1,
+        elementId: 'file-1',
+        fileName: 'sample.zip',
+        sourcePath: externalPromotedArchive
+    });
+    const promotionCandidate = manager.candidates.get('12345:promotion');
+    const promotionAsset = promotionCandidate.assets['image-1'];
+    const promotedArchiveAsset = promotionCandidate.assets['file-1'];
+    promotionAsset.state = 'staged';
+    promotionAsset.stagingPath = externalPromotion;
+    promotionAsset.actualBytes = 14;
+    promotedArchiveAsset.state = 'promoted';
+    promotedArchiveAsset.archivePath = externalPromotedArchive;
+    promotedArchiveAsset.actualBytes = 13;
+    const promoted = manager.promoteCandidateSync('12345:promotion');
+
+    assert.equal(fs.readFileSync(externalPromotion, 'utf8'), 'keep-promotion');
+    assert.equal(fs.readFileSync(externalPromotedArchive, 'utf8'), 'keep-promoted');
+    assert.deepEqual(promoted.pendingAssetIds, ['image-1', 'file-1']);
+    assert.equal(promoted.candidate.assets['image-1'].state, 'observed');
+    assert.equal(promoted.candidate.assets['image-1'].stagingPath, '');
+    assert.equal(promoted.candidate.assets['file-1'].state, 'observed');
+    assert.equal(promoted.candidate.assets['file-1'].archivePath, '');
+    manager.close();
+});
+
 test('ten thousand candidates still use one active timer and expire in bounded batches', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-timer-'));
     const journal = {

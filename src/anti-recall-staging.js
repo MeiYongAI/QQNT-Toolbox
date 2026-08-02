@@ -34,6 +34,23 @@ function isPathInside(directory, filePath) {
     return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
+function isSamePath(firstPath, secondPath) {
+    return path.relative(path.resolve(firstPath), path.resolve(secondPath)) === '';
+}
+
+function isDirectChildPath(directory, filePath) {
+    return isPathInside(directory, filePath) && isSamePath(path.dirname(filePath), directory);
+}
+
+function getRegularFileStat(filePath) {
+    try {
+        const stat = fs.lstatSync(filePath);
+        return stat.isFile() && !stat.isSymbolicLink() ? stat : null;
+    } catch {
+        return null;
+    }
+}
+
 function createFileCandidateJournal(directory) {
     const root = path.resolve(directory);
 
@@ -251,13 +268,16 @@ class AntiRecallStaging {
                 this.journal.remove(candidate.key);
                 continue;
             }
-            this.reconcileCandidateFiles(candidate);
+            const reconciled = this.reconcileCandidateFiles(candidate);
             if (!candidate.recalled && candidate.receivedAt + this.windowMs <= now) {
                 this.deleteCandidateFiles(candidate);
                 this.journal.remove(candidate.key);
                 continue;
             }
             this.candidates.set(candidate.key, candidate);
+            if (reconciled) {
+                this.journal.write(candidate);
+            }
             if (!candidate.recalled) {
                 this.queueExpiry(candidate);
             }
@@ -312,33 +332,65 @@ class AntiRecallStaging {
     }
 
     reconcileCandidateFiles(candidate) {
+        let changed = false;
         for (const asset of Object.values(candidate.assets)) {
             if (asset.acquisitionPath) {
-                this.removeOwnedAcquisitionFile(asset.acquisitionPath);
+                const expectedPath = this.getAcquisitionPathForAsset(candidate, asset);
+                if (isSamePath(asset.acquisitionPath, expectedPath) && getRegularFileStat(asset.acquisitionPath)) {
+                    this.removeOwnedAcquisitionFile(asset.acquisitionPath);
+                }
                 asset.acquisitionPath = '';
+                changed = true;
                 if (asset.state === 'acquiring') {
                     asset.state = 'observed';
                     asset.failureReason = '';
                 }
             }
-            if (asset.state === 'staged' && asset.stagingPath) {
-                try {
-                    const stat = fs.statSync(asset.stagingPath);
-                    if (stat.isFile()) {
-                        asset.actualBytes = stat.size;
-                        this.usedBytes += stat.size;
-                        applyAssetPath(candidate.record, asset, asset.stagingPath);
-                        continue;
-                    }
-                } catch {
+            if (asset.state === 'staged') {
+                if (asset.archivePath) {
+                    asset.archivePath = '';
+                    changed = true;
                 }
+                const stat = this.getOwnedStagingFileStat(candidate, asset, asset.stagingPath);
+                if (stat) {
+                    changed ||= asset.actualBytes !== stat.size;
+                    asset.actualBytes = stat.size;
+                    this.usedBytes += stat.size;
+                    applyAssetPath(candidate.record, asset, asset.stagingPath);
+                    continue;
+                }
+                changed = true;
                 asset.state = 'observed';
                 asset.stagingPath = '';
                 asset.actualBytes = 0;
-            } else if (asset.state === 'promoted' && asset.archivePath && fs.existsSync(asset.archivePath)) {
-                applyAssetPath(candidate.record, asset, asset.archivePath);
+                asset.failureReason = '';
+            } else if (asset.state === 'promoted') {
+                if (asset.stagingPath) {
+                    asset.stagingPath = '';
+                    changed = true;
+                }
+                const stat = this.getOwnedArchiveFileStat(candidate, asset, asset.archivePath);
+                if (stat) {
+                    changed ||= asset.actualBytes !== stat.size;
+                    asset.actualBytes = stat.size;
+                    applyAssetPath(candidate.record, asset, asset.archivePath);
+                    continue;
+                }
+                changed = true;
+                asset.state = 'observed';
+                asset.archivePath = '';
+                asset.actualBytes = 0;
+                asset.failureReason = '';
+            } else {
+                if (asset.stagingPath || asset.archivePath) {
+                    asset.stagingPath = '';
+                    asset.archivePath = '';
+                    asset.actualBytes = 0;
+                    changed = true;
+                }
             }
         }
+        return changed;
     }
 
     sweepOrphanStagingFiles() {
@@ -503,20 +555,42 @@ class AntiRecallStaging {
         if (!candidate || !asset) {
             return '';
         }
+        return this.getAcquisitionPathForAsset(candidate, asset);
+    }
+
+    getAcquisitionPathForAsset(candidate, asset) {
         const extension = path.extname(asset.fileName).slice(0, 20);
         const digest = hash(`${candidate.key}:${asset.id}:acquisition`).slice(0, 24);
         return path.join(this.acquisitionDir, `${digest}${extension}`);
     }
 
+    getOwnedStagingFileStat(candidate, asset, filePath) {
+        const normalized = normalizeText(filePath);
+        if (!normalized || !path.isAbsolute(normalized)) {
+            return null;
+        }
+        const expectedPath = this.getAssetPath(candidate, asset, false, asset.sourcePath);
+        return isSamePath(normalized, expectedPath) ? getRegularFileStat(normalized) : null;
+    }
+
+    getOwnedArchiveFileStat(candidate, asset, filePath) {
+        const normalized = normalizeText(filePath);
+        if (!normalized || !path.isAbsolute(normalized)) {
+            return null;
+        }
+        const expectedPath = this.getAssetPath(candidate, asset, true, asset.sourcePath);
+        return isSamePath(normalized, expectedPath) ? getRegularFileStat(normalized) : null;
+    }
+
     isOwnedAcquisitionPath(filePath) {
         const normalized = normalizeText(filePath);
-        return Boolean(normalized && path.isAbsolute(normalized) && isPathInside(this.acquisitionDir, normalized));
+        return Boolean(normalized && path.isAbsolute(normalized) && isDirectChildPath(this.acquisitionDir, normalized));
     }
 
     isOwnedArchivePath(kind, filePath) {
         const directory = this.archiveDirs[kind];
         const normalized = normalizeText(filePath);
-        return Boolean(directory && normalized && path.isAbsolute(normalized) && isPathInside(directory, normalized));
+        return Boolean(directory && normalized && path.isAbsolute(normalized) && isDirectChildPath(directory, normalized));
     }
 
     removeOwnedAcquisitionFile(filePath) {
@@ -555,6 +629,9 @@ class AntiRecallStaging {
     }
 
     beginAssetAcquisition(key, assetId) {
+        if (this.closed) {
+            return { ok: false, reason: 'manager-closed', state: 'canceled', direct: false };
+        }
         if (!this.initialized) {
             this.initialize();
         }
@@ -664,6 +741,9 @@ class AntiRecallStaging {
     }
 
     async stageAssetFromPath(key, assetId, sourcePath) {
+        if (this.closed) {
+            return { ok: false, reason: 'manager-closed', state: 'canceled', path: '' };
+        }
         if (!this.initialized) {
             this.initialize();
         }
@@ -788,6 +868,9 @@ class AntiRecallStaging {
     }
 
     async adoptOwnedAcquisition(key, assetId, sourcePath) {
+        if (this.closed) {
+            return { ok: false, reason: 'manager-closed', state: 'canceled', path: '' };
+        }
         if (!this.initialized) {
             this.initialize();
         }
@@ -937,10 +1020,24 @@ class AntiRecallStaging {
 
     promoteAssetSync(candidate, asset) {
         if (asset.state === 'promoted' && asset.archivePath) {
-            return { ok: true, reason: '', state: 'promoted', path: asset.archivePath };
+            if (this.getOwnedArchiveFileStat(candidate, asset, asset.archivePath)) {
+                return { ok: true, reason: '', state: 'promoted', path: asset.archivePath };
+            }
+            asset.state = 'observed';
+            asset.archivePath = '';
+            asset.actualBytes = 0;
+            asset.failureReason = '';
+            return { ok: false, reason: 'archive-path-not-owned', state: asset.state, path: '' };
         }
-        if (asset.state !== 'staged' || !asset.stagingPath || !fs.existsSync(asset.stagingPath)) {
+        if (asset.state !== 'staged' || !asset.stagingPath) {
             return { ok: false, reason: 'asset-not-staged', state: asset.state, path: '' };
+        }
+        if (!this.getOwnedStagingFileStat(candidate, asset, asset.stagingPath)) {
+            asset.state = 'observed';
+            asset.stagingPath = '';
+            asset.actualBytes = 0;
+            asset.failureReason = '';
+            return { ok: false, reason: 'staging-path-not-owned', state: asset.state, path: '' };
         }
         const previousManagedPath = asset.stagingPath;
         const targetPath = this.getAssetPath(candidate, asset, true, previousManagedPath);
@@ -969,12 +1066,16 @@ class AntiRecallStaging {
         candidate.generation += 1;
         const pendingAssetIds = [];
         for (const asset of Object.values(candidate.assets)) {
-            if (asset.state === 'staged') {
+            if (asset.state === 'staged' || asset.state === 'promoted') {
                 try {
-                    this.promoteAssetSync(candidate, asset);
+                    const result = this.promoteAssetSync(candidate, asset);
+                    if (!result.ok && asset.state !== 'promoted') {
+                        pendingAssetIds.push(asset.id);
+                    }
                 } catch (error) {
                     asset.state = 'failed';
                     asset.failureReason = normalizeText(error?.message || error) || 'promotion-failed';
+                    pendingAssetIds.push(asset.id);
                 }
             } else if (asset.state !== 'promoted') {
                 this.releaseReservation(`${candidate.key}:${asset.id}`);
@@ -1104,11 +1205,13 @@ class AntiRecallStaging {
                 asset.acquisitionPath = '';
             }
             if (asset.stagingPath) {
-                try {
-                    const size = fs.statSync(asset.stagingPath).size;
-                    fs.rmSync(asset.stagingPath, { force: true });
-                    this.usedBytes = Math.max(0, this.usedBytes - size);
-                } catch {
+                const stat = this.getOwnedStagingFileStat(candidate, asset, asset.stagingPath);
+                if (stat) {
+                    try {
+                        fs.rmSync(asset.stagingPath, { force: true });
+                        this.usedBytes = Math.max(0, this.usedBytes - stat.size);
+                    } catch {
+                    }
                 }
                 asset.stagingPath = '';
             }
@@ -1137,7 +1240,8 @@ class AntiRecallStaging {
     }
 
     notifyCapacityAvailable() {
-        if (!this.onCapacityAvailable || this.usedBytes + this.getReservedBytes() >= this.capacityBytes) {
+        if (this.closed || !this.onCapacityAvailable ||
+            this.usedBytes + this.getReservedBytes() >= this.capacityBytes) {
             return;
         }
         const blocked = [];
@@ -1208,7 +1312,9 @@ class AntiRecallStaging {
         });
     }
 
-    clear() {
+    async clear() {
+        this.close();
+        await Promise.allSettled(Array.from(this.inFlight.values()));
         for (const candidate of this.candidates.values()) {
             this.deleteCandidateFiles(candidate);
         }
@@ -1217,7 +1323,6 @@ class AntiRecallStaging {
         this.reservations.clear();
         this.journal.clear();
         this.sweepOrphanAcquisitionFiles();
-        this.scheduleNext(true);
         this.emitStatus();
     }
 
