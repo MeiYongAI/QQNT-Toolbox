@@ -3,6 +3,7 @@
 const GCHAT_IMAGE_HOST = 'https://gchat.qpic.cn';
 const NT_IMAGE_HOST = 'https://multimedia.nt.qq.com.cn';
 const DEFAULT_RKEY_ENDPOINT = 'https://rkey.furrycloud.top';
+const DEFAULT_RKEY_TIMEOUT_MS = 10000;
 
 function normalizeRkey(value) {
     return String(value || '').trim().replace(/^&?rkey=/, '');
@@ -32,10 +33,40 @@ function parseHttpUrl(value) {
     }
 }
 
+function getLegacyImageUrl(picElement) {
+    const md5 = String(picElement?.md5HexStr || picElement?.originImageMd5 || '')
+        .replace(/[^a-f0-9]/gi, '')
+        .toUpperCase();
+    return md5 ? `${GCHAT_IMAGE_HOST}/gchatpic_new/0/0-0-${md5}/0` : '';
+}
+
+function getImmediateRecallImageUrl(picElement) {
+    let parsed = null;
+    for (const candidate of collectUrlCandidates(picElement)) {
+        parsed = parseHttpUrl(candidate);
+        if (parsed) {
+            break;
+        }
+    }
+    if (!parsed) {
+        return getLegacyImageUrl(picElement);
+    }
+    const appid = parsed.searchParams.get('appid');
+    if (appid !== '1406' && appid !== '1407') {
+        return parsed.toString();
+    }
+    if (!parsed.searchParams.get('rkey')) {
+        return getLegacyImageUrl(picElement);
+    }
+    parsed.host = new URL(NT_IMAGE_HOST).host;
+    return parsed.toString();
+}
+
 function createRecallImageUrlResolver({
     fetchImpl = globalThis.fetch,
     now = Date.now,
-    rkeyEndpoint = DEFAULT_RKEY_ENDPOINT
+    rkeyEndpoint = DEFAULT_RKEY_ENDPOINT,
+    rkeyTimeoutMs = DEFAULT_RKEY_TIMEOUT_MS
 } = {}) {
     const cache = {
         privateRkey: '',
@@ -55,7 +86,15 @@ function createRecallImageUrlResolver({
             if (typeof fetchImpl !== 'function') {
                 throw new Error('Fetch is unavailable.');
             }
-            const response = await fetchImpl(rkeyEndpoint);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), rkeyTimeoutMs);
+            timeout.unref?.();
+            let response;
+            try {
+                response = await fetchImpl(rkeyEndpoint, { signal: controller.signal });
+            } finally {
+                clearTimeout(timeout);
+            }
             if (!response?.ok) {
                 throw new Error(`Rkey request failed: HTTP ${response?.status || 0}`);
             }
@@ -84,10 +123,7 @@ function createRecallImageUrlResolver({
             }
         }
         if (!parsed) {
-            const md5 = String(picElement?.md5HexStr || picElement?.originImageMd5 || '')
-                .replace(/[^a-f0-9]/gi, '')
-                .toUpperCase();
-            return md5 ? `${GCHAT_IMAGE_HOST}/gchatpic_new/0/0-0-${md5}/0` : '';
+            return getLegacyImageUrl(picElement);
         }
 
         const appid = parsed.searchParams.get('appid');
@@ -118,5 +154,6 @@ const defaultResolver = createRecallImageUrlResolver();
 
 module.exports = {
     createRecallImageUrlResolver,
+    getImmediateRecallImageUrl,
     resolveRecallImageUrl: picElement => defaultResolver.resolve(picElement)
 };

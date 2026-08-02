@@ -1,4 +1,15 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, screen, session, shell } = require('electron');
+const {
+    app,
+    BrowserWindow,
+    clipboard,
+    dialog,
+    ipcMain,
+    nativeImage,
+    powerSaveBlocker,
+    screen,
+    session,
+    shell
+} = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const os = require('os');
@@ -14,6 +25,12 @@ const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
 const { resolveRecallImageUrl } = require('./recall-image-url');
 const {
+    buildRecallViewerData,
+    getViewerFileUrl,
+    getViewerRemoteUrl
+} = require('./recall-viewer-data');
+const { clearRecallAccountCache } = require('./recall-cache-clear');
+const {
     RECOVERED_RECORD_ACTIONS,
     getRecallInfo,
     getRecoveredRecordAction,
@@ -22,6 +39,22 @@ const {
     normalizeRecallGroupContacts,
     shouldHandlePreventRecallRecord
 } = require('./prevent-recall');
+const {
+    DEFAULT_STAGING_WINDOW,
+    DEFAULT_STAGING_CAPACITY,
+    DEFAULT_FILE_SIZE_RANGE,
+    collectReceivedFileTargets,
+    getRuntimePreservationSettings,
+    normalizeAntiRecallPreservationConfig,
+    normalizeReceivedFileAutoDownloadConfig
+} = require('./anti-recall-preservation-config');
+const {
+    createPreservationDownloadPayload,
+    getPreservationDownloadTimeout
+} = require('./anti-recall-native-download');
+const { AntiRecallStaging, applyAssetPath } = require('./anti-recall-staging');
+const { MacClosedLidHelper } = require('./macos-closed-lid-helper');
+const { loadRecallGroupContacts } = require('./recall-contacts');
 const {
     createRepeatMessageHandler,
     mapWithConcurrency
@@ -181,8 +214,12 @@ const {
     CHANNEL_OPEN_RECALL_IMAGE_DIR,
     CHANNEL_VIEW_RECALL_MESSAGES,
     CHANNEL_GET_RECALL_CONTACTS,
+    CHANNEL_GET_ANTI_RECALL_STATUS,
+    CHANNEL_UNINSTALL_CLOSED_LID_HELPER,
+    CHANNEL_ANTI_RECALL_STATUS_CHANGED,
     CHANNEL_GET_RECALL_VIEWER_DATA,
     CHANNEL_GET_RECALL_AUDIO_PREVIEW,
+    CHANNEL_OPEN_RECALL_VIEWER_FILE,
     CHANNEL_JUMP_RECALL_MESSAGE,
     CHANNEL_GET_UPDATE_STATE,
     CHANNEL_CHECK_UPDATE,
@@ -360,6 +397,19 @@ const DEFAULT_CONFIG = {
             dark: '#c70000'
         }
     },
+    antiRecallPreservation: {
+        stagingWindow: { ...DEFAULT_STAGING_WINDOW },
+        stagingCapacity: { ...DEFAULT_STAGING_CAPACITY },
+        closedLidEnabled: false
+    },
+    receivedFileAutoDownload: {
+        enabled: false,
+        groups: [],
+        sizeRange: {
+            min: { ...DEFAULT_FILE_SIZE_RANGE.min },
+            max: { ...DEFAULT_FILE_SIZE_RANGE.max }
+        }
+    },
     interfaceTweaks: {
         inlineMediaViewer: false,
         inlineMediaBackground: 'black',
@@ -432,6 +482,13 @@ const localStickerCache = {
 const networkSessions = new Map();
 let localStickerDownloadPromise = null;
 const recallStates = new Map();
+const preservationAssetTasks = new Map();
+const preservationDownloadQueues = new Map();
+const antiRecallPowerState = {
+    blockerId: null,
+    helper: null,
+    helperStatus: null
+};
 let configCache = null;
 let recallViewerWindow = null;
 let mediaViewerWindow = null;
@@ -861,6 +918,16 @@ function getPreventRecallImageDir(accountUin) {
     return directory ? path.join(directory, 'images') : '';
 }
 
+function getPreventRecallFileDir(accountUin) {
+    const directory = getPreventRecallDir(accountUin);
+    return directory ? path.join(directory, 'files') : '';
+}
+
+function getPreventRecallStagingDir(accountUin) {
+    const directory = getPreventRecallDir(accountUin);
+    return directory ? path.join(directory, 'staging') : '';
+}
+
 function getConfigPath() {
     return path.join(getPluginDataDir(), 'config.json');
 }
@@ -1061,6 +1128,12 @@ function normalizeSimplifyConfig(config) {
     config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
     config.chatFuncBar = normalizeSimplifyItemList(config.chatFuncBar, 'chat-func');
     config.preventRecall = normalizePreventRecallConfig(config.preventRecall);
+    config.antiRecallPreservation = normalizeAntiRecallPreservationConfig(
+        config.antiRecallPreservation
+    );
+    config.receivedFileAutoDownload = normalizeReceivedFileAutoDownloadConfig(
+        config.receivedFileAutoDownload
+    );
     config.entertainment.autoReaction = normalizeAutoReactionConfig(
         config.entertainment.autoReaction
     );
@@ -1116,6 +1189,8 @@ async function saveConfig(nextConfig) {
     const wasSingleForwardViewerEnabled = configCache?.interfaceTweaks?.singleForwardViewer === true;
     const wasSingleForwardGroupIsolationEnabled =
         configCache?.interfaceTweaks?.singleForwardGroupIsolation === true;
+    const wasClosedLidEnabled = configCache?.antiRecallPreservation?.closedLidEnabled === true;
+    const wasAntiRecallBackgroundActive = isAntiRecallBackgroundActive(configCache || DEFAULT_CONFIG);
     const normalizedConfig = normalizeSimplifyConfig(mergeConfig(migrateNetworkConfig(
         migrateMessageToImageConfig(migrateContextMenuOrderConfig(migrateQrScanConfig(nextConfig)))
     )));
@@ -1135,6 +1210,13 @@ async function saveConfig(nextConfig) {
         });
     }
     applyVoiceMessageConfig();
+    syncAntiRecallPreservationRuntime();
+    await syncAntiRecallPowerState({
+        allowInstall: configCache.antiRecallPreservation.closedLidEnabled === true && (
+            !wasClosedLidEnabled ||
+            !wasAntiRecallBackgroundActive && isAntiRecallBackgroundActive(configCache)
+        )
+    });
     syncMediaViewerConfig();
     if (wasSingleForwardViewerEnabled !==
         (configCache.interfaceTweaks.singleForwardViewer === true) ||
@@ -1184,6 +1266,135 @@ function getPreventRecallConfig() {
     return getConfig().preventRecall;
 }
 
+function getAntiRecallPreservationConfig() {
+    return getConfig().antiRecallPreservation;
+}
+
+function getReceivedFileAutoDownloadConfig() {
+    return getConfig().receivedFileAutoDownload;
+}
+
+function syncAntiRecallPreservationRuntime() {
+    const runtime = getRuntimePreservationSettings(getConfig());
+    for (const recallState of recallStates.values()) {
+        recallState.staging?.updateConfig({
+            windowMs: runtime.windowMs,
+            capacityBytes: runtime.capacityBytes
+        });
+        const browserWindow = getRecallStateBrowserWindow(recallState.accountUin);
+        if (browserWindow) {
+            resumeRecallStaging(browserWindow, recallState);
+        }
+    }
+}
+
+function isAntiRecallBackgroundActive(config = getConfig()) {
+    return config.preventRecall?.enabled === true || (
+        config.receivedFileAutoDownload?.enabled === true &&
+        Array.isArray(config.receivedFileAutoDownload.groups) &&
+        config.receivedFileAutoDownload.groups.length > 0
+    );
+}
+
+function getMacClosedLidHelper() {
+    if (!antiRecallPowerState.helper) {
+        antiRecallPowerState.helper = new MacClosedLidHelper();
+        antiRecallPowerState.helperStatus = antiRecallPowerState.helper.getStatus();
+    }
+    return antiRecallPowerState.helper;
+}
+
+async function syncAntiRecallPowerState(options = {}) {
+    const config = getConfig();
+    const active = isAntiRecallBackgroundActive(config);
+    if (active && (antiRecallPowerState.blockerId === null ||
+        !powerSaveBlocker.isStarted(antiRecallPowerState.blockerId))) {
+        antiRecallPowerState.blockerId = powerSaveBlocker.start('prevent-app-suspension');
+    } else if (!active && antiRecallPowerState.blockerId !== null) {
+        if (powerSaveBlocker.isStarted(antiRecallPowerState.blockerId)) {
+            powerSaveBlocker.stop(antiRecallPowerState.blockerId);
+        }
+        antiRecallPowerState.blockerId = null;
+    }
+    const helper = getMacClosedLidHelper();
+    const closedLidConfigured = config.antiRecallPreservation?.closedLidEnabled === true;
+    const closedLidRequested = active && closedLidConfigured;
+    try {
+        if (closedLidConfigured && !helper.getStatus().supported) {
+            antiRecallPowerState.helperStatus = {
+                ...helper.getStatus(),
+                requested: false,
+                lastError: 'closed-lid-helper-unsupported'
+            };
+        } else if (closedLidConfigured && !helper.getStatus().installed && options.allowInstall !== true) {
+            antiRecallPowerState.helperStatus = {
+                ...helper.getStatus(),
+                requested: false,
+                lastError: 'closed-lid-helper-install-required'
+            };
+        } else {
+            if (closedLidConfigured && !helper.getStatus().installed) {
+                await helper.install();
+            }
+            antiRecallPowerState.helperStatus = await helper.setEnabled(closedLidRequested);
+        }
+    } catch (error) {
+        antiRecallPowerState.helperStatus = {
+            ...helper.getStatus(),
+            requested: false,
+            lastError: error?.message || String(error)
+        };
+        recordDiagnostic('warn', 'recall.power-helper-failed', {
+            error: error?.message || String(error)
+        });
+    }
+    broadcastAntiRecallRuntimeStatus();
+    return getAntiRecallRuntimeStatus();
+}
+
+function stopAntiRecallPowerState() {
+    if (antiRecallPowerState.blockerId !== null &&
+        powerSaveBlocker.isStarted(antiRecallPowerState.blockerId)) {
+        powerSaveBlocker.stop(antiRecallPowerState.blockerId);
+    }
+    antiRecallPowerState.blockerId = null;
+    try {
+        getMacClosedLidHelper().writeRequestSync(false);
+    } catch {
+    }
+}
+
+function getAntiRecallRuntimeStatus(accountUin = '') {
+    const normalized = normalizeUin(accountUin);
+    const recallState = normalized ? getRecallState(normalized, false) : null;
+    return {
+        staging: recallState?.staging?.getStatus() || recallState?.stagingStatus || null,
+        power: {
+            backgroundActive: isAntiRecallBackgroundActive(),
+            blockerActive: antiRecallPowerState.blockerId !== null &&
+                powerSaveBlocker.isStarted(antiRecallPowerState.blockerId),
+            closedLid: antiRecallPowerState.helperStatus || getMacClosedLidHelper().getStatus()
+        }
+    };
+}
+
+function broadcastAntiRecallRuntimeStatus(accountUin = '') {
+    const normalized = normalizeUin(accountUin);
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        if (browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+            continue;
+        }
+        const windowAccount = normalizeUin(getWindowState(browserWindow).selfUin);
+        if (normalized && windowAccount !== normalized) {
+            continue;
+        }
+        browserWindow.webContents.send(
+            CHANNEL_ANTI_RECALL_STATUS_CHANGED,
+            getAntiRecallRuntimeStatus(windowAccount)
+        );
+    }
+}
+
 function getEntertainmentConfig() {
     return getConfig().entertainment;
 }
@@ -1213,7 +1424,10 @@ function registerPokeAccount(browserWindow, value) {
             state.selfUidLookupAt = 0;
         }
         state.selfUin = selfUin;
-        getRecallState(selfUin);
+        const recallState = getRecallState(selfUin);
+        if (recallState) {
+            resumeRecallStaging(browserWindow, recallState);
+        }
     }
     return Boolean(selfUin);
 }
@@ -1403,30 +1617,14 @@ async function getRecallBuddyContacts(browserWindow) {
     }
 }
 
-async function getRecallGroupContacts(browserWindow) {
-    const waiter = createNativeEventWaiter(browserWindow, (response, result) => {
-        const command = normalizeText(response?.cmdName || result?.cmdName);
-        return command.endsWith('KernelGroupListener/onGroupListUpdate');
-    }, 10000);
-    try {
-        const response = await qqNativeInvoke(
-            browserWindow,
-            'ntApi',
-            'nodeIKernelGroupService/getGroupList',
-            [false],
-            true,
-            8000
-        );
-        const immediate = normalizeRecallGroupContacts(response);
-        if (immediate.length) {
-            waiter.cancel();
-            return immediate;
-        }
-        return normalizeRecallGroupContacts(await waiter.promise);
-    } catch (error) {
-        waiter.cancel();
-        throw error;
-    }
+async function getRecallGroupContacts() {
+    const groupService = getQqWrapperSession()?.getGroupService?.();
+    const contacts = await loadRecallGroupContacts(groupService, { timeoutMs: 8000 });
+    recordDiagnostic('info', 'recall.group-list-loaded', {
+        source: 'wrapper',
+        contactCount: contacts.length
+    });
+    return contacts;
 }
 
 async function getRecallContactCandidates(browserWindow) {
@@ -1434,7 +1632,7 @@ async function getRecallContactCandidates(browserWindow) {
         return [];
     }
     const results = await Promise.allSettled([
-        getRecallGroupContacts(browserWindow),
+        getRecallGroupContacts(),
         getRecallBuddyContacts(browserWindow)
     ]);
     const contacts = [];
@@ -2710,6 +2908,34 @@ function installConfigIpc() {
     ipcMain.handle(CHANNEL_GET_RECALL_CONTACTS, event =>
         getRecallContactCandidates(BrowserWindow.fromWebContents(event.sender))
     );
+    ipcMain.handle(CHANNEL_GET_ANTI_RECALL_STATUS, async event => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        let accountUin = browserWindow
+            ? normalizeUin(getWindowState(browserWindow).selfUin)
+            : '';
+        if (!accountUin) {
+            accountUin = await resolveRecallAccount(browserWindow).catch(() => '');
+        }
+        return getAntiRecallRuntimeStatus(accountUin);
+    });
+    ipcMain.handle(CHANNEL_UNINSTALL_CLOSED_LID_HELPER, async () => {
+        const nextConfig = getConfig();
+        nextConfig.antiRecallPreservation.closedLidEnabled = false;
+        await saveConfig(nextConfig);
+        try {
+            antiRecallPowerState.helperStatus = await getMacClosedLidHelper().uninstall();
+            return getAntiRecallRuntimeStatus();
+        } catch (error) {
+            antiRecallPowerState.helperStatus = {
+                ...getMacClosedLidHelper().getStatus(),
+                requested: false,
+                lastError: error?.message || String(error)
+            };
+            throw error;
+        } finally {
+            broadcastAntiRecallRuntimeStatus();
+        }
+    });
     ipcMain.handle(CHANNEL_DIAGNOSTIC_EVENT, (event, payload) => {
         if (!isDebugEnabled()) {
             return { ok: false, reason: 'disabled' };
@@ -3045,11 +3271,25 @@ function installConfigIpc() {
         return await openPreventRecallMessages(accountUin);
     });
     ipcMain.handle(CHANNEL_GET_RECALL_VIEWER_DATA, async event => {
-        const browserWindow = BrowserWindow.fromWebContents(event.sender);
-        const accountUin = await resolveRecallAccount(browserWindow);
-        return await getRecallViewerData(accountUin);
+        try {
+            const browserWindow = BrowserWindow.fromWebContents(event.sender);
+            const accountUin = await resolveRecallAccount(browserWindow);
+            return await getRecallViewerData(accountUin);
+        } catch (error) {
+            recordDiagnostic('error', 'recall.viewer-data-failed', {
+                error: error?.message || String(error)
+            });
+            throw error;
+        }
     });
     ipcMain.handle(CHANNEL_GET_RECALL_AUDIO_PREVIEW, (_event, payload) => getRecallAudioPreview(payload));
+    ipcMain.handle(CHANNEL_OPEN_RECALL_VIEWER_FILE, (event, payload) => {
+        if (!recallViewerWindow || recallViewerWindow.isDestroyed() ||
+            event.sender !== recallViewerWindow.webContents) {
+            throw new Error('Recall viewer window was not found.');
+        }
+        return openRecallViewerFile(payload);
+    });
     ipcMain.handle(CHANNEL_JUMP_RECALL_MESSAGE, (_event, payload) => jumpToRecallMessage(payload));
 }
 
@@ -5585,15 +5825,114 @@ function getRecallKey(record) {
     return normalizeText(record?.msgId);
 }
 
+function getRecallStateBrowserWindow(accountUin) {
+    const normalized = normalizeUin(accountUin);
+    return BrowserWindow.getAllWindows().find(browserWindow =>
+        !browserWindow.isDestroyed() &&
+        !browserWindow.webContents.isDestroyed() &&
+        normalizeUin(getWindowState(browserWindow).selfUin) === normalized
+    ) || null;
+}
+
+function getPreservationQueue(accountUin, assetKind) {
+    const normalized = normalizeUin(accountUin);
+    const kind = assetKind === 'file' ? 'file' : 'image';
+    const queueKey = `${normalized}:${kind}`;
+    let queue = preservationDownloadQueues.get(queueKey);
+    if (!queue) {
+        queue = { active: 0, pending: [] };
+        preservationDownloadQueues.set(queueKey, queue);
+    }
+    return queue;
+}
+
+function pumpPreservationQueue(accountUin, assetKind) {
+    const queue = getPreservationQueue(accountUin, assetKind);
+    while (queue.active < 2 && queue.pending.length) {
+        const entry = queue.pending.shift();
+        queue.active += 1;
+        Promise.resolve()
+            .then(entry.run)
+            .then(entry.resolve, entry.reject)
+            .finally(() => {
+                queue.active -= 1;
+                pumpPreservationQueue(accountUin, assetKind);
+            });
+    }
+}
+
+function enqueuePreservationTask(accountUin, assetKind, run, priority = false) {
+    const normalized = normalizeUin(accountUin);
+    return new Promise((resolve, reject) => {
+        const pending = getPreservationQueue(normalized, assetKind).pending;
+        const entry = { run, resolve, reject };
+        if (priority) {
+            pending.unshift(entry);
+        } else {
+            pending.push(entry);
+        }
+        pumpPreservationQueue(normalized, assetKind);
+    });
+}
+
+function createRecallStaging(recallState) {
+    const runtime = getRuntimePreservationSettings(getConfig());
+    const manager = new AntiRecallStaging({
+        accountUin: recallState.accountUin,
+        rootDir: getPreventRecallDir(recallState.accountUin),
+        stagingDir: getPreventRecallStagingDir(recallState.accountUin),
+        archiveDirs: {
+            image: getPreventRecallImageDir(recallState.accountUin),
+            file: getPreventRecallFileDir(recallState.accountUin)
+        },
+        windowMs: runtime.windowMs,
+        capacityBytes: runtime.capacityBytes,
+        onExpire: candidate => {
+            recallState.liveMessages.delete(candidate.msgId);
+            recordDiagnostic('info', 'recall.staging-expired', {
+                accountUin: recallState.accountUin,
+                assetCount: Object.keys(candidate.assets || {}).length
+            });
+        },
+        onCapacityAvailable: ({ candidate, asset }) => {
+            const browserWindow = getRecallStateBrowserWindow(recallState.accountUin);
+            if (browserWindow) {
+                queuePreservationAsset(browserWindow, recallState, candidate.key, asset.id);
+            }
+        },
+        onStatus: status => {
+            recallState.stagingStatus = status;
+            if (recallStates.get(recallState.accountUin) === recallState) {
+                broadcastAntiRecallRuntimeStatus(recallState.accountUin);
+            }
+        }
+    });
+    const candidates = manager.initialize();
+    for (const candidate of candidates) {
+        if (candidate.recalled && candidate.record?.qqnt_toolbox_recall) {
+            recallState.recalledMessages.set(candidate.msgId, candidate.record);
+        } else if (!candidate.recalled) {
+            recallState.liveMessages.set(candidate.msgId, candidate.record);
+        }
+    }
+    recallState.stagingStatus = manager.getStatus();
+    return manager;
+}
+
 function createRecallState(accountUin) {
-    return {
+    const state = {
         accountUin: normalizeUin(accountUin),
+        generation: 1,
         imageDownloads: new Map(),
         liveMessages: new Map(),
         recalledMessages: new Map(),
         persistedIds: new Set(),
+        staging: null,
+        stagingStatus: null,
         loaded: false
     };
+    state.staging = createRecallStaging(state);
+    return state;
 }
 
 function getRecallState(accountUin, create = true) {
@@ -5605,6 +5944,7 @@ function getRecallState(accountUin, create = true) {
     if (!state && create) {
         state = createRecallState(normalized);
         recallStates.set(normalized, state);
+        broadcastAntiRecallRuntimeStatus(normalized);
     }
     if (state && !state.loaded) {
         loadPersistedRecallCache(state);
@@ -5626,6 +5966,300 @@ function pruneRecallCache(recallState) {
 
 function cloneRecallRecord(record) {
     return deepCloneForSend(record);
+}
+
+function getPreservationAssetElement(candidate, asset) {
+    const elements = getRecordElements(candidate?.record);
+    return elements.find(element =>
+        asset?.elementId && normalizeText(element?.elementId) === normalizeText(asset.elementId)
+    ) || elements[Number(asset?.elementIndex) || 0] || null;
+}
+
+async function resolvePreservationAssetSource(browserWindow, candidate, asset, destinationPath = '') {
+    const element = getPreservationAssetElement(candidate, asset);
+    const media = asset.kind === 'image' ? element?.picElement : element?.fileElement;
+    if (!element || !media) {
+        throw new Error('The staged asset no longer exists in the message snapshot.');
+    }
+    const pathCandidates = getForwardDetailMediaPathCandidates(media);
+    if (asset.kind === 'image') {
+        pathCandidates.push(getPicSourcePath(media));
+    }
+    let existing = await getExistingFilePathAsync(pathCandidates);
+    const expectedBytes = Math.max(0, Number(asset.expectedBytes) || 0);
+    if (existing) {
+        try {
+            const size = (await fs.stat(existing)).size;
+            if (!expectedBytes || size >= expectedBytes) {
+                return existing;
+            }
+        } catch {
+            existing = '';
+        }
+    }
+    const payload = createPreservationDownloadPayload(candidate.record, element, media, destinationPath);
+    if (!payload) {
+        throw new Error('The message asset download identity is incomplete.');
+    }
+    const identity = {
+        msgId: normalizeText(candidate.record?.msgId),
+        elementId: normalizeText(element?.elementId)
+    };
+    const item = {
+        type: asset.kind,
+        identity,
+        fileSize: expectedBytes
+    };
+    const timeoutMs = getPreservationDownloadTimeout(expectedBytes);
+    const deadline = Date.now() + timeoutMs;
+    const waiter = createNativeEventWaiter(browserWindow, (response, result) => {
+        const cmdName = normalizeText(result?.cmdName || response?.cmdName);
+        return /nodeIKernelMsgListener\/onRichMediaDownloadComplete$/i.test(cmdName) &&
+            Boolean(findInlineMediaDownloadInfo(result, item) || findInlineMediaDownloadInfo(response, item));
+    }, timeoutMs);
+    try {
+        await qqNativeInvoke(
+            browserWindow,
+            'ntApi',
+            'nodeIKernelMsgService/downloadRichMedia',
+            payload,
+            false
+        );
+        const event = await waiter.promise;
+        const info = findInlineMediaDownloadInfo(event, item);
+        if (!info) {
+            throw new Error('QQ completed a different message asset download.');
+        }
+        const errorCode = Number(info.fileErrCode);
+        if (Number.isFinite(errorCode) && errorCode !== 0) {
+            throw new Error(`QQ message asset download failed: ${info.fileErrMsg || errorCode}`);
+        }
+        const filePath = getAbsoluteFilePathCandidate([
+            info.filePath,
+            info.commonFileInfo?.filePath
+        ]);
+        if (!filePath) {
+            throw new Error('QQ completed the message asset download without a local path.');
+        }
+        if (destinationPath &&
+            normalizeComparablePath(path.resolve(filePath)) !== normalizeComparablePath(path.resolve(destinationPath))) {
+            throw new Error('QQ ignored the plugin-owned message asset download destination.');
+        }
+        await waitForCompletedInlineMediaFile(
+            browserWindow,
+            item,
+            filePath,
+            expectedBytes,
+            Math.max(1, deadline - Date.now())
+        );
+        return filePath;
+    } finally {
+        waiter.cancel();
+    }
+}
+
+function syncPreservationCandidateRecord(recallState, candidateKey) {
+    const candidate = recallState.staging?.getCandidate(candidateKey);
+    if (!candidate) {
+        return;
+    }
+    if (candidate.recalled) {
+        const previous = recallState.recalledMessages.get(candidate.msgId);
+        if (previous?.qqnt_toolbox_recall && !candidate.record?.qqnt_toolbox_recall) {
+            candidate.record.qqnt_toolbox_recall = deepCloneForSend(previous.qqnt_toolbox_recall);
+            candidate.record.qqnt_toolbox_account_uin = recallState.accountUin;
+            recallState.staging.updateCandidateRecord(candidateKey, candidate.record);
+        }
+        recallState.recalledMessages.set(candidate.msgId, deepCloneForSend(candidate.record));
+        persistRecallRecord(recallState, candidate.record, true);
+        recallState.staging.completeCandidate(candidateKey);
+    } else {
+        recallState.liveMessages.set(candidate.msgId, deepCloneForSend(candidate.record));
+    }
+    pruneRecallCache(recallState);
+}
+
+function isPreservationFileAssetEligible(candidate, asset) {
+    if (asset?.kind !== 'file') {
+        return true;
+    }
+    const element = getPreservationAssetElement(candidate, asset);
+    return collectReceivedFileTargets(getReceivedFileAutoDownloadConfig(), candidate?.record)
+        .some(target => target.element === element || (
+            normalizeText(target.element?.elementId) &&
+            normalizeText(target.element?.elementId) === normalizeText(asset.elementId)
+        ) || target.index === Number(asset.elementIndex));
+}
+
+function queuePreservationAsset(browserWindow, recallState, candidateKey, assetId) {
+    const taskKey = `${recallState.accountUin}:${candidateKey}:${assetId}`;
+    const active = preservationAssetTasks.get(taskKey);
+    if (active) {
+        return active;
+    }
+    const queuedCandidate = recallState.staging?.getCandidate(candidateKey);
+    const queuedAsset = queuedCandidate?.assets?.[assetId];
+    if (!queuedCandidate || !queuedAsset) {
+        return Promise.resolve(null);
+    }
+    const generation = recallState.generation;
+    const task = enqueuePreservationTask(recallState.accountUin, queuedAsset.kind, async () => {
+        if (recallState.generation !== generation ||
+            recallStates.get(recallState.accountUin) !== recallState) {
+            return { ok: false, reason: 'cache-cleared', state: 'canceled', path: '' };
+        }
+        const candidate = recallState.staging?.getCandidate(candidateKey);
+        const asset = candidate?.assets?.[assetId];
+        if (!candidate || !asset || asset.state === 'promoted' || asset.state === 'staged') {
+            return null;
+        }
+        if (!candidate.recalled && !isPreservationFileAssetEligible(candidate, asset)) {
+            recallState.staging.discardAsset(candidateKey, assetId);
+            syncPreservationCandidateRecord(recallState, candidateKey);
+            recordDiagnostic('info', 'recall.asset-policy-skipped', { kind: asset.kind });
+            return { ok: false, reason: 'policy-changed', state: 'skipped', path: '' };
+        }
+        const admission = recallState.staging.beginAssetAcquisition(candidateKey, assetId);
+        if (!admission.ok || ['staged', 'promoted'].includes(admission.state)) {
+            syncPreservationCandidateRecord(recallState, candidateKey);
+            recordDiagnostic(admission.ok ? 'info' : 'warn', 'recall.asset-admission', {
+                kind: asset.kind,
+                state: admission.state,
+                reason: admission.reason || ''
+            });
+            return admission;
+        }
+        try {
+            const sourcePath = await resolvePreservationAssetSource(
+                browserWindow,
+                candidate,
+                asset,
+                admission.acquisitionPath
+            );
+            if (recallState.generation !== generation ||
+                recallStates.get(recallState.accountUin) !== recallState) {
+                if (recallState.staging?.isOwnedAcquisitionPath(sourcePath)) {
+                    await fs.rm(sourcePath, { recursive: true, force: true }).catch(() => {});
+                }
+                return { ok: false, reason: 'cache-cleared', state: 'canceled', path: '' };
+            }
+            const result = recallState.staging.isOwnedAcquisitionPath(sourcePath)
+                ? await recallState.staging.adoptOwnedAcquisition(candidateKey, assetId, sourcePath)
+                : await recallState.staging.stageAssetFromPath(candidateKey, assetId, sourcePath);
+            syncPreservationCandidateRecord(recallState, candidateKey);
+            recordDiagnostic(result.ok ? 'info' : 'warn', 'recall.asset-staged', {
+                kind: asset.kind,
+                state: result.state,
+                reason: result.reason || ''
+            });
+            return result;
+        } catch (error) {
+            recallState.staging?.failAssetAcquisition(
+                candidateKey,
+                assetId,
+                error?.message || String(error)
+            );
+            recordDiagnostic('warn', 'recall.asset-acquisition-failed', {
+                kind: asset.kind,
+                error: error?.message || String(error)
+            });
+            return null;
+        }
+    }, queuedCandidate.recalled === true).finally(() => {
+        if (preservationAssetTasks.get(taskKey) === task) {
+            preservationAssetTasks.delete(taskKey);
+        }
+    });
+    preservationAssetTasks.set(taskKey, task);
+    return task;
+}
+
+function resumeRecallStaging(browserWindow, recallState) {
+    for (const candidate of recallState.staging?.listCandidates() || []) {
+        for (const asset of Object.values(candidate.assets || {})) {
+            if (!['staged', 'promoted'].includes(asset.state) &&
+                (asset.state !== 'failed' || candidate.recalled)) {
+                queuePreservationAsset(browserWindow, recallState, candidate.key, asset.id);
+            }
+        }
+    }
+}
+
+function processAntiRecallPreservationIntake(browserWindow, context) {
+    if (!context.commandNames.has(POKE_RECEIVE_CMD)) {
+        return;
+    }
+    rememberPokeAccountFromRecords(browserWindow, context.records);
+    const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
+    if (!recallState) {
+        return;
+    }
+    const preventRecallConfig = getPreventRecallConfig();
+    const fileConfig = getReceivedFileAutoDownloadConfig();
+    for (const record of context.records) {
+        const msgId = getRecallKey(record);
+        if (!msgId || getRecallInfo(record) || record?.qqnt_toolbox_recall) {
+            continue;
+        }
+        const preserveMessage = shouldHandlePreventRecallRecord(preventRecallConfig, record, false);
+        const fileTargets = collectReceivedFileTargets(fileConfig, record);
+        if (!preserveMessage && !fileTargets.length) {
+            continue;
+        }
+        const imageTargets = preserveMessage
+            ? getRecordElements(record).map((element, index) => ({ element, index }))
+                .filter(target => target.element?.picElement)
+            : [];
+        if (!imageTargets.length && !fileTargets.length) {
+            // Text-only snapshots already live in recallState.liveMessages. Keeping
+            // them out of the disk-backed asset journal avoids one synchronous file
+            // transaction per incoming chat message and prevents high-traffic accounts
+            // from stalling QQ's message renderer.
+            continue;
+        }
+        const candidateKey = msgId;
+        recallState.staging.observeCandidate({
+            key: candidateKey,
+            msgId,
+            peerUid: normalizeText(record?.peerUid || record?.peerUin),
+            receivedAt: Date.now(),
+            record
+        });
+        if (preserveMessage) {
+            for (const { element, index } of imageTargets) {
+                const pic = element.picElement;
+                const assetId = `image:${normalizeText(element.elementId) || index}`;
+                recallState.staging.registerAsset(candidateKey, {
+                    id: assetId,
+                    kind: 'image',
+                    elementIndex: index,
+                    elementId: normalizeText(element.elementId),
+                    fileName: normalizeText(pic.fileName) || 'image.jpg',
+                    expectedBytes: Math.max(0, Number(pic.fileSize) || 0),
+                    sourcePath: getPicSourcePath(pic)
+                });
+                queuePreservationAsset(browserWindow, recallState, candidateKey, assetId);
+            }
+        }
+        for (const target of fileTargets) {
+            const assetId = `file:${normalizeText(target.element?.elementId) || target.index}`;
+            recallState.staging.registerAsset(candidateKey, {
+                id: assetId,
+                kind: 'file',
+                elementIndex: target.index,
+                elementId: normalizeText(target.element?.elementId),
+                fileName: target.fileName,
+                expectedBytes: target.fileSize,
+                sourcePath: getExistingFilePath(getForwardDetailMediaPathCandidates(target.fileElement))
+            });
+            queuePreservationAsset(browserWindow, recallState, candidateKey, assetId);
+        }
+        const candidate = recallState.staging.getCandidate(candidateKey);
+        if (candidate) {
+            recallState.liveMessages.set(msgId, candidate.record);
+        }
+    }
+    pruneRecallCache(recallState);
 }
 
 function getRecallPicOriginalSourcePath(pic) {
@@ -5884,6 +6518,7 @@ function scheduleRecallImageLocalization(recallState, record) {
         return Promise.resolve(false);
     }
     const msgId = getRecallKey(record);
+    const generation = recallState.generation;
     if (!msgId) {
         return Promise.resolve(false);
     }
@@ -5903,6 +6538,15 @@ function scheduleRecallImageLocalization(recallState, record) {
         }
         return job.then(targetPath => {
             if (!targetPath) {
+                return false;
+            }
+            if (recallState.generation !== generation ||
+                recallStates.get(recallState.accountUin) !== recallState) {
+                if (recallState.staging?.isOwnedArchivePath('image', targetPath)) {
+                    return fs.rm(targetPath, { recursive: true, force: true })
+                        .catch(() => {})
+                        .then(() => false);
+                }
                 return false;
             }
             const current = recallState.liveMessages.get(msgId) || recallState.recalledMessages.get(msgId) || record;
@@ -5951,6 +6595,43 @@ function persistRecallRecord(recallState, record, allowUpdate = false) {
     }
 }
 
+function getArchivedRecallFilePath(record, element, recallState = null) {
+    const elementId = normalizeText(element?.elementId);
+    const fileElement = element?.fileElement;
+    const paths = [
+        record?.qqnt_toolbox_archived_files?.[elementId],
+        fileElement?.qqnt_toolbox_archive_path,
+        fileElement?.filePath,
+        fileElement?.sourcePath,
+        fileElement?.originPath,
+        fileElement?.localPath,
+        fileElement?.path
+    ].map(normalizeText).filter(Boolean);
+    if (!recallState?.staging) {
+        return paths[0] || '';
+    }
+    return paths.find(filePath => recallState.staging.isOwnedArchivePath('file', filePath)) || '';
+}
+
+function normalizeArchivedRecallFileStates(record, recallState) {
+    let changed = false;
+    for (const [index, element] of getRecordElements(record).entries()) {
+        if (!element?.fileElement) {
+            continue;
+        }
+        const filePath = getArchivedRecallFilePath(record, element, recallState);
+        if (!filePath) {
+            continue;
+        }
+        changed = applyAssetPath(record, {
+            kind: 'file',
+            elementIndex: index,
+            elementId: normalizeText(element.elementId)
+        }, filePath) || changed;
+    }
+    return changed;
+}
+
 function loadPersistedRecallCache(recallState) {
     if (!recallState?.accountUin) {
         return;
@@ -5985,6 +6666,7 @@ function loadPersistedRecallCache(recallState) {
             if (storedAccount && storedAccount !== recallState.accountUin) {
                 continue;
             }
+            normalizeArchivedRecallFileStates(record, recallState);
             recallState.recalledMessages.set(msgId, record);
             recallState.persistedIds.add(msgId);
         }
@@ -6007,7 +6689,7 @@ function cacheRecallCandidate(recallState, record) {
     pruneRecallCache(recallState);
 }
 
-function getRecoveredRecallRecord(recallState, record) {
+function getRecoveredRecallRecord(recallState, record, browserWindow) {
     if (!recallState) {
         return null;
     }
@@ -6021,21 +6703,32 @@ function getRecoveredRecallRecord(recallState, record) {
     if (!stored && recallInfo.isSelfOperate && !config.preventSelfMsg) {
         return null;
     }
-    const cached = stored || recallState.liveMessages.get(msgId);
+    const promoted = recallState.staging?.promoteCandidateSync(msgId);
+    const cached = stored || promoted?.candidate?.record || recallState.liveMessages.get(msgId);
     if (!cached) {
         return null;
     }
     const recovered = cloneRecallRecord(cached);
+    normalizeArchivedRecallFileStates(recovered, recallState);
     if (getConfig().interfaceTweaks.deleteBubbleSkin) {
         deleteBubbleSkinFromRecord(recovered);
     }
     recovered.qqnt_toolbox_recall ||= createRecallMark(record);
     recovered.qqnt_toolbox_account_uin = recallState.accountUin;
-    scheduleRecallImageLocalization(recallState, recovered);
-    localizeRecallImages(recallState, recovered);
+    recallState.staging?.updateCandidateRecord(msgId, recovered);
+    const managedImages = Object.values(promoted?.candidate?.assets || {})
+        .some(asset => asset.kind === 'image');
+    if (!managedImages) {
+        scheduleRecallImageLocalization(recallState, recovered);
+        localizeRecallImages(recallState, recovered);
+    }
     recallState.liveMessages.delete(msgId);
     recallState.recalledMessages.set(msgId, deepCloneForSend(recovered));
     persistRecallRecord(recallState, recovered);
+    for (const assetId of promoted?.pendingAssetIds || []) {
+        queuePreservationAsset(browserWindow, recallState, msgId, assetId);
+    }
+    recallState.staging?.completeCandidate(msgId);
     pruneRecallCache(recallState);
     return recovered;
 }
@@ -6048,11 +6741,31 @@ function preserveRecoveredRecallMetadata(recallState, record) {
     }
     record.qqnt_toolbox_recall ||= deepCloneForSend(mark);
     record.qqnt_toolbox_account_uin = recallState.accountUin;
+    for (const [index, element] of getRecordElements(stored).entries()) {
+        const elementId = normalizeText(element?.elementId);
+        const imagePath = element?.picElement ? getPicSourcePath(element.picElement) : '';
+        const filePath = element?.fileElement
+            ? getArchivedRecallFilePath(stored, element, recallState)
+            : '';
+        if (imagePath) {
+            applyAssetPath(record, {
+                kind: 'image',
+                elementIndex: index,
+                elementId
+            }, imagePath);
+        }
+        if (filePath) {
+            applyAssetPath(record, {
+                kind: 'file',
+                elementIndex: index,
+                elementId
+            }, filePath);
+        }
+    }
     return true;
 }
 
 function processPreventRecall(browserWindow, context) {
-    rememberPokeAccountFromRecords(browserWindow, context.records);
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
     if (!recallState) {
         return;
@@ -6062,7 +6775,8 @@ function processPreventRecall(browserWindow, context) {
     let preservedUpdates = 0;
     for (const record of context.records) {
         const msgId = getRecallKey(record);
-        const hasRecoveredRecord = recallState.recalledMessages.has(msgId);
+        const stagedCandidate = recallState.staging?.getCandidate(msgId);
+        const hasRecoveredRecord = recallState.recalledMessages.has(msgId) || Boolean(stagedCandidate);
         if (!shouldHandlePreventRecallRecord(config, record, hasRecoveredRecord)) {
             if (getRecallInfo(record)) {
                 recallState.liveMessages.delete(msgId);
@@ -6081,7 +6795,7 @@ function processPreventRecall(browserWindow, context) {
             continue;
         }
         const isRecallRecord = Boolean(getRecallInfo(record));
-        const recovered = getRecoveredRecallRecord(recallState, record);
+        const recovered = getRecoveredRecallRecord(recallState, record, browserWindow);
         if (!recovered) {
             continue;
         }
@@ -6105,17 +6819,22 @@ async function clearPreventRecallCache(accountUin) {
     const recallState = getRecallState(accountUin);
     const rootDirectory = path.resolve(getPreventRecallRootDir());
     const accountDirectory = path.resolve(getPreventRecallDir(accountUin));
-    if (!recallState || path.dirname(accountDirectory) !== rootDirectory) {
-        throw new Error('Invalid recall cache directory.');
-    }
-    recallState.liveMessages.clear();
-    recallState.recalledMessages.clear();
-    recallState.persistedIds.clear();
-    recallState.imageDownloads.clear();
-    await fs.rm(accountDirectory, { recursive: true, force: true });
-    await fs.mkdir(accountDirectory, { recursive: true });
-    await fs.writeFile(getPreventRecallCachePath(accountUin), Buffer.alloc(0));
-    return { success: true };
+    const cachePath = path.resolve(getPreventRecallCachePath(accountUin));
+    const result = await clearRecallAccountCache({
+        rootDirectory,
+        accountDirectory,
+        cachePath,
+        state: recallState
+    });
+    recallStates.delete(recallState.accountUin);
+    const freshState = getRecallState(recallState.accountUin);
+    recallViewerRecordIndex.clear();
+    recordDiagnostic('info', 'recall.cache-cleared', {
+        accountUin: recallState.accountUin,
+        generation: result.generation,
+        candidateCount: freshState?.staging?.getStatus()?.candidateCount || 0
+    });
+    return result;
 }
 
 async function openPreventRecallDir(accountUin) {
@@ -6155,314 +6874,9 @@ async function getAllPreventRecallRecords(accountUin) {
         if (storedAccount && storedAccount !== recallState.accountUin) {
             continue;
         }
-        if (localizeRecallImages(recallState, record)) {
-            persistRecallRecord(recallState, record, true);
-        }
         addRecord(record);
     }
     return Array.from(recordsByKey.values());
-}
-
-function getRecallDisplayName(record) {
-    const mark = record?.qqnt_toolbox_recall || {};
-    return normalizeText(mark.origMsgSenderRemark) ||
-        normalizeText(mark.origMsgSenderMemRemark) ||
-        normalizeText(mark.origMsgSenderNick) ||
-        normalizeText(record?.sendRemarkName) ||
-        normalizeText(record?.sendMemberName) ||
-        normalizeText(record?.sendNickName) ||
-        normalizeText(record?.senderNick) ||
-        normalizeText(record?.senderUid) ||
-        normalizeText(record?.senderUin) ||
-        '未知发送者';
-}
-
-function getRecallOperatorName(record) {
-    const mark = record?.qqnt_toolbox_recall || {};
-    return normalizeText(mark.operatorRemark) ||
-        normalizeText(mark.operatorMemRemark) ||
-        normalizeText(mark.operatorNick) ||
-        '未知用户';
-}
-
-function getRecallPeerName(record) {
-    const chatType = Number(record?.chatType);
-    if (chatType === 2) {
-        return normalizeText(record?.peerName) || normalizeText(record?.peerUin) || normalizeText(record?.peerUid) || '未知群聊';
-    }
-    return normalizeText(record?.peerName) ||
-        normalizeText(record?.sendRemarkName) ||
-        normalizeText(record?.sendNickName) ||
-        normalizeText(record?.peerUin) ||
-        normalizeText(record?.peerUid) ||
-        '未知会话';
-}
-
-function getQqNumber(...values) {
-    for (const value of values) {
-        const number = normalizeText(value);
-        if (/^[1-9]\d+$/.test(number)) {
-            return number;
-        }
-    }
-    return '';
-}
-
-function getUserAvatarUrl(...values) {
-    const uin = getQqNumber(...values);
-    return uin ? `https://q.qlogo.cn/headimg_dl?dst_uin=${uin}&spec=100` : '';
-}
-
-function getRecallPeerAvatarUrl(record) {
-    const peerUin = getQqNumber(record?.peerUin, record?.peer?.peerUin, record?.peerUid);
-    if (!peerUin) {
-        return '';
-    }
-    if (Number(record?.chatType) === 2) {
-        return `https://p.qlogo.cn/gh/${peerUin}/${peerUin}/100/`;
-    }
-    return getUserAvatarUrl(peerUin);
-}
-
-function getViewerFileUrl(...values) {
-    const candidates = [];
-    const seen = new WeakSet();
-    const collect = (value, depth = 0) => {
-        if (value === undefined || value === null || depth > 2) {
-            return;
-        }
-        if (typeof value === 'string') {
-            candidates.push(value);
-            return;
-        }
-        if (ArrayBuffer.isView(value)) {
-            return;
-        }
-        if (typeof value === 'object') {
-            if (seen.has(value)) {
-                return;
-            }
-            seen.add(value);
-        }
-        if (Array.isArray(value)) {
-            value.forEach(item => collect(item, depth + 1));
-            return;
-        }
-        if (value instanceof Map) {
-            value.forEach(item => collect(item, depth + 1));
-            return;
-        }
-        if (typeof value === 'object') {
-            Object.values(value).forEach(item => collect(item, depth + 1));
-        }
-    };
-    values.forEach(value => collect(value));
-    for (const candidate of candidates) {
-        if (/^https?:\/\//i.test(candidate)) {
-            continue;
-        }
-        const filePath = normalizePathText(candidate);
-        try {
-            if (filePath && fsSync.existsSync(filePath) && fsSync.statSync(filePath).isFile()) {
-                return pathToFileURL(filePath).href;
-            }
-        } catch {
-        }
-    }
-    return '';
-}
-
-function getViewerRemoteUrl(...values) {
-    const queue = [...values];
-    const seen = new WeakSet();
-    while (queue.length) {
-        const value = queue.shift();
-        if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
-            return value;
-        }
-        if (ArrayBuffer.isView(value)) {
-            continue;
-        }
-        if (value && typeof value === 'object') {
-            if (seen.has(value)) {
-                continue;
-            }
-            seen.add(value);
-        }
-        if (Array.isArray(value)) {
-            queue.push(...value);
-        } else if (value instanceof Map) {
-            queue.push(...value.values());
-        } else if (value && typeof value === 'object') {
-            queue.push(...Object.values(value));
-        }
-    }
-    return '';
-}
-
-function getMessageContentText(value) {
-    if (value === undefined || value === null) {
-        return '';
-    }
-    const content = String(value);
-    return content === 'undefined' || content === 'null' ? '' : content;
-}
-
-function getReplyPreview(reply) {
-    const direct = getMessageContentText(reply?.sourceMsgText);
-    if (direct.trim()) {
-        return direct;
-    }
-    return (Array.isArray(reply?.sourceMsgTextElems) ? reply.sourceMsgTextElems : [])
-        .map(item => getMessageContentText(item?.textElemContent) || (item?.picElem ? '[图片]' : ''))
-        .filter(Boolean)
-        .join(' ');
-}
-
-function getArkViewerCard(arkElement) {
-    let data = {};
-    try {
-        data = JSON.parse(normalizeText(arkElement?.bytesData));
-    } catch {
-    }
-    const metadata = data?.meta && typeof data.meta === 'object'
-        ? Object.values(data.meta).find(value => value && typeof value === 'object') || {}
-        : {};
-    return {
-        type: 'card',
-        title: normalizeText(metadata.title) || normalizeText(data.prompt) || normalizeText(arkElement?.prompt) || '卡片消息',
-        subtitle: normalizeText(metadata.desc) || normalizeText(data.desc) || normalizeText(arkElement?.appName) || normalizeText(arkElement?.appView),
-        image: getViewerRemoteUrl(metadata.preview, metadata.icon)
-    };
-}
-
-async function getRecallViewerContent(record) {
-    const parts = [];
-    for (const [elementIndex, element] of getRecordElements(record).entries()) {
-        const textContent = getMessageContentText(element?.textElement?.content);
-        if (textContent) {
-            const atType = Number(element?.textElement?.atType) || 0;
-            parts.push({
-                type: atType ? 'mention' : 'text',
-                text: textContent,
-                atType,
-                atUid: normalizeText(element.textElement.atUid),
-                atNtUid: normalizeText(element.textElement.atNtUid)
-            });
-            continue;
-        }
-        if (element?.picElement) {
-            const imagePath = getPicSourcePath(element.picElement);
-            let remoteUrl = '';
-            if (!imagePath) {
-                remoteUrl = await resolveRecallImageUrl(element.picElement).catch(error => {
-                    warn('recall image URL resolution failed:', error?.message || error);
-                    return '';
-                });
-            }
-            parts.push({
-                type: 'image',
-                src: imagePath ? pathToFileURL(imagePath).href : remoteUrl,
-                name: normalizeText(element.picElement.summary) || normalizeText(element.picElement.fileName) || '图片',
-                width: Number(element.picElement.picWidth) || 0,
-                height: Number(element.picElement.picHeight) || 0
-            });
-            continue;
-        }
-        if (element?.pttElement) {
-            parts.push({
-                type: 'voice',
-                elementIndex,
-                name: normalizeText(element.pttElement.fileName) || '语音消息',
-                duration: Number(element.pttElement.duration) || 0,
-                transcript: getMessageContentText(element.pttElement.text),
-                waves: (Array.isArray(element.pttElement.waveAmplitudes) ? element.pttElement.waveAmplitudes : [])
-                    .slice(0, 36)
-                    .map(value => Math.abs(Number(value) || 0))
-            });
-            continue;
-        }
-        if (element?.fileElement) {
-            parts.push({
-                type: 'file',
-                name: normalizeText(element.fileElement.fileName) || '文件',
-                size: Number(element.fileElement.fileSize) || 0,
-                path: getViewerFileUrl(element.fileElement.filePath, element.fileElement.sourcePath)
-            });
-            continue;
-        }
-        if (element?.videoElement) {
-            parts.push({
-                type: 'video',
-                name: normalizeText(element.videoElement.fileName) || '视频',
-                size: Number(element.videoElement.fileSize) || 0,
-                duration: Number(element.videoElement.duration || element.videoElement.fileTime) || 0,
-                width: Number(element.videoElement.thumbWidth) || 0,
-                height: Number(element.videoElement.thumbHeight) || 0,
-                src: getViewerFileUrl(element.videoElement.filePath, element.videoElement.sourcePath),
-                poster: getViewerFileUrl(element.videoElement.thumbPath, element.videoElement.coverPath)
-            });
-            continue;
-        }
-        if (element?.replyElement) {
-            parts.push({
-                type: 'reply',
-                text: getReplyPreview(element.replyElement) || '[消息]',
-                sender: normalizeText(element.replyElement.senderUid) || normalizeText(element.replyElement.anonymousNickName)
-            });
-            continue;
-        }
-        if (element?.marketFaceElement) {
-            parts.push({
-                type: 'face',
-                name: normalizeText(element.marketFaceElement.faceName) || '表情',
-                src: getViewerFileUrl(
-                    element.marketFaceElement.staticFacePath,
-                    element.marketFaceElement.dynamicFacePath
-                ) || getViewerRemoteUrl(element.marketFaceElement)
-            });
-            continue;
-        }
-        if (element?.faceElement) {
-            parts.push({
-                type: 'face',
-                name: normalizeText(element.faceElement.faceName) || normalizeText(element.faceElement.faceText) || 'QQ 表情',
-                src: ''
-            });
-            continue;
-        }
-        if (element?.arkElement) {
-            parts.push(getArkViewerCard(element.arkElement));
-            continue;
-        }
-        if (element?.markdownElement) {
-            const flash = element.markdownElement.mdExtInfo?.flashTransferInfo;
-            parts.push({
-                type: 'card',
-                title: normalizeText(flash?.name) || normalizeText(element.markdownElement.mdSummary) || 'Markdown 消息',
-                subtitle: flash?.fileSize ? `${Number(flash.fileSize) || 0}` : '',
-                image: getViewerRemoteUrl(flash?.thnumbnail, flash?.thumbnail)
-            });
-            continue;
-        }
-        if (element?.multiForwardMsgElement) {
-            parts.push({
-                type: 'forward',
-                xml: normalizeText(element.multiForwardMsgElement.xmlContent),
-                name: normalizeText(element.multiForwardMsgElement.fileName)
-            });
-            continue;
-        }
-        if (element?.grayTipElement) {
-            parts.push({ type: 'notice', text: getMessageContentText(element.grayTipElement.content) || '系统消息' });
-            continue;
-        }
-        parts.push({
-            type: 'unsupported',
-            text: `暂不支持的消息类型 (${Number(element?.elementType) || 0})`
-        });
-    }
-    return { parts };
 }
 
 async function getRecallViewerData(accountUin) {
@@ -6470,56 +6884,23 @@ async function getRecallViewerData(accountUin) {
     if (!normalizedAccount) {
         throw new Error('Current QQ account was not found.');
     }
+    const startedAt = Date.now();
     const records = await getAllPreventRecallRecords(normalizedAccount);
-    const chats = new Map();
     recallViewerRecordIndex.clear();
     for (const record of records) {
-        const peerUid = normalizeText(record?.peerUid || record?.peer?.peerUid);
-        if (!peerUid) {
-            continue;
-        }
-        const chatType = Number(record?.chatType) || 0;
-        const key = `${chatType}:${peerUid}`;
-        const mark = record?.qqnt_toolbox_recall || {};
         const msgId = normalizeText(record?.msgId);
         if (msgId) {
             recallViewerRecordIndex.set(msgId, record);
         }
-        const message = {
-            msgId,
-            peerUid,
-            peerUin: normalizeText(record?.peerUin),
-            chatType,
-            sender: getRecallDisplayName(record),
-            senderUin: getQqNumber(record?.senderUin),
-            senderUid: normalizeText(record?.senderUid),
-            avatarUrl: getUserAvatarUrl(record?.senderUin),
-            operator: getRecallOperatorName(record),
-            msgTime: Number(record?.msgTime) || 0,
-            recallTime: Number(mark.recallTime || record?.recallTime) || 0,
-            ...await getRecallViewerContent(record)
-        };
-        let chat = chats.get(key);
-        if (!chat) {
-            chat = {
-                key,
-                peerUid,
-                peerUin: message.peerUin,
-                peerName: getRecallPeerName(record),
-                avatarUrl: getRecallPeerAvatarUrl(record),
-                chatType,
-                latestTime: 0,
-                messages: []
-            };
-            chats.set(key, chat);
-        }
-        chat.latestTime = Math.max(chat.latestTime, message.recallTime || message.msgTime);
-        chat.messages.push(message);
     }
-    for (const chat of chats.values()) {
-        chat.messages.sort((left, right) => (right.recallTime || right.msgTime) - (left.recallTime || left.msgTime));
-    }
-    return Array.from(chats.values()).sort((left, right) => right.latestTime - left.latestTime);
+    const chats = buildRecallViewerData(records);
+    recordDiagnostic('info', 'recall.viewer-data-loaded', {
+        accountUin: normalizedAccount,
+        recordCount: records.length,
+        chatCount: chats.length,
+        durationMs: Date.now() - startedAt
+    });
+    return chats;
 }
 
 async function getRecallAudioPreview(payload = {}) {
@@ -6536,6 +6917,23 @@ async function getRecallAudioPreview(payload = {}) {
         title: preview.title,
         duration: preview.duration
     };
+}
+
+async function openRecallViewerFile(payload = {}) {
+    const msgId = normalizeText(payload.msgId);
+    const elementIndex = Number(payload.elementIndex);
+    const record = recallViewerRecordIndex.get(msgId);
+    const fileElement = record?.elements?.[elementIndex]?.fileElement;
+    const fileUrl = getViewerFileUrl(fileElement?.filePath, fileElement?.sourcePath);
+    if (!record || !fileElement || !fileUrl) {
+        throw new Error('Archived file is unavailable.');
+    }
+    const filePath = fileURLToPath(fileUrl);
+    const reason = await shell.openPath(filePath);
+    if (reason) {
+        throw new Error(reason);
+    }
+    return { success: true };
 }
 
 function getRecallJumpWindowScore(browserWindow) {
@@ -8418,6 +8816,7 @@ function handleNativeSend(browserWindow, channel, args) {
         voiceFileSender?.rememberNativePeerAliases?.(browserWindow, context.aliases);
     }
     processDeleteBubbleSkin(context);
+    processAntiRecallPreservationIntake(browserWindow, context);
     processPreventRecall(browserWindow, context);
     rememberInlineMediaRecords(browserWindow, context);
     processPokeUpdates(browserWindow, context);
@@ -8481,6 +8880,10 @@ function start() {
     getPluginUpdater();
     scheduleAutomaticUpdateCheck();
     app?.once?.('before-quit', () => {
+        stopAntiRecallPowerState();
+        for (const recallState of recallStates.values()) {
+            recallState.staging?.close();
+        }
         singleForwardWindowController.setQuitting(true);
         clearTimeout(mediaPipBoundsSaveTimer);
         if (mediaPipWindow && !mediaPipWindow.isDestroyed()) {
@@ -8494,6 +8897,7 @@ function start() {
     installConfigIpc();
     installForAllWindows();
     applyVoiceMessageConfig();
+    syncAntiRecallPowerState({ allowInstall: false }).catch(() => {});
     cleanupOldRepairFiles(true).catch(() => {});
     app?.on?.('browser-window-created', (_event, browserWindow) => {
         singleForwardWindowController.install(browserWindow);

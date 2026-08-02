@@ -41,6 +41,9 @@ const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
 const CHANNEL_OPEN_RECALL_IMAGE_DIR = 'qqnt-toolbox:open-recall-image-dir';
 const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
 const CHANNEL_GET_RECALL_CONTACTS = 'qqnt-toolbox:get-recall-contacts';
+const CHANNEL_GET_ANTI_RECALL_STATUS = 'qqnt-toolbox:get-anti-recall-status';
+const CHANNEL_UNINSTALL_CLOSED_LID_HELPER = 'qqnt-toolbox:uninstall-closed-lid-helper';
+const CHANNEL_ANTI_RECALL_STATUS_CHANGED = 'qqnt-toolbox:anti-recall-status-changed';
 const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
 const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
 const CHANNEL_PREPARE_UPDATE = 'qqnt-toolbox:prepare-update';
@@ -83,6 +86,8 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     openRecallImageDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_IMAGE_DIR),
     viewRecallMessages: () => ipcRenderer.invoke(CHANNEL_VIEW_RECALL_MESSAGES),
     getRecallContacts: () => ipcRenderer.invoke(CHANNEL_GET_RECALL_CONTACTS),
+    getAntiRecallStatus: () => ipcRenderer.invoke(CHANNEL_GET_ANTI_RECALL_STATUS),
+    uninstallClosedLidHelper: () => ipcRenderer.invoke(CHANNEL_UNINSTALL_CLOSED_LID_HELPER),
     getUpdateState: () => ipcRenderer.invoke(CHANNEL_GET_UPDATE_STATE),
     checkForUpdates: options => ipcRenderer.invoke(CHANNEL_CHECK_UPDATE, options),
     prepareUpdate: () => ipcRenderer.invoke(CHANNEL_PREPARE_UPDATE),
@@ -101,6 +106,11 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
         const listener = (_event, config) => callback(config);
         ipcRenderer.on(CHANNEL_CONFIG_CHANGED, listener);
         return () => ipcRenderer.removeListener(CHANNEL_CONFIG_CHANGED, listener);
+    },
+    onAntiRecallStatusChanged: callback => {
+        const listener = (_event, status) => callback(status);
+        ipcRenderer.on(CHANNEL_ANTI_RECALL_STATUS_CHANGED, listener);
+        return () => ipcRenderer.removeListener(CHANNEL_ANTI_RECALL_STATUS_CHANGED, listener);
     },
     onUpdateStateChanged: callback => {
         const listener = (_event, state) => callback(state);

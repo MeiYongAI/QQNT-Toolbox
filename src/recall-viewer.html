@@ -84,11 +84,39 @@
             flex: 0 0 clamp(230px, 29%, 320px);
             width: clamp(230px, 29%, 320px);
             height: 100%;
-            padding: 10px 6px;
-            overflow: auto;
+            padding: 0;
+            overflow: hidden;
             border-right: 1px solid var(--border-color);
             background: var(--sidebar-bg);
             color: var(--sidebar-text);
+        }
+        .sidebar-toolbar {
+            position: sticky;
+            z-index: 2;
+            top: 0;
+            padding: 10px 8px 8px;
+            background: var(--sidebar-bg);
+        }
+        .chat-search {
+            width: 100%;
+            height: 32px;
+            padding: 0 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 7px;
+            outline: none;
+            color: var(--sidebar-text);
+            background: var(--subtle-bg);
+            font: inherit;
+            user-select: text;
+        }
+        .chat-search:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent);
+        }
+        .chat-list {
+            height: calc(100% - 50px);
+            padding: 0 6px 10px;
+            overflow: auto;
         }
         .chat-item {
             display: flex;
@@ -180,6 +208,10 @@
             white-space: nowrap;
             opacity: .7;
             font-size: 11px;
+        }
+        .chat-file-count {
+            margin-left: 6px;
+            color: var(--accent);
         }
         .messages {
             flex: 1 1 auto;
@@ -560,32 +592,22 @@
             line-height: 16px;
             white-space: nowrap;
         }
-        .file-download {
-            position: relative;
-            flex: 0 0 40px;
-            width: 40px;
-            height: 40px;
-            border-radius: 5px;
+        .file-open {
+            flex: 0 0 auto;
+            min-width: 48px;
+            height: 30px;
+            padding: 0 10px;
+            border: 0;
+            border-radius: 6px;
+            color: var(--accent);
             background: var(--subtle-bg);
+            font: inherit;
+            cursor: pointer;
         }
-        .file-download::before {
-            content: "";
-            position: absolute;
-            top: 9px;
-            left: 9px;
-            width: 20px;
-            height: 20px;
-            border: 1px solid var(--secondary-text);
-            border-radius: 50%;
-        }
-        .file-download::after {
-            content: "\2193";
-            position: absolute;
-            inset: 0;
+        .file-open:disabled {
             color: var(--secondary-text);
-            font-size: 18px;
-            line-height: 39px;
-            text-align: center;
+            cursor: default;
+            opacity: .7;
         }
         .forward-card {
             width: 228px;
@@ -729,7 +751,12 @@
 </head>
 <body>
     <div class="data">
-        <aside id="chat-list" class="sidebar"><div class="empty-state">加载数据中...</div></aside>
+        <aside class="sidebar">
+            <div class="sidebar-toolbar">
+                <input id="chat-search" class="chat-search" type="search" placeholder="搜索群名、QQ号或文件名" autocomplete="off">
+            </div>
+            <div id="chat-list" class="chat-list"><div class="empty-state">加载数据中...</div></div>
+        </aside>
         <main id="message-list" class="messages"><div class="empty-state">请选择左侧会话</div></main>
     </div>
     <script src="./recall-viewer.js"></script>

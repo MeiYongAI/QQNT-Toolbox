@@ -1,7 +1,11 @@
 const EDITOR_ID = 'qqnt-toolbox-context-menu-order-editor';
 const STYLE_ID = 'qqnt-toolbox-context-menu-order-style';
 const SEPARATOR_ID_PREFIX = 'qq:separator:';
-const OBSOLETE_MESSAGE_CONTEXT_MENU_IDS = new Set(['toolbox:multi-message-to-image']);
+const OBSOLETE_MESSAGE_CONTEXT_MENU_IDS = new Set([
+    'toolbox:multi-message-to-image',
+    'toolbox:open-archived-file',
+    'toolbox:reveal-archived-file'
+]);
 
 export const MENU_SCOPE_DEFINITIONS = Object.freeze([
     { id: 'message', label: '消息' },

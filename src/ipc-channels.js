@@ -49,8 +49,12 @@ const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
 const CHANNEL_OPEN_RECALL_IMAGE_DIR = 'qqnt-toolbox:open-recall-image-dir';
 const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
 const CHANNEL_GET_RECALL_CONTACTS = 'qqnt-toolbox:get-recall-contacts';
+const CHANNEL_GET_ANTI_RECALL_STATUS = 'qqnt-toolbox:get-anti-recall-status';
+const CHANNEL_UNINSTALL_CLOSED_LID_HELPER = 'qqnt-toolbox:uninstall-closed-lid-helper';
+const CHANNEL_ANTI_RECALL_STATUS_CHANGED = 'qqnt-toolbox:anti-recall-status-changed';
 const CHANNEL_GET_RECALL_VIEWER_DATA = 'qqnt-toolbox:get-recall-viewer-data';
 const CHANNEL_GET_RECALL_AUDIO_PREVIEW = 'qqnt-toolbox:get-recall-audio-preview';
+const CHANNEL_OPEN_RECALL_VIEWER_FILE = 'qqnt-toolbox:open-recall-viewer-file';
 const CHANNEL_JUMP_RECALL_MESSAGE = 'qqnt-toolbox:jump-recall-message';
 const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
 const CHANNEL_CHECK_UPDATE = 'qqnt-toolbox:check-update';
@@ -108,8 +112,12 @@ module.exports = Object.freeze({
     CHANNEL_OPEN_RECALL_IMAGE_DIR,
     CHANNEL_VIEW_RECALL_MESSAGES,
     CHANNEL_GET_RECALL_CONTACTS,
+    CHANNEL_GET_ANTI_RECALL_STATUS,
+    CHANNEL_UNINSTALL_CLOSED_LID_HELPER,
+    CHANNEL_ANTI_RECALL_STATUS_CHANGED,
     CHANNEL_GET_RECALL_VIEWER_DATA,
     CHANNEL_GET_RECALL_AUDIO_PREVIEW,
+    CHANNEL_OPEN_RECALL_VIEWER_FILE,
     CHANNEL_JUMP_RECALL_MESSAGE,
     CHANNEL_GET_UPDATE_STATE,
     CHANNEL_CHECK_UPDATE,

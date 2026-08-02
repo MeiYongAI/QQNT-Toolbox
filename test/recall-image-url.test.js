@@ -2,7 +2,10 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createRecallImageUrlResolver } = require('../src/recall-image-url');
+const {
+    createRecallImageUrlResolver,
+    getImmediateRecallImageUrl
+} = require('../src/recall-image-url');
 
 test('resolves QQ relative image paths without an rkey request', async () => {
     const resolver = createRecallImageUrlResolver({
@@ -73,4 +76,11 @@ test('builds a legacy group image URL from an MD5 when no URL exists', async () 
         await resolver.resolve({ md5HexStr: 'aabbccdd' }),
         'https://gchat.qpic.cn/gchatpic_new/0/0-0-AABBCCDD/0'
     );
+});
+
+test('builds an immediate legacy fallback for NT images that still need an rkey', () => {
+    assert.equal(getImmediateRecallImageUrl({
+        originImageUrl: '/download?appid=1407&fileid=group-file&spec=0',
+        md5HexStr: 'aabbccdd'
+    }), 'https://gchat.qpic.cn/gchatpic_new/0/0-0-AABBCCDD/0');
 });
