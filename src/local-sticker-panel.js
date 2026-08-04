@@ -192,7 +192,7 @@ function createIconButton(className, label, iconPaths) {
     return button;
 }
 
-function findProseMirrorEditor() {
+export function findProseMirrorEditor() {
     const editorElement = document.querySelector('.qq-msg-editor');
     for (const instance of new Set(editorElement?.__VUE__ || [])) {
         try {

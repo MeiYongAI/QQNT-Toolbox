@@ -99,7 +99,7 @@ try {
         'QQNT-Toolbox/src/qr-result-dialog.js',
         'QQNT-Toolbox/src/context-menu-order-config.js',
         'QQNT-Toolbox/src/context-menu-order.js',
-        'QQNT-Toolbox/src/reply-at-cleanup.js',
+        'QQNT-Toolbox/src/reply-at-control.js',
         'QQNT-Toolbox/src/media-session.js',
         'QQNT-Toolbox/src/media-viewer.html',
         'QQNT-Toolbox/src/media-viewer.css',

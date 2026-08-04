@@ -16,14 +16,20 @@ import {
 } from './chat-toolbar-entry.js';
 import { createRecallFilterEditor } from './recall-filter-editor.js';
 import { createAutoReactionEditor } from './auto-reaction-editor.js';
-import { createLocalStickerController } from './local-sticker-panel.js';
+import {
+    createLocalStickerController,
+    findProseMirrorEditor
+} from './local-sticker-panel.js';
 import { createLocalStickerManager } from './local-sticker-manager.js';
 import {
     createMessageImageController,
     getMessageImageSenderMetadata
 } from './message-to-image.js';
 import { createMessageImageManager } from './message-image-manager.js';
-import { createReplyAtCleanupTracker } from './reply-at-cleanup.js';
+import {
+    installCkeditorReplyAtGuard,
+    installReplyAtInsertGuard
+} from './reply-at-control.js';
 import './qr-result-dialog.js';
 
 let initializeToolboxSettings = async () => {};
@@ -312,9 +318,6 @@ let handleToolboxVueComponentMount = () => {};
     let unreadCountObservedRoot = null;
     let unreadCountRefreshTimer = 0;
     let preventDragActive = false;
-    let replyAtEditor = null;
-    let replyAtCleanupBusy = false;
-    const replyAtCleanupTracker = createReplyAtCleanupTracker();
     let imageViewerDrag = null;
     let emojiImageOpenUntil = 0;
     const nativeMediaDispatchEvents = new WeakSet();
@@ -4398,7 +4401,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         interfaceRefreshTimer = window.setTimeout(() => {
             interfaceRefreshTimer = 0;
             applyInterfaceTweaks();
-            installReplyAtCleanup();
+            installReplyAtControl();
         }, 80);
     }
 
@@ -4424,7 +4427,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         applyInterfaceTweaks();
-        installReplyAtCleanup();
+        installReplyAtControl();
     }
 
     function installInterfaceTweaksObserver() {
@@ -4440,77 +4443,25 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         scheduleInterfaceTweaksRefresh();
     }
 
-    function getCkeditorInstance() {
-        return document.querySelector('.ck.ck-content.ck-editor__editable')?.ckeditorInstance || null;
-    }
-
-    function cleanupReplyAt(editor) {
-        if (replyAtCleanupBusy) {
-            return;
+    function installReplyAtControl() {
+        const editor = findProseMirrorEditor();
+        if (editor) {
+            if (installReplyAtInsertGuard(
+                editor,
+                () => isConfigEnabled('messageTweaks.removeReplyAt')
+            )) {
+                return;
+            }
         }
-        const model = editor?.model;
-        const doc = model?.document;
-        const root = doc?.getRoot?.();
-        if (!model || !root) {
-            return;
+        const ckeditor = document.querySelector(
+            '.ck.ck-content.ck-editor__editable'
+        )?.ckeditorInstance;
+        if (ckeditor) {
+            installCkeditorReplyAtGuard(
+                ckeditor,
+                () => isConfigEnabled('messageTweaks.removeReplyAt')
+            );
         }
-        const replyElement = Array.from(root.getChildren?.() || [])
-            .find(child => child.is?.('element', 'msg-reply')) || null;
-        if (!replyAtCleanupTracker.shouldCleanup(
-            editor,
-            replyElement,
-            isConfigEnabled('messageTweaks.removeReplyAt')
-        )) {
-            return;
-        }
-        replyAtCleanupBusy = true;
-        try {
-            model.enqueueChange('transparent', writer => {
-                let atElement = null;
-                let nextText = null;
-                for (const child of root.getChildren()) {
-                    if (!child.is?.('element', 'paragraph')) {
-                        continue;
-                    }
-                    const children = Array.from(child.getChildren?.() || []);
-                    for (let index = 0; index < children.length - 1; index++) {
-                        const current = children[index];
-                        const next = children[index + 1];
-                        if (current.is?.('element', 'msg-at')) {
-                            atElement = current;
-                            nextText = next;
-                        }
-                    }
-                }
-                if (nextText?.root && nextText.is?.('$text')) {
-                    const raw = String(nextText.data || '');
-                    const trimmed = raw.replace(/^\s+/, '');
-                    if (trimmed !== raw) {
-                        const position = writer.createPositionBefore(nextText);
-                        const attributes = Object.fromEntries(Array.from(nextText.getAttributes?.() || []));
-                        writer.remove(nextText);
-                        if (trimmed) {
-                            writer.insertText(trimmed, attributes, position);
-                        }
-                    }
-                }
-                if (atElement?.root) {
-                    writer.remove(writer.createRangeOn(atElement));
-                }
-            });
-        } catch {
-        } finally {
-            replyAtCleanupBusy = false;
-        }
-    }
-
-    function installReplyAtCleanup() {
-        const editor = getCkeditorInstance();
-        if (!editor || editor === replyAtEditor) {
-            return;
-        }
-        replyAtEditor = editor;
-        editor.model?.document?.on?.('change:data', () => cleanupReplyAt(editor));
     }
 
     function getGoBackMainList() {
