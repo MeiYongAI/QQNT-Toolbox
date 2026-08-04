@@ -977,7 +977,22 @@ export function createContextMenuOrderController(options) {
                 items: args[1],
                 originalContext: args[2] || null,
                 context: args[2] || null,
-                options: args[3]
+                options: args[3],
+                getNativeItemsForContext: context => {
+                    const previousContext = menuContext.menuContext;
+                    try {
+                        menuContext.menuContext = context;
+                        const configs = originalGet.call(menuContext);
+                        return Array.isArray(configs) ? [...configs] : [];
+                    } catch {
+                        return [];
+                    } finally {
+                        try {
+                            menuContext.menuContext = previousContext;
+                        } catch {
+                        }
+                    }
+                }
             };
             const scope = 'message';
             request = runExtensionHook('beforeOpen', { ...request, scope }, scope) || request;

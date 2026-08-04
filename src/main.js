@@ -251,6 +251,7 @@ const RETRY_DELAY_MS = 800;
 const REPAIR_FILE_TTL_MS = 24 * 60 * 60 * 1000;
 const QR_SCAN_COMMAND = 'nodeIKernelNodeMiscService/scanQBar';
 const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
+const WINDOWS_MEDIA_VIEWER_STAGING_OPACITY = 1 / 255;
 const WINDOWS_MEDIA_VIEWER_OPACITY = 254 / 255;
 const MEDIA_VIEWER_PRESENT_TIMEOUT_MS = 750;
 const SET_MESSAGE_REACTION_COMMAND = 'nodeIKernelMsgService/setMsgEmojiLikes';
@@ -3978,7 +3979,7 @@ async function hideMediaViewer() {
     const presentationId = crypto.randomUUID();
     const cleared = waitForMediaViewerPresentation(presentationId);
     if (process.platform === 'win32') {
-        viewerWindow.setOpacity(0);
+        viewerWindow.setOpacity(WINDOWS_MEDIA_VIEWER_STAGING_OPACITY);
         viewerWindow.setIgnoreMouseEvents(true);
     }
     sendMediaViewerState({ hidden: true, presentationId });
@@ -4051,6 +4052,7 @@ async function ensureMediaViewerWindow(sourceWindow) {
         title: `${PLUGIN_NAME} - 媒体预览`,
         webPreferences: {
             preload: path.join(__dirname, 'media-viewer-preload.js'),
+            backgroundThrottling: false,
             contextIsolation: true,
             nodeIntegration: false
         }
@@ -4105,25 +4107,30 @@ function bindMediaViewerSourceWindow(sourceWindow) {
 }
 
 async function activateMediaViewerWindow(viewerWindow, stateOverrides = null) {
-    mediaViewerVisibilityRevision += 1;
+    const visibilityRevision = ++mediaViewerVisibilityRevision;
     const state = getMediaViewerPublicState();
     const presentationId = crypto.randomUUID();
     const presented = waitForMediaViewerPresentation(presentationId);
+    if (viewerWindow.isMinimized()) {
+        viewerWindow.restore();
+    }
     if (process.platform === 'win32') {
-        viewerWindow.setOpacity(0);
+        viewerWindow.setOpacity(WINDOWS_MEDIA_VIEWER_STAGING_OPACITY);
         viewerWindow.setIgnoreMouseEvents(true);
+        // A fully transparent or hidden Chromium window may not receive rAF.
+        viewerWindow.showInactive();
     }
     sendMediaViewerState({
         ...state,
         ...stateOverrides,
         presentationId
     });
-    if (viewerWindow.isMinimized()) {
-        viewerWindow.restore();
+    if (process.platform !== 'win32') {
+        viewerWindow.showInactive();
     }
-    viewerWindow.showInactive();
     const didPresent = await presented;
-    if (viewerWindow.isDestroyed() ||
+    if (visibilityRevision !== mediaViewerVisibilityRevision ||
+        viewerWindow.isDestroyed() ||
         mediaViewerSession.get()?.gallery.id !== state.galleryId) {
         return false;
     }
@@ -4132,7 +4139,7 @@ async function activateMediaViewerWindow(viewerWindow, stateOverrides = null) {
         throw new Error('Media viewer did not commit its first frame.');
     }
     if (!viewerWindow.isVisible()) {
-        return false;
+        throw new Error('Media viewer became hidden before presentation.');
     }
     if (process.platform === 'win32') {
         viewerWindow.setOpacity(WINDOWS_MEDIA_VIEWER_OPACITY);

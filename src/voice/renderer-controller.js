@@ -569,31 +569,27 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         }
         const placeholderRecord = makePttForwardPlaceholder(record, ptt);
         const placeholderContext = { ...request.originalContext, msgRecord: placeholderRecord };
+        const placeholderItems = request.getNativeItemsForContext?.(placeholderContext) || [];
         bridge.nativePttForwardState = {
             active: true,
             menu: request.menu,
             originalContext: request.originalContext,
-            originalRecord: record,
             placeholderContext,
-            placeholderRecord,
+            forwardItem: placeholderItems.find(item => Number(item?.type) === 6) || null,
             ptt,
             sourceMsgId: String(record.msgId || '')
         };
-        return { ...request, context: placeholderContext };
+        return request;
     }
 
     function transformNativePttForwardItems(request) {
         const state = getBridge().nativePttForwardState;
         if (!state?.active || state.menu !== request.menu ||
-            request.menu?.menuContext !== state.placeholderContext || !Array.isArray(request.items)) {
+            request.menu?.menuContext !== state.originalContext || !Array.isArray(request.items)) {
             return request;
         }
-        const speechToText = request.items.find(item => Number(item?.type) === 15) || {
-            type: 15,
-            text: '\u8f6c\u6587\u5b57',
-            icon: 'speech_to_text'
-        };
-        const forward = request.items.find(item => Number(item?.type) === 6) || {
+        const speechToText = request.items.find(item => Number(item?.type) === 15);
+        const forward = state.forwardItem || request.items.find(item => Number(item?.type) === 6) || {
             type: 6,
             text: '\u8f6c\u53d1',
             icon: 'one_by_one_forward'
@@ -601,7 +597,7 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         return {
             ...request,
             items: [
-                speechToText,
+                ...(speechToText ? [speechToText] : []),
                 forward,
                 ...request.items.filter(item => ![1, 6, 15].includes(Number(item?.type)))
             ]
@@ -672,6 +668,12 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         }
         const label = compactText(item);
         if (label === '\u8f6c\u53d1') {
+            try {
+                if (state.placeholderContext && state.menu?._?.ctx) {
+                    state.menu._.ctx.menuContext = state.placeholderContext;
+                }
+            } catch {
+            }
             enqueueAction({
                 type: 'prepareNativePttForward',
                 ptt: state.ptt,

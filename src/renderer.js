@@ -1425,6 +1425,14 @@ let handleToolboxVueComponentMount = () => {};
     flex-wrap: wrap;
     justify-content: flex-end;
 }
+#${PANEL_ID} .qqnt-toolbox-item[data-file-size-range-item="true"] {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+}
+#${PANEL_ID} .qqnt-toolbox-item[data-file-size-range-item="true"] .qqnt-toolbox-range-controls {
+    justify-content: flex-end;
+}
 #${PANEL_ID} .qqnt-toolbox-size-input,
 #${PANEL_ID} .qqnt-toolbox-size-unit {
     height: 28px;
@@ -2559,7 +2567,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 createSwitchItem(text('伪造合并转发'), text('在当前会话创建自定义聊天记录'), 'fakeForward.enabled')
             ]),
             createSection('preventRecall', text('阻止撤回'), [
-                createSwitchItem(text('启用'), text('将撤回灰条替换回原消息'), 'preventRecall.enabled'),
+                createSwitchItem(text('启用消息防撤回'), text('将撤回灰条替换回原消息'), 'preventRecall.enabled'),
                 createChoiceItem(text('撤回标记'), text('选择保留消息的提示样式'), 'preventRecall.markerStyle', [
                     { value: 'badge', label: text('图标') },
                     { value: 'outline', label: text('描边') }
@@ -2619,11 +2627,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     'uninstallClosedLidHelper',
                     { label: text('卸载'), danger: true }
                 ),
-                createAntiRecallStatusItem()
-            ]),
-            createSection('receivedFiles', text('群文件防撤回下载'), [
                 createSwitchItem(
-                    text('启用文件自动下载'),
+                    text('群文件防撤回下载'),
                     text('仅处理实时收到的白名单群普通文件'),
                     'receivedFileAutoDownload.enabled'
                 ),
@@ -2642,7 +2647,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     text('撤回后的图片和文件一直保留到手动清理'),
                     'openRecallDir',
                     { label: text('打开') }
-                )
+                ),
+                createAntiRecallStatusItem()
             ]),
             createSection('entertainment', text('娱乐互动'), [
                 createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),

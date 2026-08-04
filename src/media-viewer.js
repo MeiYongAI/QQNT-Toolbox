@@ -7,6 +7,7 @@
     }
 
     const CONTROL_HIDE_DELAY_MS = 1100;
+    const CONTROL_POINTER_MOVE_THRESHOLD = 5;
     const LOAD_INDICATOR_DELAY_MS = 140;
     const PRELOAD_DELAY_MS = 160;
     const WHEEL_STEP = 90;
@@ -93,7 +94,8 @@
     let mediaOffsetY = 0;
     let panState = null;
     let suppressCloseUntil = 0;
-    let lastPointer = null;
+    let latestPointer = null;
+    let controlsPointerAnchor = null;
     let nativeFallbackKey = '';
     let savedVolume = readSavedVolume();
     let savedPlaybackRate = readSavedPlaybackRate();
@@ -487,6 +489,17 @@
         });
     }
 
+    const silentVideoPauses = new WeakSet();
+
+    function pauseWithoutShowingControls(media) {
+        if (media?.tagName !== 'VIDEO' || media.paused) {
+            media?.pause?.();
+            return;
+        }
+        silentVideoPauses.add(media);
+        media.pause();
+    }
+
     async function renderSelected(forceResolve = false, playbackState = null) {
         const revision = ++renderRevision;
         const galleryId = state.galleryId;
@@ -509,7 +522,7 @@
         }
         setLoadError(false);
         setLoading(true);
-        activeMedia?.pause?.();
+        pauseWithoutShowingControls(activeMedia);
         const prepared = getPreparedMedia(index, forceResolve);
         if (!prepared) {
             setLoading(false);
@@ -733,13 +746,17 @@
         on('volumechange', update);
         on('ratechange', update);
         on('play', () => {
+            silentVideoPauses.delete(video);
             setLoading(false);
             update();
             scheduleControlsHide();
         });
         on('pause', () => {
+            const silent = silentVideoPauses.delete(video);
             update();
-            showControls(false);
+            if (!silent) {
+                showControls(false);
+            }
         });
         on('waiting', () => setLoading(true));
         on('playing', () => setLoading(false));
@@ -752,10 +769,11 @@
             togglePlayback();
         });
         activeVideoCleanup = () => {
-            video.pause();
             for (const [name, listener] of listeners) {
                 video.removeEventListener(name, listener);
             }
+            silentVideoPauses.delete(video);
+            video.pause();
             playerControls.hidden = true;
         };
         update();
@@ -967,7 +985,7 @@
         closePlayerSettings();
         bridge.action({ type: 'select', galleryId: state.galleryId, index }).catch(() => {});
         renderSelected().catch(() => {});
-        showControls();
+        refreshVisibleControls();
         return true;
     }
 
@@ -976,9 +994,11 @@
     }
 
     function hideControls() {
-        if (menuOpen || settingsMenuOpen || panState || rangeAdjusting || activeMedia?.tagName === 'VIDEO' && activeMedia.paused) {
+        if (controlsHidden || menuOpen || settingsMenuOpen || panState || rangeAdjusting ||
+            activeMedia?.tagName === 'VIDEO' && activeMedia.paused) {
             return;
         }
+        controlsPointerAnchor = latestPointer ? { ...latestPointer } : null;
         controlsHidden = true;
         viewer.classList.add('controls-hidden');
     }
@@ -996,6 +1016,12 @@
         clearTimeout(controlsTimer);
         if (schedule) {
             scheduleControlsHide();
+        }
+    }
+
+    function refreshVisibleControls() {
+        if (!controlsHidden) {
+            showControls();
         }
     }
 
@@ -1154,13 +1180,14 @@
         }
         const presentationId = normalizeText(payload?.presentationId);
         const freshPresentation = Boolean(presentationId);
+        const previousGalleryId = state.galleryId;
         if (freshPresentation) {
             resetMediaLifecycle({ clearStatus: true, conceal: true });
             state = createEmptyViewerState(state.background);
             globalThis.qqntToolboxQrDialog?.close?.();
         }
         const nextState = normalizeState(payload);
-        const galleryChanged = nextState.galleryId !== state.galleryId;
+        const galleryChanged = nextState.galleryId !== previousGalleryId;
         if (!freshPresentation && galleryChanged) {
             resetMediaLifecycle({ clearStatus: true, conceal: true });
         } else if (!freshPresentation) {
@@ -1179,7 +1206,9 @@
         updateChrome();
         acknowledgePresentation(presentationId);
         renderSelected(false, nextState.playback).catch(() => {});
-        showControls();
+        if (freshPresentation || galleryChanged) {
+            showControls();
+        }
         viewer.focus({ preventScroll: true });
     }
 
@@ -1430,8 +1459,15 @@
     slot.addEventListener('pointercancel', finishPan);
     viewer.addEventListener('pointermove', event => {
         const point = { x: event.clientX, y: event.clientY };
-        if (!lastPointer || Math.hypot(point.x - lastPointer.x, point.y - lastPointer.y) >= 2) {
-            lastPointer = point;
+        latestPointer = point;
+        if (!controlsPointerAnchor) {
+            controlsPointerAnchor = point;
+            return;
+        }
+        const pointerDelta = Math.abs(point.x - controlsPointerAnchor.x) +
+            Math.abs(point.y - controlsPointerAnchor.y);
+        if (pointerDelta >= CONTROL_POINTER_MOVE_THRESHOLD) {
+            controlsPointerAnchor = point;
             showControls();
         }
     }, { passive: true });
@@ -1548,9 +1584,12 @@
             return;
         }
         let handled = true;
+        let navigationKey = false;
         if (event.key === 'ArrowLeft') {
+            navigationKey = true;
             navigate(-1);
         } else if (event.key === 'ArrowRight') {
+            navigationKey = true;
             navigate(1);
         } else if (event.key === ' ' || event.key.toLowerCase() === 'k') {
             togglePlayback();
@@ -1571,8 +1610,10 @@
         } else if (event.ctrlKey && event.key.toLowerCase() === 's') {
             runAction('save');
         } else if (event.key === 'Home') {
+            navigationKey = true;
             navigateTo(0);
         } else if (event.key === 'End') {
+            navigationKey = true;
             navigateTo(state.items.length - 1);
         } else {
             handled = false;
@@ -1580,7 +1621,9 @@
         if (handled) {
             event.preventDefault();
             event.stopPropagation();
-            showControls();
+            if (!navigationKey) {
+                showControls();
+            }
         }
     });
     window.addEventListener('beforeunload', () => {

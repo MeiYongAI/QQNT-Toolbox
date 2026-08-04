@@ -420,20 +420,88 @@ test('conceals stale media until the reopened viewer has rendered its requested 
     assert.match(viewerCss, /\.media-viewer\.is-concealed \.media-slot \{\s*visibility: hidden;/);
     assert.match(viewerSource, /function resetMediaLifecycle[\s\S]*clearPreparedMedia\(\);[\s\S]*clearActiveMedia\(\);[\s\S]*concealMedia\(\);/);
     assert.match(viewerSource, /if \(payload\?\.hidden === true\) \{\s*const presentationId = normalizeText\(payload\?\.presentationId\);\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);\s*state = createEmptyViewerState\(state\.background\);/);
-    assert.match(viewerSource, /const freshPresentation = Boolean\(presentationId\);\s*if \(freshPresentation\) \{\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);\s*state = createEmptyViewerState\(state\.background\);/);
+    assert.match(viewerSource, /const freshPresentation = Boolean\(presentationId\);[\s\S]*if \(freshPresentation\) \{\s*resetMediaLifecycle\(\{ clearStatus: true, conceal: true \}\);\s*state = createEmptyViewerState\(state\.background\);/);
     assert.match(viewerSource, /function revealSelectedMedia[\s\S]*activeGalleryId !== galleryId[\s\S]*activeIndex !== index[\s\S]*classList\.remove\('is-concealed'\)/);
     assert.match(viewerSource, /async function renderSelected[\s\S]*slot\.replaceChildren\(media\)[\s\S]*revealSelectedMedia\(galleryId, index\)/);
     assert.doesNotMatch(viewerSource, /renderSelected\(false, nextState\.playback\)\.then/);
 });
 
-test('presents a reused media window only after the renderer commits a cleared frame', () => {
+test('keeps hidden viewer controls hidden while stationary navigation changes media', () => {
+    const viewerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.js'), 'utf8');
+    const navigateSource = viewerSource.slice(
+        viewerSource.indexOf('function navigateTo'),
+        viewerSource.indexOf('function navigate(delta)')
+    );
+    const applyStateSource = viewerSource.slice(
+        viewerSource.indexOf('function applyState'),
+        viewerSource.indexOf("previous.addEventListener('click'")
+    );
+    const pointerMoveSource = viewerSource.slice(
+        viewerSource.indexOf("viewer.addEventListener('pointermove'"),
+        viewerSource.indexOf("viewer.addEventListener('click'")
+    );
+    const hideControlsSource = viewerSource.slice(
+        viewerSource.indexOf('function hideControls'),
+        viewerSource.indexOf('function scheduleControlsHide')
+    );
+    const renderSelectedSource = viewerSource.slice(
+        viewerSource.indexOf('async function renderSelected'),
+        viewerSource.indexOf('function scheduleAdjacentPreload')
+    );
+    const bindVideoSource = viewerSource.slice(
+        viewerSource.indexOf('function bindActiveVideo'),
+        viewerSource.indexOf('function togglePlayback')
+    );
+    const keydownSource = viewerSource.slice(
+        viewerSource.indexOf("document.addEventListener('keydown'"),
+        viewerSource.indexOf("window.addEventListener('beforeunload'")
+    );
+
+    assert.match(viewerSource, /const CONTROL_POINTER_MOVE_THRESHOLD = 5/);
+    assert.match(viewerSource, /function refreshVisibleControls\(\) \{\s*if \(!controlsHidden\) \{\s*showControls\(\);/);
+    assert.match(navigateSource, /renderSelected\(\)\.catch\(\(\) => \{\}\);\s*refreshVisibleControls\(\);/);
+    assert.doesNotMatch(navigateSource, /\bshowControls\(/);
+    assert.match(applyStateSource, /const previousGalleryId = state\.galleryId[\s\S]*const galleryChanged = nextState\.galleryId !== previousGalleryId/);
+    assert.match(applyStateSource, /if \(freshPresentation \|\| galleryChanged\) \{\s*showControls\(\);\s*\}/);
+    assert.doesNotMatch(applyStateSource, /renderSelected\(false, nextState\.playback\)\.catch\(\(\) => \{\}\);\s*showControls\(\)/);
+    assert.match(hideControlsSource, /if \(controlsHidden \|\|[\s\S]*return;\s*\}[\s\S]*controlsPointerAnchor = latestPointer \? \{ \.\.\.latestPointer \} : null;[\s\S]*controlsHidden = true/);
+    assert.match(pointerMoveSource, /latestPointer = point;\s*if \(!controlsPointerAnchor\) \{\s*controlsPointerAnchor = point;\s*return;/);
+    assert.match(pointerMoveSource, /Math\.abs\(point\.x - controlsPointerAnchor\.x\) \+[\s\S]*Math\.abs\(point\.y - controlsPointerAnchor\.y\)[\s\S]*pointerDelta >= CONTROL_POINTER_MOVE_THRESHOLD/);
+    assert.match(renderSelectedSource, /pauseWithoutShowingControls\(activeMedia\)/);
+    assert.doesNotMatch(renderSelectedSource, /activeMedia\?\.pause\?\.\(\)/);
+    assert.match(bindVideoSource, /on\('pause',[\s\S]*silentVideoPauses\.delete\(video\)[\s\S]*if \(!silent\) \{\s*showControls\(false\);/);
+    assert.match(bindVideoSource, /activeVideoCleanup = \(\) => \{\s*for \(const \[name, listener\] of listeners\)[\s\S]*video\.removeEventListener\(name, listener\);[\s\S]*video\.pause\(\)/);
+    assert.match(keydownSource, /let navigationKey = false[\s\S]*event\.key === 'ArrowLeft'[\s\S]*navigationKey = true[\s\S]*event\.key === 'ArrowRight'[\s\S]*navigationKey = true/);
+    assert.match(keydownSource, /event\.key === 'Home'[\s\S]*navigationKey = true[\s\S]*event\.key === 'End'[\s\S]*navigationKey = true/);
+    assert.match(keydownSource, /if \(!navigationKey\) \{\s*showControls\(\);\s*\}/);
+});
+
+test('keeps the Windows media viewer composited until the latest presentation commits', () => {
     const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
     const viewerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.js'), 'utf8');
+    const hideSource = mainSource.slice(
+        mainSource.indexOf('async function hideMediaViewer'),
+        mainSource.indexOf('function syncMediaViewerConfig')
+    );
+    const createSource = mainSource.slice(
+        mainSource.indexOf('async function ensureMediaViewerWindow'),
+        mainSource.indexOf('function bindMediaViewerSourceWindow')
+    );
+    const activateSource = mainSource.slice(
+        mainSource.indexOf('async function activateMediaViewerWindow'),
+        mainSource.indexOf('async function presentMediaViewer')
+    );
 
+    assert.match(mainSource, /const WINDOWS_MEDIA_VIEWER_STAGING_OPACITY = 1 \/ 255/);
+    assert.match(createSource, /backgroundThrottling: false/);
     assert.match(mainSource, /const presented = waitForMediaViewerPresentation\(presentationId\)/);
-    assert.match(mainSource, /setOpacity\(0\)[\s\S]*showInactive\(\)[\s\S]*const didPresent = await presented[\s\S]*if \(!didPresent\)[\s\S]*setOpacity\(WINDOWS_MEDIA_VIEWER_OPACITY\)/);
-    assert.match(mainSource, /async function hideMediaViewer\(\) \{[\s\S]*const cleared = waitForMediaViewerPresentation\(presentationId\)[\s\S]*setOpacity\(0\);[\s\S]*sendMediaViewerState\(\{ hidden: true, presentationId \}\)[\s\S]*const didClear = await cleared[\s\S]*viewerWindow\.hide\(\);/);
-    assert.match(mainSource, /mediaViewerVisibilityRevision \+= 1;[\s\S]*const presented = waitForMediaViewerPresentation\(presentationId\)/);
+    assert.match(hideSource, /setOpacity\(WINDOWS_MEDIA_VIEWER_STAGING_OPACITY\)[\s\S]*sendMediaViewerState\(\{ hidden: true, presentationId \}\)[\s\S]*const didClear = await cleared[\s\S]*viewerWindow\.hide\(\)/);
+    assert.doesNotMatch(hideSource, /setOpacity\(0\)/);
+    assert.match(activateSource, /const visibilityRevision = \+\+mediaViewerVisibilityRevision/);
+    assert.match(activateSource, /setOpacity\(WINDOWS_MEDIA_VIEWER_STAGING_OPACITY\)[\s\S]*showInactive\(\)[\s\S]*sendMediaViewerState\([\s\S]*const didPresent = await presented/);
+    assert.match(activateSource, /if \(visibilityRevision !== mediaViewerVisibilityRevision \|\|[\s\S]*return false;[\s\S]*if \(!didPresent\)[\s\S]*viewerWindow\.hide\(\)/);
+    assert.match(activateSource, /setOpacity\(WINDOWS_MEDIA_VIEWER_OPACITY\)/);
+    assert.doesNotMatch(activateSource, /setOpacity\(0\)/);
     assert.match(mainSource, /if \(type === 'presented'\) \{\s*return \{ ok: completeMediaViewerPresentation\(payload\.presentationId\) \};/);
     assert.match(viewerSource, /function acknowledgePresentation[\s\S]*requestAnimationFrame\(\(\) => \{\s*requestAnimationFrame\(\(\) => \{[\s\S]*type: 'presented'/);
     assert.match(viewerSource, /if \(payload\?\.hidden === true\) \{[\s\S]*acknowledgePresentation\(presentationId\);\s*return;/);
@@ -690,7 +758,7 @@ test('creates one reusable true-fullscreen frameless media viewer', () => {
     assert.match(mainSource, /new BrowserWindow\(\{[\s\S]*frame: false,[\s\S]*resizable: false,[\s\S]*maximizable: false,[\s\S]*thickFrame: false,[\s\S]*transparent: true,[\s\S]*skipTaskbar: true,[\s\S]*fullscreen: false,[\s\S]*fullscreenable: true/);
     assert.match(mainSource, /const WINDOWS_MEDIA_VIEWER_OPACITY = 254 \/ 255/);
     assert.match(mainSource, /process\.platform === 'win32'[\s\S]*viewerWindow\.setOpacity\(WINDOWS_MEDIA_VIEWER_OPACITY\)/);
-    assert.doesNotMatch(viewerWindowSource, /backgroundThrottling:\s*false/);
+    assert.match(viewerWindowSource, /backgroundThrottling:\s*false/);
     assert.match(mainSource, /media-viewer-preload\.js/);
     assert.match(mainSource, /media-viewer\.html/);
     assert.match(mainSource, /function positionMediaViewerWindow[\s\S]*viewerWindow\.isFullScreen\(\)[\s\S]*currentDisplay\.id === display\.id[\s\S]*viewerWindow\.setBounds\(display\.bounds\);\s*viewerWindow\.setFullScreen\(true\);/);

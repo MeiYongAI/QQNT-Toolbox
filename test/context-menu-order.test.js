@@ -531,6 +531,43 @@ test('passes the first captured message context without changing QQ openMenu arg
     assert.equal(extensionContext.messageElement, messageElement);
 });
 
+test('reads native items for an alternate context without replacing the opened message context', async () => {
+    const { createContextMenuOrderController } = await modulePromise;
+    const controller = createContextMenuOrderController({
+        getConfig: () => ({ enabled: false, items: [], catalog: [] })
+    });
+    let alternateItems = [];
+    controller.registerExtension({
+        id: 'alternate-native-context',
+        beforeOpen: request => {
+            alternateItems = request.getNativeItemsForContext({ kind: 'placeholder' });
+            return request;
+        }
+    });
+
+    const menuContext = { menuContext: null };
+    Object.defineProperty(menuContext, 'showMenuConfig', {
+        configurable: true,
+        get() {
+            return this.menuContext?.kind === 'placeholder'
+                ? [{ type: 6, text: 'forward-placeholder' }]
+                : [{ type: 15, text: 'speech-original' }];
+        }
+    });
+    menuContext.openMenu = function openMenu(_event, _items, context) {
+        this.menuContext = context;
+        return this.showMenuConfig;
+    };
+    const menu = { _: { ctx: menuContext } };
+    controller.patchMenu(menu);
+    const originalContext = { kind: 'voice' };
+
+    const openedItems = menuContext.openMenu(null, [], originalContext, {});
+    assert.deepEqual(alternateItems, [{ type: 6, text: 'forward-placeholder' }]);
+    assert.deepEqual(openedItems, [{ type: 15, text: 'speech-original' }]);
+    assert.equal(menuContext.menuContext, originalContext);
+});
+
 test('pre-patches only a provider owned by a confirmed message component', async () => {
     const { createContextMenuOrderController } = await modulePromise;
     const OriginalElement = global.Element;

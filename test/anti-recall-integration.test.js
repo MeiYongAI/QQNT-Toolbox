@@ -106,15 +106,20 @@ test('isolates file preservation from slow image downloads and prioritizes recal
     assert.match(main, /enqueuePreservationTask\(recallState\.accountUin, queuedAsset\.kind/);
 });
 
-test('keeps file policy independent from file names and content types in the received-file UI', () => {
+test('integrates received-file protection into anti-recall without changing its policy', () => {
     const renderer = source('src/renderer.js');
-    const sectionStart = renderer.indexOf("createSection('receivedFiles'");
+    const sectionStart = renderer.indexOf("createSection('preventRecall'");
     const sectionEnd = renderer.indexOf("createSection('entertainment'", sectionStart);
     const section = renderer.slice(sectionStart, sectionEnd);
+    assert.match(section, /启用消息防撤回[\s\S]*preventRecall\.enabled/);
+    assert.match(section, /群文件防撤回下载[\s\S]*receivedFileAutoDownload\.enabled/);
     assert.match(section, /receivedFileAutoDownload\.enabled/);
     assert.match(section, /manageAutoDownloadGroups/);
     assert.match(section, /createFileSizeRangeItem/);
+    assert.match(section, /openRecallDir/);
+    assert.doesNotMatch(renderer, /createSection\('receivedFiles'/);
     assert.doesNotMatch(section, /MIME|扩展名|后缀|格式过滤/);
+    assert.match(renderer, /#\$\{PANEL_ID\} \.qqnt-toolbox-item\[data-file-size-range-item="true"\] \{\s*flex-direction: column;\s*align-items: stretch;\s*gap: 6px;/);
 });
 
 test('wires anti-recall status and helper lifecycle through matching IPC channels', () => {
