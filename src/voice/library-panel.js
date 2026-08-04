@@ -3,6 +3,10 @@
 function createVoiceLibraryPanel(options = {}) {
     const ROOT_ID = 'qqnt-toolbox-voice-library';
     const STYLE_ID = 'qqnt-toolbox-voice-library-style';
+    const LIST_INITIAL_RENDER_COUNT = 48;
+    const LIST_RENDER_PAGE_SIZE = 48;
+    const LIST_RENDER_THRESHOLD = 192;
+    const ESTIMATED_LIST_ROW_HEIGHT = 56;
     const TEXT = {
         title: '\u8bed\u97f3\u6d88\u606f',
         library: '\u8bed\u97f3\u5e93',
@@ -50,7 +54,8 @@ function createVoiceLibraryPanel(options = {}) {
         busy: false,
         statusTimer: 0,
         moved: false,
-        position: null
+        position: null,
+        renderedItemCount: 0
     };
 
     function createElement(tagName, className = '', textContent) {
@@ -372,59 +377,125 @@ function createVoiceLibraryPanel(options = {}) {
         nav.append(back, path);
     }
 
+    function getItemMetaText(item) {
+        if (item.kind === 'folder') {
+            return `${TEXT.folder} \u00b7 ${Number(item.count) || 0} ${TEXT.items}`;
+        }
+        if (item.kind === 'media') {
+            return `${TEXT.pending} \u00b7 ${TEXT.duration}\uff1a${formatDuration(item.duration)}`;
+        }
+        return `${TEXT.duration}\uff1a${formatDuration(item.duration)}`;
+    }
+
+    function createListRow(item) {
+        const row = createElement('div', 'qvlib-row');
+        row.dataset.voiceItemId = item.id;
+        const main = createElement('div', 'qvlib-main');
+        const name = createElement('div', 'qvlib-name', item.title || TEXT.item);
+        name.title = item.title || TEXT.item;
+        main.append(name, createElement('div', 'qvlib-meta', getItemMetaText(item)));
+        const actions = createElement('div', 'qvlib-actions');
+        const specs = item.kind === 'folder'
+            ? [
+                [TEXT.open, 'openFolder', ''],
+                [TEXT.rename, 'renameLibrary', '']
+            ]
+            : [
+                [TEXT.send, 'sendLibrary', 'qvlib-send'],
+                [TEXT.play, 'previewLibrary', ''],
+                [TEXT.rename, 'renameLibrary', ''],
+                [TEXT.remove, 'deleteLibrary', 'qvlib-delete']
+            ];
+        for (const [label, action, className] of specs) {
+            const button = createButton(label, action, `qvlib-row-action ${className}`.trim());
+            button.dataset.voiceItemId = item.id;
+            actions.append(button);
+        }
+        row.append(main, actions);
+        return row;
+    }
+
+    function appendListRows(maximumRows = LIST_RENDER_PAGE_SIZE) {
+        const list = state.root?.querySelector('.qvlib-list');
+        if (!list || state.renderedItemCount >= state.items.length) {
+            return 0;
+        }
+        const start = state.renderedItemCount;
+        const end = Math.min(state.items.length, start + maximumRows);
+        const fragment = document.createDocumentFragment();
+        for (let index = start; index < end; index++) {
+            fragment.append(createListRow(state.items[index]));
+        }
+        list.append(fragment);
+        state.renderedItemCount = end;
+        updateDisabledState();
+        return end - start;
+    }
+
+    function renderMoreListRows() {
+        const list = state.root?.querySelector('.qvlib-list');
+        if (!list || state.renderedItemCount >= state.items.length ||
+            list.scrollTop + list.clientHeight + LIST_RENDER_THRESHOLD < list.scrollHeight) {
+            return;
+        }
+        appendListRows();
+    }
+
     function renderList(resetScroll = false) {
         const list = state.root?.querySelector('.qvlib-list');
         const count = state.root?.querySelector('.qvlib-count');
         if (!list) {
             return;
         }
+        const previousScrollTop = resetScroll ? 0 : list.scrollTop;
         if (count) {
             count.textContent = `${state.items.length} ${TEXT.items}`;
         }
         renderNavigation();
         list.replaceChildren();
+        state.renderedItemCount = 0;
         if (!state.items.length) {
             list.append(createElement('div', 'qvlib-empty', state.folder ? TEXT.folderEmpty : TEXT.empty));
             return;
         }
+        const preservedRows = Math.ceil(previousScrollTop / ESTIMATED_LIST_ROW_HEIGHT);
+        appendListRows(Math.max(LIST_INITIAL_RENDER_COUNT, preservedRows + LIST_RENDER_PAGE_SIZE));
+        list.scrollTop = previousScrollTop;
+    }
+
+    function updateLibraryItems(payload = {}) {
+        if (!state.root || String(payload.folder || '') !== state.folder || !Array.isArray(payload.items)) {
+            return false;
+        }
+        const durations = new Map();
+        for (const item of payload.items) {
+            const duration = Number(item?.duration) || 0;
+            if (item?.id && duration > 0) {
+                durations.set(String(item.id), duration);
+            }
+        }
+        if (!durations.size) {
+            return false;
+        }
+        let changed = false;
         for (const item of state.items) {
-            const row = createElement('div', 'qvlib-row');
-            const main = createElement('div', 'qvlib-main');
-            const name = createElement('div', 'qvlib-name', item.title || TEXT.item);
-            name.title = item.title || TEXT.item;
-            let metaText = '';
-            if (item.kind === 'folder') {
-                metaText = `${TEXT.folder} \u00b7 ${Number(item.count) || 0} ${TEXT.items}`;
-            } else if (item.kind === 'media') {
-                metaText = `${TEXT.pending} \u00b7 ${TEXT.duration}\uff1a${formatDuration(item.duration)}`;
-            } else {
-                metaText = `${TEXT.duration}\uff1a${formatDuration(item.duration)}`;
+            const duration = durations.get(String(item.id));
+            if (duration && Number(item.duration) !== duration) {
+                item.duration = duration;
+                changed = true;
             }
-            main.append(name, createElement('div', 'qvlib-meta', metaText));
-            const actions = createElement('div', 'qvlib-actions');
-            const specs = item.kind === 'folder'
-                ? [
-                    [TEXT.open, 'openFolder', ''],
-                    [TEXT.rename, 'renameLibrary', '']
-                ]
-                : [
-                    [TEXT.send, 'sendLibrary', 'qvlib-send'],
-                    [TEXT.play, 'previewLibrary', ''],
-                    [TEXT.rename, 'renameLibrary', ''],
-                    [TEXT.remove, 'deleteLibrary', 'qvlib-delete']
-                ];
-            for (const [label, action, className] of specs) {
-                const button = createButton(label, action, `qvlib-row-action ${className}`.trim());
-                button.dataset.voiceItemId = item.id;
-                actions.append(button);
+        }
+        if (!changed) {
+            return false;
+        }
+        for (const row of state.root.querySelectorAll('.qvlib-row[data-voice-item-id]')) {
+            const item = getItem(row.dataset.voiceItemId);
+            const meta = row.querySelector('.qvlib-meta');
+            if (item && meta) {
+                meta.textContent = getItemMetaText(item);
             }
-            row.append(main, actions);
-            list.append(row);
         }
-        if (resetScroll) {
-            list.scrollTop = 0;
-        }
-        updateDisabledState();
+        return true;
     }
 
     function setLibrary(payload) {
@@ -626,6 +697,7 @@ function createVoiceLibraryPanel(options = {}) {
         const nav = createElement('div', 'qvlib-nav');
         nav.hidden = true;
         const list = createElement('div', 'qvlib-list');
+        list.addEventListener('scroll', renderMoreListRows, { passive: true });
         const player = createPlayer();
         const footer = createElement('div', 'qvlib-footer');
         footer.append(
@@ -686,6 +758,7 @@ function createVoiceLibraryPanel(options = {}) {
         state.root = null;
         state.host = null;
         state.busy = false;
+        state.renderedItemCount = 0;
     }
 
     function handleEscape() {
@@ -708,6 +781,7 @@ function createVoiceLibraryPanel(options = {}) {
         updatePlacement,
         setStatus,
         setLibrary,
+        updateLibraryItems,
         playPreview,
         handleEscape
     };

@@ -762,6 +762,7 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
     };
     bridge.setStatus = (text, options = {}) => libraryPanel.setStatus(text, options);
     bridge.setLibrary = payload => libraryPanel.setLibrary(payload);
+    bridge.updateLibraryItems = payload => libraryPanel.updateLibraryItems?.(payload);
     bridge.playPreview = payload => libraryPanel.playPreview(payload);
     registerPttContextMenuExtension();
     install();

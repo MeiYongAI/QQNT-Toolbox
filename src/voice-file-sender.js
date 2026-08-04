@@ -45,6 +45,10 @@ let voiceForwardInContextMenuEnabled = false;
 let fakeVoiceDurationSeconds = 0;
 let diagnosticRecorder = null;
 let voiceTempCleanupStarted = false;
+const LIBRARY_DURATION_CONCURRENCY = 2;
+const LIBRARY_DURATION_BATCH_SIZE = 12;
+const libraryDurationRefreshes = new Map();
+let libraryIndexMutationTail = Promise.resolve();
 
 function recordDiagnostic(level, event, details = {}) {
     try {
@@ -105,6 +109,12 @@ function getLibraryVoiceDir() {
 
 function getLibraryIndexPath() {
     return path.join(getLibraryDir(), 'library.json');
+}
+
+function withLibraryIndexMutation(work) {
+    const next = libraryIndexMutationTail.then(work, work);
+    libraryIndexMutationTail = next.catch(() => {});
+    return next;
 }
 
 function safeFileStem(value) {
@@ -358,16 +368,31 @@ async function writeLibraryIndex(index) {
     }, null, 2), 'utf8');
 }
 
-function findIndexedItemByPath(index, filePath) {
-    const comparablePath = normalizeComparablePath(filePath);
-    return (index.items || []).find(item => normalizeComparablePath(normalizeStoredPath(item.path)) === comparablePath) || null;
+function createLibraryIndexLookup(index) {
+    const itemsByPath = new Map();
+    const convertedVoiceCandidates = new Map();
+    for (const item of index.items || []) {
+        const comparablePath = normalizeComparablePath(normalizeStoredPath(item.path));
+        if (comparablePath && !itemsByPath.has(comparablePath)) {
+            itemsByPath.set(comparablePath, item);
+        }
+        if (item.kind !== 'ptt') {
+            continue;
+        }
+        const comparableSourcePath = normalizeComparablePath(normalizeStoredPath(item.sourcePath));
+        if (!comparableSourcePath) {
+            continue;
+        }
+        const candidates = convertedVoiceCandidates.get(comparableSourcePath) || [];
+        candidates.push(item);
+        convertedVoiceCandidates.set(comparableSourcePath, candidates);
+    }
+    return { itemsByPath, convertedVoiceCandidates };
 }
 
-function hasConvertedVoiceForSource(index, sourcePath) {
+function hasConvertedVoiceForSource(convertedVoiceCandidates, sourcePath) {
     const comparablePath = normalizeComparablePath(sourcePath);
-    return (index.items || []).some(item =>
-        item.kind === 'ptt' &&
-        normalizeComparablePath(normalizeStoredPath(item.sourcePath)) === comparablePath &&
+    return (convertedVoiceCandidates.get(comparablePath) || []).some(item =>
         fsSync.existsSync(normalizeStoredPath(item.path))
     );
 }
@@ -445,7 +470,7 @@ function upsertIndexedLibraryItem(index, item) {
     index.items.unshift(item);
 }
 
-async function getLibraryItems(relativeFolder = '') {
+async function getLibraryItems(relativeFolder = '', missingDurationItems = []) {
     await ensureLibraryDirs();
     const folder = normalizeLibraryRelativePath(relativeFolder);
     const folderPath = getLibraryAbsolutePath(folder);
@@ -453,6 +478,7 @@ async function getLibraryItems(relativeFolder = '') {
         return [];
     }
     const index = await readLibraryIndex();
+    const { itemsByPath, convertedVoiceCandidates } = createLibraryIndexLookup(index);
     let indexDirty = false;
     const items = [];
     let entries = [];
@@ -483,16 +509,18 @@ async function getLibraryItems(relativeFolder = '') {
         if (!entry.isFile()) {
             continue;
         }
-        const kind = getLibraryFileKind(entryPath);
-        if (!kind || (kind === 'media' && hasConvertedVoiceForSource(index, entryPath))) {
+        const comparablePath = normalizeComparablePath(entryPath);
+        const indexed = itemsByPath.get(comparablePath) || null;
+        const indexedKind = indexed?.kind === 'ptt' || indexed?.kind === 'media' ? indexed.kind : '';
+        const kind = indexedKind || getLibraryFileKind(entryPath);
+        if (!kind || (kind === 'media' && hasConvertedVoiceForSource(convertedVoiceCandidates, entryPath))) {
             continue;
         }
-        const indexed = findIndexedItemByPath(index, entryPath);
-        const duration = Number(indexed?.duration) || await detectLibraryDurationSeconds(entryPath);
+        const duration = Math.max(0, Number(indexed?.duration) || 0);
         const item = {
             ...(indexed || {}),
             id: indexed?.id || encodeLibraryItemId('file', relativePath),
-            kind: indexed?.kind || kind,
+            kind,
             title: indexed?.title || path.basename(entry.name, path.extname(entry.name)),
             path: entryPath,
             relativePath,
@@ -502,13 +530,20 @@ async function getLibraryItems(relativeFolder = '') {
             createdAt: indexed?.createdAt || ''
         };
         items.push(item);
-        if (duration > 0 && (!indexed || Number(indexed.duration) !== duration)) {
+        if (!indexed) {
             upsertIndexedLibraryItem(index, {
                 ...item,
                 relativePath: undefined,
                 parentPath: undefined
             });
+            itemsByPath.set(comparablePath, item);
             indexDirty = true;
+        }
+        if (duration <= 0 && Array.isArray(missingDurationItems)) {
+            missingDurationItems.push({
+                id: item.id,
+                path: entryPath
+            });
         }
     }
     if (indexDirty) {
@@ -536,6 +571,68 @@ function toLibraryViewItems(items) {
         parentPath: item.parentPath || '',
         createdAt: item.createdAt || ''
     }));
+}
+
+async function detectMissingLibraryDurations(items) {
+    const pending = Array.isArray(items) ? items : [];
+    const updates = [];
+    let nextIndex = 0;
+    const workers = Array.from({
+        length: Math.min(LIBRARY_DURATION_CONCURRENCY, pending.length)
+    }, async () => {
+        while (nextIndex < pending.length) {
+            const item = pending[nextIndex++];
+            const duration = Math.ceil(Number(await detectLibraryDurationSeconds(item?.path).catch(() => 0)) || 0);
+            if (item?.id && duration > 0) {
+                updates.push({
+                    id: item.id,
+                    path: item.path,
+                    duration
+                });
+            }
+        }
+    });
+    await Promise.all(workers);
+    return updates;
+}
+
+async function persistLibraryDurationUpdates(updates) {
+    if (!Array.isArray(updates) || updates.length === 0) {
+        return [];
+    }
+    return await withLibraryIndexMutation(async () => {
+        const index = await readLibraryIndex();
+        const persisted = [];
+        let indexDirty = false;
+        for (const update of updates) {
+            const itemId = String(update?.id || '');
+            const itemPath = normalizeStoredPath(update?.path);
+            const comparablePath = normalizeComparablePath(itemPath);
+            const duration = Math.ceil(Number(update?.duration) || 0);
+            if (!itemId || !itemPath || !comparablePath || duration <= 0 || !fsSync.existsSync(itemPath)) {
+                continue;
+            }
+            const indexed = (index.items || []).find(item =>
+                item.id === itemId &&
+                normalizeComparablePath(normalizeStoredPath(item.path)) === comparablePath
+            );
+            if (!indexed) {
+                continue;
+            }
+            if (Number(indexed.duration) !== duration) {
+                indexed.duration = duration;
+                indexDirty = true;
+            }
+            persisted.push({
+                id: indexed.id,
+                duration
+            });
+        }
+        if (indexDirty) {
+            await writeLibraryIndex(index);
+        }
+        return persisted;
+    });
 }
 
 async function createAudioPreviewFile(sourcePath, cacheKey = '') {
@@ -813,47 +910,49 @@ async function renameLibraryItem(itemId, title) {
 }
 
 async function getLibraryItem(itemId) {
-    const index = await readLibraryIndex();
-    const indexed = index.items.find(item => item.id === itemId && fsSync.existsSync(normalizeStoredPath(item.path)));
-    if (indexed) {
-        return {
-            ...indexed,
-            path: normalizeStoredPath(indexed.path),
-            relativePath: getLibraryRelativePath(indexed.path)
-        };
-    }
-    const decoded = decodeLibraryItemId(itemId);
-    if (!decoded) {
-        return null;
-    }
-    const itemPath = getLibraryAbsolutePath(decoded.relativePath);
-    if (!fsSync.existsSync(itemPath)) {
-        return null;
-    }
-    const stat = await fs.stat(itemPath);
-    if (stat.isDirectory()) {
+    return await withLibraryIndexMutation(async () => {
+        const index = await readLibraryIndex();
+        const indexed = index.items.find(item => item.id === itemId && fsSync.existsSync(normalizeStoredPath(item.path)));
+        if (indexed) {
+            return {
+                ...indexed,
+                path: normalizeStoredPath(indexed.path),
+                relativePath: getLibraryRelativePath(indexed.path)
+            };
+        }
+        const decoded = decodeLibraryItemId(itemId);
+        if (!decoded) {
+            return null;
+        }
+        const itemPath = getLibraryAbsolutePath(decoded.relativePath);
+        if (!fsSync.existsSync(itemPath)) {
+            return null;
+        }
+        const stat = await fs.stat(itemPath);
+        if (stat.isDirectory()) {
+            return {
+                id: itemId,
+                kind: 'folder',
+                title: path.basename(itemPath),
+                path: itemPath,
+                relativePath: decoded.relativePath,
+                count: countSupportedLibraryEntries(itemPath)
+            };
+        }
+        const kind = getLibraryFileKind(itemPath);
+        if (!kind) {
+            return null;
+        }
         return {
             id: itemId,
-            kind: 'folder',
-            title: path.basename(itemPath),
+            kind,
+            title: path.basename(itemPath, path.extname(itemPath)),
             path: itemPath,
             relativePath: decoded.relativePath,
-            count: countSupportedLibraryEntries(itemPath)
+            duration: 0,
+            originalName: path.basename(itemPath)
         };
-    }
-    const kind = getLibraryFileKind(itemPath);
-    if (!kind) {
-        return null;
-    }
-    return {
-        id: itemId,
-        kind,
-        title: path.basename(itemPath, path.extname(itemPath)),
-        path: itemPath,
-        relativePath: decoded.relativePath,
-        duration: 0,
-        originalName: path.basename(itemPath)
-    };
+    });
 }
 
 function resolvePttSourcePath(ptt) {
@@ -944,13 +1043,82 @@ async function setInjectedLibrary(browserWindow, folder = '') {
         return;
     }
     const normalizedFolder = normalizeLibraryRelativePath(folder);
+    const missingDurationItems = [];
     const payload = {
         folder: normalizedFolder,
         parent: getLibraryParentFolder(normalizedFolder),
-        items: toLibraryViewItems(await getLibraryItems(normalizedFolder))
+        items: toLibraryViewItems(await withLibraryIndexMutation(() => getLibraryItems(normalizedFolder, missingDurationItems)))
     };
     const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify(payload)});`;
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
+    queueLibraryDurationRefresh(browserWindow, normalizedFolder, missingDurationItems);
+}
+
+async function setInjectedLibraryItemUpdates(browserWindow, payload) {
+    if (browserWindow.isDestroyed()) {
+        return;
+    }
+    const script = `window.__voiceFileSenderBridge?.updateLibraryItems?.(${JSON.stringify(payload)});`;
+    await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+function getLibraryDurationRefreshItemKey(item) {
+    const itemId = String(item?.id || '');
+    const comparablePath = normalizeComparablePath(normalizeStoredPath(item?.path));
+    return itemId && comparablePath ? `${itemId}\u0000${comparablePath}` : '';
+}
+
+async function runLibraryDurationRefresh(folder, refresh) {
+    while (refresh.pendingItems.size > 0) {
+        const batch = Array.from(refresh.pendingItems.values()).slice(0, LIBRARY_DURATION_BATCH_SIZE);
+        for (const item of batch) {
+            refresh.pendingItems.delete(getLibraryDurationRefreshItemKey(item));
+        }
+        const detected = await detectMissingLibraryDurations(batch);
+        const updates = await persistLibraryDurationUpdates(detected).catch(() => []);
+        if (updates.length === 0) {
+            continue;
+        }
+        const payload = { folder, items: updates };
+        const windows = Array.from(refresh.windows).filter(window => !window.isDestroyed());
+        await Promise.all(windows.map(window => setInjectedLibraryItemUpdates(window, payload)));
+    }
+}
+
+function queueLibraryDurationRefresh(browserWindow, folder, items) {
+    if (!browserWindow || browserWindow.isDestroyed() || !Array.isArray(items) || items.length === 0) {
+        return;
+    }
+    const normalizedFolder = normalizeLibraryRelativePath(folder);
+    let refresh = libraryDurationRefreshes.get(normalizedFolder);
+    if (!refresh) {
+        refresh = {
+            pendingItems: new Map(),
+            windows: new Set(),
+            task: null
+        };
+        libraryDurationRefreshes.set(normalizedFolder, refresh);
+    }
+    refresh.windows.add(browserWindow);
+    for (const item of items) {
+        const key = getLibraryDurationRefreshItemKey(item);
+        if (key) {
+            refresh.pendingItems.set(key, item);
+        }
+    }
+    if (refresh.task || refresh.pendingItems.size === 0) {
+        return;
+    }
+    refresh.task = runLibraryDurationRefresh(normalizedFolder, refresh)
+        .catch(error => recordDiagnostic('warn', 'voice.library-duration-refresh-failed', {
+            folder: normalizedFolder,
+            error
+        }))
+        .finally(() => {
+            if (libraryDurationRefreshes.get(normalizedFolder) === refresh) {
+                libraryDurationRefreshes.delete(normalizedFolder);
+            }
+        });
 }
 
 async function setInjectedPreview(browserWindow, payload = {}) {
@@ -1348,7 +1516,7 @@ async function handleInjectedAction(browserWindow, action) {
         if (!voiceSaveInContextMenuEnabled) {
             return;
         }
-        await addPttToLibrary(action.ptt);
+        await withLibraryIndexMutation(() => addPttToLibrary(action.ptt));
         await refreshInjectedLibrary(browserWindow, '已保存', action.folder || '');
         return;
     }
@@ -1365,17 +1533,17 @@ async function handleInjectedAction(browserWindow, action) {
             await setInjectedStatus(browserWindow, '', { disabled: false });
             return;
         }
-        const savedItems = await addMediaFilesToLibrary(result.filePaths || [], action.folder || '');
+        const savedItems = await withLibraryIndexMutation(() => addMediaFilesToLibrary(result.filePaths || [], action.folder || ''));
         await refreshInjectedLibrary(browserWindow, savedItems.length ? '已添加' : '无音视频', action.folder || '');
         return;
     }
     if (action.type === 'deleteLibrary') {
-        await deleteLibraryItem(action.id);
+        await withLibraryIndexMutation(() => deleteLibraryItem(action.id));
         await refreshInjectedLibrary(browserWindow, '已删除', action.folder || '');
         return;
     }
     if (action.type === 'renameLibrary') {
-        await renameLibraryItem(action.id, action.title);
+        await withLibraryIndexMutation(() => renameLibraryItem(action.id, action.title));
         await refreshInjectedLibrary(browserWindow, '已重命名', action.folder || '');
         return;
     }

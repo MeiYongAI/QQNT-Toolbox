@@ -25,6 +25,24 @@ test('does not retain unused voice send waiters or delayed Silk cleanup timers',
     assert.match(source, /await fs\.unlink\(silkPath\)\.catch/);
 });
 
+test('defers missing library durations and incrementally renders large libraries', () => {
+    const senderSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice-file-sender.js'), 'utf8');
+    const listSource = senderSource.match(/async function getLibraryItems\([\s\S]*?\n}\n\nfunction toLibraryViewItems/)[0];
+    const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice', 'library-panel.js'), 'utf8');
+    const rendererSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice', 'renderer-controller.js'), 'utf8');
+
+    assert.doesNotMatch(listSource, /await detectLibraryDurationSeconds/);
+    assert.match(senderSource, /const LIBRARY_DURATION_CONCURRENCY = 2;/);
+    assert.match(senderSource, /function createLibraryIndexLookup\(/);
+    assert.match(senderSource, /function queueLibraryDurationRefresh\(/);
+    assert.match(senderSource, /persistLibraryDurationUpdates/);
+    assert.match(panelSource, /const LIST_INITIAL_RENDER_COUNT = 48;/);
+    assert.match(panelSource, /function appendListRows\(/);
+    assert.match(panelSource, /list\.addEventListener\('scroll', renderMoreListRows, \{ passive: true \}\)/);
+    assert.match(panelSource, /function updateLibraryItems\(/);
+    assert.match(rendererSource, /bridge\.updateLibraryItems = payload => libraryPanel\.updateLibraryItems\?\.\(payload\);/);
+});
+
 test('uses the built-in FFmpeg resampler without requiring optional libsoxr', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice', 'media.js'), 'utf8');
 
@@ -111,6 +129,7 @@ test('keeps native speech-to-text bound to the voice record while adding voice f
         playPreview() {},
         setLibrary() {},
         setStatus() {},
+        updateLibraryItems() {},
         updatePlacement() {}
     });
 
