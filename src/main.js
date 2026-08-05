@@ -18,8 +18,6 @@ const crypto = require('crypto');
 const { Readable, Writable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { fileURLToPath, pathToFileURL } = require('url');
-const { serialize, deserialize } = require('v8');
-const { deflateSync, inflateSync } = require('zlib');
 const { ZipWriter } = require('@zip.js/zip.js');
 const { randomizePngEncoding } = require('./png-variant');
 const { buildPokePacket, buildPokeRecallPacket, extractPokeEvent, normalizeUin } = require('./poke-protocol');
@@ -30,6 +28,7 @@ const {
     getViewerRemoteUrl
 } = require('./recall-viewer-data');
 const { clearRecallAccountCache } = require('./recall-cache-clear');
+const { createRecallCacheIndexStore } = require('./recall-cache-index');
 const {
     RECOVERED_RECORD_ACTIONS,
     getRecallInfo,
@@ -266,6 +265,8 @@ const MAX_POKE_PROCESSED_EVENTS = 10000;
 const AUTO_REACTION_EVENT_TTL_MS = 60 * 60 * 1000;
 const AUTO_REACTION_UID_LOOKUP_RETRY_MS = 60 * 1000;
 const MAX_AUTO_REACTION_PROCESSED_MESSAGES = 10000;
+const ANTI_RECALL_RESTORE_BATCH_SIZE = 16;
+const ANTI_RECALL_RESUME_BATCH_SIZE = 16;
 const LOCAL_STICKER_CACHE_TTL_MS = 5000;
 const POKE_COMMAND = 'OidbSvcTrpcTcp.0xED3_1';
 const POKE_RECALL_COMMAND = 'OidbSvcTrpcTcp.0xF51_1';
@@ -5882,8 +5883,41 @@ function enqueuePreservationTask(accountUin, assetKind, run, priority = false) {
     });
 }
 
+function cancelPreservationTasks(accountUin) {
+    const normalized = normalizeUin(accountUin);
+    if (!normalized) {
+        return;
+    }
+    const canceled = {
+        ok: false,
+        reason: 'cache-cleared',
+        state: 'canceled',
+        path: ''
+    };
+    for (const kind of ['image', 'file']) {
+        const queueKey = `${normalized}:${kind}`;
+        const queue = preservationDownloadQueues.get(queueKey);
+        if (!queue) {
+            continue;
+        }
+        for (const entry of queue.pending.splice(0)) {
+            entry.resolve(canceled);
+        }
+        if (queue.active === 0) {
+            preservationDownloadQueues.delete(queueKey);
+        }
+    }
+    const taskPrefix = `${normalized}:`;
+    for (const taskKey of preservationAssetTasks.keys()) {
+        if (taskKey.startsWith(taskPrefix)) {
+            preservationAssetTasks.delete(taskKey);
+        }
+    }
+}
+
 function createRecallStaging(recallState) {
     const runtime = getRuntimePreservationSettings(getConfig());
+    const restoreStartedAt = Date.now();
     const manager = new AntiRecallStaging({
         accountUin: recallState.accountUin,
         rootDir: getPreventRecallDir(recallState.accountUin),
@@ -5894,6 +5928,47 @@ function createRecallStaging(recallState) {
         },
         windowMs: runtime.windowMs,
         capacityBytes: runtime.capacityBytes,
+        deferredRestore: true,
+        restoreBatchSize: ANTI_RECALL_RESTORE_BATCH_SIZE,
+        onRestore: candidate => {
+            if (recallState.clearing) {
+                return;
+            }
+            const target = candidate.recalled && candidate.record?.qqnt_toolbox_recall
+                ? recallState.recalledMessages
+                : !candidate.recalled
+                    ? recallState.liveMessages
+                    : null;
+            if (!target) {
+                return;
+            }
+            const existing = target.get(candidate.msgId);
+            if (existing) {
+                // A message event may have arrived while disk restoration was pending.
+                // Keep that newer record and re-project any restored local asset paths.
+                manager.updateCandidateRecord(candidate.key, existing);
+                return;
+            }
+            target.set(candidate.msgId, candidate.record);
+        },
+        onRestoreComplete: status => {
+            if (recallState.clearing) {
+                return;
+            }
+            pruneRecallCache(recallState);
+            const browserWindow = getRecallStateBrowserWindow(recallState.accountUin);
+            if (browserWindow) {
+                resumeRecallStaging(browserWindow, recallState);
+            }
+            recordDiagnostic(status.incomplete ? 'warn' : 'info', 'recall.staging-restored', {
+                accountUin: recallState.accountUin,
+                durationMs: Date.now() - restoreStartedAt,
+                candidateCount: status.candidateCount,
+                assetCount: status.assetCount,
+                usedBytes: status.usedBytes,
+                incomplete: status.incomplete === true
+            });
+        },
         onExpire: candidate => {
             recallState.liveMessages.delete(candidate.msgId);
             recordDiagnostic('info', 'recall.staging-expired', {
@@ -5902,6 +5977,9 @@ function createRecallStaging(recallState) {
             });
         },
         onCapacityAvailable: ({ candidate, asset }) => {
+            if (recallState.clearing) {
+                return;
+            }
             const browserWindow = getRecallStateBrowserWindow(recallState.accountUin);
             if (browserWindow) {
                 queuePreservationAsset(browserWindow, recallState, candidate.key, asset.id);
@@ -5930,10 +6008,13 @@ function createRecallState(accountUin) {
     const state = {
         accountUin: normalizeUin(accountUin),
         generation: 1,
+        clearing: false,
         imageDownloads: new Map(),
         liveMessages: new Map(),
         recalledMessages: new Map(),
         persistedIds: new Set(),
+        persistence: null,
+        stagingResumeGeneration: 0,
         staging: null,
         stagingStatus: null,
         loaded: false
@@ -6099,6 +6180,14 @@ function isPreservationFileAssetEligible(candidate, asset) {
 }
 
 function queuePreservationAsset(browserWindow, recallState, candidateKey, assetId) {
+    if (recallState?.clearing) {
+        return Promise.resolve({
+            ok: false,
+            reason: 'cache-cleared',
+            state: 'canceled',
+            path: ''
+        });
+    }
     const taskKey = `${recallState.accountUin}:${candidateKey}:${assetId}`;
     const active = preservationAssetTasks.get(taskKey);
     if (active) {
@@ -6111,7 +6200,7 @@ function queuePreservationAsset(browserWindow, recallState, candidateKey, assetI
     }
     const generation = recallState.generation;
     const task = enqueuePreservationTask(recallState.accountUin, queuedAsset.kind, async () => {
-        if (recallState.generation !== generation ||
+        if (recallState.clearing || recallState.generation !== generation ||
             recallStates.get(recallState.accountUin) !== recallState) {
             return { ok: false, reason: 'cache-cleared', state: 'canceled', path: '' };
         }
@@ -6182,14 +6271,35 @@ function queuePreservationAsset(browserWindow, recallState, candidateKey, assetI
 }
 
 function resumeRecallStaging(browserWindow, recallState) {
-    for (const candidate of recallState.staging?.listCandidates() || []) {
-        for (const asset of Object.values(candidate.assets || {})) {
-            if (!['staged', 'promoted'].includes(asset.state) &&
-                (asset.state !== 'failed' || candidate.recalled)) {
-                queuePreservationAsset(browserWindow, recallState, candidate.key, asset.id);
-            }
-        }
+    const staging = recallState.staging;
+    if (!staging?.iteratePendingAssets || staging.isRestoring?.()) {
+        return;
     }
+    const resumeGeneration = (recallState.stagingResumeGeneration || 0) + 1;
+    recallState.stagingResumeGeneration = resumeGeneration;
+    const stateGeneration = recallState.generation;
+    const iterator = staging.iteratePendingAssets();
+    const pump = () => {
+        if (recallState.stagingResumeGeneration !== resumeGeneration ||
+            recallState.generation !== stateGeneration ||
+            recallState.clearing ||
+            recallStates.get(recallState.accountUin) !== recallState ||
+            !browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) {
+            iterator.return?.();
+            return;
+        }
+        let processed = 0;
+        let next;
+        while (processed < ANTI_RECALL_RESUME_BATCH_SIZE && !(next = iterator.next()).done) {
+            queuePreservationAsset(browserWindow, recallState,
+                next.value.candidateKey, next.value.assetId);
+            processed += 1;
+        }
+        if (!next?.done) {
+            setImmediate(pump);
+        }
+    };
+    setImmediate(pump);
 }
 
 function processAntiRecallPreservationIntake(browserWindow, context) {
@@ -6198,7 +6308,7 @@ function processAntiRecallPreservationIntake(browserWindow, context) {
     }
     rememberPokeAccountFromRecords(browserWindow, context.records);
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
-    if (!recallState) {
+    if (!recallState || recallState.clearing) {
         return;
     }
     const preventRecallConfig = getPreventRecallConfig();
@@ -6585,17 +6695,16 @@ function persistRecallRecord(recallState, record, allowUpdate = false) {
         return;
     }
     const msgId = getRecallKey(record);
-    const directory = getPreventRecallDir(recallState?.accountUin);
-    const cachePath = getPreventRecallCachePath(recallState?.accountUin);
-    if (!msgId || !directory || !cachePath || (!allowUpdate && recallState.persistedIds.has(msgId))) {
+    if (!msgId || !recallState?.accountUin ||
+        (!allowUpdate && recallState.persistedIds.has(msgId))) {
         return;
     }
     try {
-        fsSync.mkdirSync(directory, { recursive: true });
-        const payload = deflateSync(serialize(record));
-        const length = Buffer.allocUnsafe(4);
-        length.writeUInt32BE(payload.length);
-        fsSync.appendFileSync(cachePath, Buffer.concat([length, payload]));
+        const persistence = loadPersistedRecallCache(recallState);
+        if (!persistence) {
+            return;
+        }
+        persistence.appendSync(record);
         recallState.persistedIds.add(msgId);
     } catch (error) {
         warn('recall persist failed:', error?.message || error);
@@ -6639,47 +6748,73 @@ function normalizeArchivedRecallFileStates(record, recallState) {
     return changed;
 }
 
+function hydratePersistedRecallRecord(recallState, msgId) {
+    const normalizedId = normalizeText(msgId);
+    if (!recallState?.accountUin || !normalizedId) {
+        return null;
+    }
+    const existing = recallState.recalledMessages.get(normalizedId);
+    if (existing) {
+        return existing;
+    }
+    try {
+        const persistence = loadPersistedRecallCache(recallState);
+        const record = persistence?.getSync(normalizedId);
+        if (!record) {
+            return null;
+        }
+        normalizeArchivedRecallFileStates(record, recallState);
+        recallState.recalledMessages.set(normalizedId, record);
+        recallState.persistedIds.add(normalizedId);
+        pruneRecallCache(recallState);
+        return record;
+    } catch (error) {
+        warn('recall cache hydrate failed:', error?.message || error);
+        return null;
+    }
+}
+
 function loadPersistedRecallCache(recallState) {
     if (!recallState?.accountUin) {
-        return;
+        return null;
     }
     if (recallState.loaded) {
-        return;
+        return recallState.persistence;
     }
     recallState.loaded = true;
-    const directory = getPreventRecallDir(recallState.accountUin);
     const cachePath = getPreventRecallCachePath(recallState.accountUin);
+    const startedAt = Date.now();
     try {
-        fsSync.mkdirSync(directory, { recursive: true });
-        if (!fsSync.existsSync(cachePath)) {
-            fsSync.writeFileSync(cachePath, Buffer.alloc(0));
-            return;
-        }
-        const data = fsSync.readFileSync(cachePath);
-        let offset = 0;
-        while (offset + 4 <= data.length) {
-            const length = data.readUInt32BE(offset);
-            offset += 4;
-            if (!length || offset + length > data.length) {
-                break;
-            }
-            const record = deserialize(inflateSync(data.subarray(offset, offset + length)));
-            offset += length;
-            const msgId = getRecallKey(record);
-            if (!msgId || !record?.qqnt_toolbox_recall) {
-                continue;
-            }
-            const storedAccount = normalizeUin(record?.qqnt_toolbox_account_uin);
-            if (storedAccount && storedAccount !== recallState.accountUin) {
-                continue;
-            }
-            normalizeArchivedRecallFileStates(record, recallState);
-            recallState.recalledMessages.set(msgId, record);
+        const persistence = createRecallCacheIndexStore({
+            accountUin: recallState.accountUin,
+            cachePath,
+            onError: error => warn('recall cache index failed:', error?.message || error)
+        });
+        recallState.persistence = persistence;
+        const initialStatus = persistence.initializeSync();
+        for (const msgId of persistence.getKeys()) {
             recallState.persistedIds.add(msgId);
         }
-        pruneRecallCache(recallState);
+        persistence.startIndexing().then(status => {
+            if (recallStates.get(recallState.accountUin) !== recallState) {
+                return;
+            }
+            for (const msgId of persistence.getKeys()) {
+                recallState.persistedIds.add(msgId);
+            }
+            recordDiagnostic('info', 'recall.cache-indexed', {
+                accountUin: recallState.accountUin,
+                durationMs: Date.now() - startedAt,
+                recordCount: status.recordCount,
+                cacheBytes: status.cacheSize,
+                source: initialStatus.complete ? 'sidecar' : 'worker'
+            });
+        }).catch(() => {});
+        return persistence;
     } catch (error) {
         warn('recall cache load failed:', error?.message || error);
+        recallState.persistence = null;
+        return null;
     }
 }
 
@@ -6696,12 +6831,15 @@ function cacheRecallCandidate(recallState, record) {
     pruneRecallCache(recallState);
 }
 
-function getRecoveredRecallRecord(recallState, record, browserWindow) {
+function getRecoveredRecallRecord(recallState, record, browserWindow, hasStagedCandidate = false) {
     if (!recallState) {
         return null;
     }
     const msgId = getRecallKey(record);
-    const stored = recallState.recalledMessages.get(msgId);
+    let stored = recallState.recalledMessages.get(msgId);
+    if (!stored && !hasStagedCandidate) {
+        stored = hydratePersistedRecallRecord(recallState, msgId);
+    }
     const recallInfo = getRecallInfo(record);
     if (!stored && !recallInfo) {
         return null;
@@ -6711,6 +6849,9 @@ function getRecoveredRecallRecord(recallState, record, browserWindow) {
         return null;
     }
     const promoted = recallState.staging?.promoteCandidateSync(msgId);
+    if (!stored && !promoted) {
+        stored = hydratePersistedRecallRecord(recallState, msgId);
+    }
     const cached = stored || promoted?.candidate?.record || recallState.liveMessages.get(msgId);
     if (!cached) {
         return null;
@@ -6741,7 +6882,9 @@ function getRecoveredRecallRecord(recallState, record, browserWindow) {
 }
 
 function preserveRecoveredRecallMetadata(recallState, record) {
-    const stored = recallState?.recalledMessages.get(getRecallKey(record));
+    const msgId = getRecallKey(record);
+    const stored = recallState?.recalledMessages.get(msgId) ||
+        hydratePersistedRecallRecord(recallState, msgId);
     const mark = stored?.qqnt_toolbox_recall;
     if (!stored || !mark) {
         return false;
@@ -6774,7 +6917,7 @@ function preserveRecoveredRecallMetadata(recallState, record) {
 
 function processPreventRecall(browserWindow, context) {
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
-    if (!recallState) {
+    if (!recallState || recallState.clearing) {
         return;
     }
     const config = getPreventRecallConfig();
@@ -6782,7 +6925,15 @@ function processPreventRecall(browserWindow, context) {
     let preservedUpdates = 0;
     for (const record of context.records) {
         const msgId = getRecallKey(record);
-        const stagedCandidate = recallState.staging?.getCandidate(msgId);
+        const isRecallRecord = Boolean(getRecallInfo(record));
+        const elements = getRecordElements(record);
+        const needsStagedLookup = isRecallRecord || !elements.length ||
+            elements.every(element => element?.grayTipElement);
+        const stagedCandidate = recallState.staging?.hasCandidate(msgId, needsStagedLookup);
+        if (!stagedCandidate && !recallState.recalledMessages.has(msgId) &&
+            (isRecallRecord || recallState.persistence?.has(msgId))) {
+            hydratePersistedRecallRecord(recallState, msgId);
+        }
         const hasRecoveredRecord = recallState.recalledMessages.has(msgId) || Boolean(stagedCandidate);
         if (!shouldHandlePreventRecallRecord(config, record, hasRecoveredRecord)) {
             if (getRecallInfo(record)) {
@@ -6801,8 +6952,12 @@ function processPreventRecall(browserWindow, context) {
             cacheRecallCandidate(recallState, record);
             continue;
         }
-        const isRecallRecord = Boolean(getRecallInfo(record));
-        const recovered = getRecoveredRecallRecord(recallState, record, browserWindow);
+        const recovered = getRecoveredRecallRecord(
+            recallState,
+            record,
+            browserWindow,
+            Boolean(stagedCandidate)
+        );
         if (!recovered) {
             continue;
         }
@@ -6824,6 +6979,9 @@ function processPreventRecall(browserWindow, context) {
 
 async function clearPreventRecallCache(accountUin) {
     const recallState = getRecallState(accountUin);
+    recallState.clearing = true;
+    recallState.stagingResumeGeneration += 1;
+    cancelPreservationTasks(recallState.accountUin);
     const rootDirectory = path.resolve(getPreventRecallRootDir());
     const accountDirectory = path.resolve(getPreventRecallDir(accountUin));
     const cachePath = path.resolve(getPreventRecallCachePath(accountUin));
@@ -6866,6 +7024,23 @@ async function getAllPreventRecallRecords(accountUin) {
     const recallState = getRecallState(accountUin);
     if (!recallState) {
         return [];
+    }
+    try {
+        const persistedRecords = await recallState.persistence?.loadAll();
+        if (recallStates.get(recallState.accountUin) === recallState) {
+            for (const record of persistedRecords || []) {
+                const msgId = getRecallKey(record);
+                if (!msgId) {
+                    continue;
+                }
+                normalizeArchivedRecallFileStates(record, recallState);
+                recallState.recalledMessages.set(msgId, record);
+                recallState.persistedIds.add(msgId);
+            }
+            pruneRecallCache(recallState);
+        }
+    } catch (error) {
+        warn('recall cache viewer load failed:', error?.message || error);
     }
     const recordsByKey = new Map();
     const addRecord = record => {
@@ -8889,6 +9064,7 @@ function start() {
     app?.once?.('before-quit', () => {
         stopAntiRecallPowerState();
         for (const recallState of recallStates.values()) {
+            recallState.persistence?.closeSync();
             recallState.staging?.close();
         }
         singleForwardWindowController.setQuitting(true);

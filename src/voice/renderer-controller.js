@@ -559,6 +559,41 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         return sanitizePttElement(element);
     }
 
+    function preparePttForwardAction(state) {
+        if (state.actionPrepared) {
+            return;
+        }
+        state.actionPrepared = true;
+        enqueueAction({
+            type: 'prepareNativePttForward',
+            ptt: state.ptt,
+            sourceMsgId: state.sourceMsgId
+        });
+    }
+
+    function bindPttForwardHandler(state, item) {
+        const originalHandler = item?.handler;
+        if (!item || typeof originalHandler !== 'function') {
+            return item;
+        }
+        const descriptors = Object.getOwnPropertyDescriptors(item);
+        delete descriptors.handler;
+        const boundItem = Object.create(Object.getPrototypeOf(item), descriptors);
+        Object.defineProperty(boundItem, 'handler', {
+            configurable: true,
+            writable: true,
+            value: function boundPttForwardHandler(...args) {
+                preparePttForwardAction(state);
+                return Reflect.apply(originalHandler, item, [
+                    state.placeholderRecord,
+                    state.placeholderRecord.elements[0],
+                    ...args.slice(2)
+                ]);
+            }
+        });
+        return boundItem;
+    }
+
     function prepareNativePttForwardContext(request) {
         const bridge = getBridge();
         restoreNativePttForwardContext(bridge.nativePttForwardState);
@@ -570,15 +605,20 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         const placeholderRecord = makePttForwardPlaceholder(record, ptt);
         const placeholderContext = { ...request.originalContext, msgRecord: placeholderRecord };
         const placeholderItems = request.getNativeItemsForContext?.(placeholderContext) || [];
-        bridge.nativePttForwardState = {
+        const state = {
             active: true,
+            actionPrepared: false,
             menu: request.menu,
             originalContext: request.originalContext,
-            placeholderContext,
-            forwardItem: placeholderItems.find(item => Number(item?.type) === 6) || null,
+            placeholderRecord,
             ptt,
             sourceMsgId: String(record.msgId || '')
         };
+        state.forwardItem = bindPttForwardHandler(
+            state,
+            placeholderItems.find(item => Number(item?.type) === 6) || null
+        );
+        bridge.nativePttForwardState = state;
         return request;
     }
 
@@ -668,17 +708,7 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         }
         const label = compactText(item);
         if (label === '\u8f6c\u53d1') {
-            try {
-                if (state.placeholderContext && state.menu?._?.ctx) {
-                    state.menu._.ctx.menuContext = state.placeholderContext;
-                }
-            } catch {
-            }
-            enqueueAction({
-                type: 'prepareNativePttForward',
-                ptt: state.ptt,
-                sourceMsgId: state.sourceMsgId
-            });
+            preparePttForwardAction(state);
             return;
         }
         restoreNativePttForwardContext(state);

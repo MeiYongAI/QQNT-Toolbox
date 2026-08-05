@@ -43,6 +43,42 @@ test('reserves staging capacity before invoking the QQ native acquisition route'
     assert.match(source('src/anti-recall-staging.js'), /asset\.kind === 'file'[\s\S]*getAcquisitionPath/);
 });
 
+test('restores staging incrementally and cancels obsolete preservation work on cache clear', () => {
+    const main = source('src/main.js');
+    const staging = source('src/anti-recall-staging.js');
+    const resume = main.slice(main.indexOf('function resumeRecallStaging'),
+        main.indexOf('function processAntiRecallPreservationIntake'));
+    assert.match(main, /deferredRestore: true/);
+    assert.match(resume, /iteratePendingAssets/);
+    assert.match(resume, /staging\.isRestoring\?\.\(\)/);
+    assert.match(resume, /ANTI_RECALL_RESUME_BATCH_SIZE/);
+    assert.match(resume, /setImmediate\(pump\)/);
+    assert.doesNotMatch(resume, /listPendingAssets/);
+    const restoreCallback = main.slice(main.indexOf('onRestore: candidate'),
+        main.indexOf('onRestoreComplete:'));
+    assert.match(restoreCallback, /target\.get\(candidate\.msgId\)/);
+    assert.match(restoreCallback, /manager\.updateCandidateRecord/);
+    const cancel = main.slice(main.indexOf('function cancelPreservationTasks'),
+        main.indexOf('function createRecallStaging'));
+    assert.match(cancel, /queue\.pending\.splice\(0\)/);
+    assert.match(cancel, /entry\.resolve\(canceled\)/);
+    assert.match(cancel, /preservationAssetTasks\.delete/);
+    const clear = main.slice(main.indexOf('async function clearPreventRecallCache'),
+        main.indexOf('async function openPreventRecallDir'));
+    assert.ok(clear.indexOf('cancelPreservationTasks') < clear.indexOf('clearRecallAccountCache'));
+    const restoreFinalizer = staging.slice(staging.indexOf('async restoreFromJournal'),
+        staging.indexOf('async whenReady'));
+    assert.doesNotMatch(restoreFinalizer, /onRestoreComplete\?\.\(this\.getStatus\(\)\)/);
+    const prevent = main.slice(main.indexOf('function processPreventRecall'),
+        main.indexOf('async function clearPreventRecallCache'));
+    assert.match(prevent, /needsStagedLookup = isRecallRecord \|\| !elements\.length/);
+    assert.match(prevent, /elements\.every\(element => element\?\.grayTipElement\)/);
+    assert.match(prevent, /hasCandidate\(msgId, needsStagedLookup\)/);
+    assert.ok(prevent.indexOf('hasCandidate(msgId, needsStagedLookup)') <
+        prevent.indexOf('hydratePersistedRecallRecord(recallState, msgId)'));
+    assert.match(prevent, /getRecoveredRecallRecord\([\s\S]*Boolean\(stagedCandidate\)/);
+});
+
 test('projects archived files into QQ native completed state and native file actions', () => {
     const staging = source('src/anti-recall-staging.js');
     const main = source('src/main.js');

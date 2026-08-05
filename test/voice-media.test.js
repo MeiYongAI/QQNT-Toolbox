@@ -78,7 +78,7 @@ test('writes a valid PCM16 WAV header', () => {
     assert.deepEqual(wav.subarray(44), pcm);
 });
 
-test('keeps native speech-to-text bound to the voice record while adding voice forward', async () => {
+function createVoiceRendererHarness() {
     const previousGlobals = {
         window: global.window,
         document: global.document,
@@ -137,69 +137,118 @@ test('keeps native speech-to-text bound to the voice record while adding voice f
     global.document = documentMock;
     global.Element = MockElement;
     global.getComputedStyle = () => ({ display: 'block', visibility: 'visible', opacity: '1' });
+    const actionPromise = injectedVoiceFileSenderUi(panelFactory, '');
+    return {
+        actionPromise,
+        extension,
+        listeners,
+        MockElement,
+        window: windowMock,
+        restore() {
+            global.window = previousGlobals.window;
+            global.document = previousGlobals.document;
+            global.Element = previousGlobals.Element;
+            global.getComputedStyle = previousGlobals.getComputedStyle;
+        }
+    };
+}
+
+function createVoiceMenuRequest(record, getNativeItemsForContext) {
+    const originalContext = { msgRecord: record };
+    const menuContext = { menuContext: originalContext };
+    const menu = { _: { ctx: menuContext } };
+    Object.defineProperty(menu, 'menuContext', {
+        get: () => menuContext.menuContext,
+        set: value => {
+            menuContext.menuContext = value;
+        }
+    });
+    return {
+        menu,
+        menuContext,
+        originalContext,
+        request: {
+            menu,
+            originalContext,
+            context: originalContext,
+            getNativeItemsForContext
+        }
+    };
+}
+
+test('keeps the real voice menu and binds only native forward to a text placeholder', async () => {
+    const harness = createVoiceRendererHarness();
     try {
-        const actionPromise = injectedVoiceFileSenderUi(panelFactory, '');
-        assert.ok(extension);
+        assert.ok(harness.extension);
         const voiceRecord = {
             msgId: 'voice-message-1',
+            playbackState: 'paused',
+            transcription: { text: 'converted voice text' },
             elements: [{
                 elementType: 4,
                 pttElement: { fileName: 'voice.amr', duration: 2 }
             }]
         };
-        const originalContext = { msgRecord: voiceRecord };
-        const menuContext = { menuContext: originalContext };
-        const menu = { _: { ctx: menuContext } };
-        Object.defineProperty(menu, 'menuContext', {
-            get: () => menuContext.menuContext,
-            set: value => {
-                menuContext.menuContext = value;
-            }
-        });
         let speechHandled = 0;
         const speechItem = {
             type: 15,
             text: '转文字',
+            icon: 'native-speech-icon',
             handler: () => speechHandled++
         };
-        const forwardItem = { type: 6, text: '转发', handler() {} };
-        const request = {
-            menu,
-            originalContext,
-            context: originalContext,
-            getNativeItemsForContext: context => {
-                assert.notEqual(context, originalContext);
-                assert.equal(context.msgRecord.msgId, voiceRecord.msgId);
-                assert.equal(context.msgRecord.elements[0].elementType, 1);
-                return [forwardItem];
-            }
+        const collectItem = { type: 8, text: '收藏' };
+        const forwardedArgs = [];
+        const forwardPrototype = {
+            handler(...args) {
+                forwardedArgs.push({ args, thisValue: this });
+            },
+            when: () => true
         };
+        const nativeForward = Object.assign(Object.create(forwardPrototype), {
+            type: 6,
+            text: '转发',
+            icon: 'one_by_one_forward'
+        });
+        const request = createVoiceMenuRequest(voiceRecord, context => {
+            assert.notEqual(context, request.originalContext);
+            assert.equal(context.msgRecord.msgId, voiceRecord.msgId);
+            assert.equal(context.msgRecord.elements[0].elementType, 1);
+            return [nativeForward];
+        });
 
-        assert.equal(extension.beforeOpen(request), request);
-        const transformed = extension.transformItems({ ...request, items: [speechItem] });
+        const prepared = harness.extension.beforeOpen(request.request);
+        assert.equal(prepared, request.request);
+        assert.equal(prepared.context, request.originalContext);
+        const transformed = harness.extension.transformItems({
+            ...prepared,
+            items: [speechItem, collectItem]
+        });
         assert.equal(transformed.items[0], speechItem);
-        assert.equal(transformed.items[1], forwardItem);
-        assert.equal(menuContext.menuContext, originalContext);
+        assert.equal(transformed.items[0].type, 15);
+        assert.notEqual(transformed.items[1], nativeForward);
+        assert.equal(Object.getPrototypeOf(transformed.items[1]), forwardPrototype);
+        assert.equal(transformed.items[1].type, 6);
+        assert.equal(transformed.items[2], collectItem);
 
-        const clickHandler = listeners.get('click')[0];
-        clickHandler({ composedPath: () => [new MockElement('转文字')] });
+        const clickHandler = harness.listeners.get('click')[0];
+        clickHandler({ composedPath: () => [new harness.MockElement('转文字')] });
         transformed.items[0].handler();
         assert.equal(speechHandled, 1);
-        assert.equal(menuContext.menuContext, originalContext);
+        assert.equal(request.menuContext.menuContext, request.originalContext);
 
-        menu.menuContext = originalContext;
-        extension.beforeOpen(request);
-        extension.transformItems({ ...request, items: [speechItem] });
-        clickHandler({ composedPath: () => [new MockElement('转发')] });
-        const action = await actionPromise;
-        assert.equal(action.type, 'prepareNativePttForward');
-        assert.equal(action.sourceMsgId, voiceRecord.msgId);
-        assert.notEqual(menuContext.menuContext, originalContext);
-        assert.equal(menuContext.menuContext.msgRecord.elements[0].elementType, 1);
+        const nativeContext = { sendable: true, sourceEvent: 'source-event' };
+        const nativeEvent = { type: 'click' };
+        clickHandler({ composedPath: () => [new harness.MockElement('转发')] });
+        transformed.items[1].handler(voiceRecord, voiceRecord.elements[0], nativeContext, nativeEvent);
+        assert.equal(forwardedArgs.length, 1);
+        assert.equal(forwardedArgs[0].thisValue, nativeForward);
+        assert.equal(forwardedArgs[0].args[0].msgId, voiceRecord.msgId);
+        assert.equal(forwardedArgs[0].args[0].elements[0].elementType, 1);
+        assert.equal(forwardedArgs[0].args[1], forwardedArgs[0].args[0].elements[0]);
+        assert.equal(forwardedArgs[0].args[2], nativeContext);
+        assert.equal(forwardedArgs[0].args[3], nativeEvent);
+        assert.equal((await harness.actionPromise).type, 'prepareNativePttForward');
     } finally {
-        global.window = previousGlobals.window;
-        global.document = previousGlobals.document;
-        global.Element = previousGlobals.Element;
-        global.getComputedStyle = previousGlobals.getComputedStyle;
+        harness.restore();
     }
 });

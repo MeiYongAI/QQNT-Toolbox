@@ -38,12 +38,22 @@ test('clears only the selected account across messages, journal, acquiring, stag
 
     let stagingClearCount = 0;
     let stagingCloseCount = 0;
+    let persistenceCloseCount = 0;
     const state = {
         generation: 4,
         liveMessages: populatedMap(),
         recalledMessages: populatedMap(),
         persistedIds: new Set(['message']),
         imageDownloads: populatedMap(),
+        persistence: {
+            close: async options => {
+                persistenceCloseCount += 1;
+                assert.equal(state.generation, 5);
+                assert.equal(state.clearing, true);
+                assert.equal(stagingCloseCount, 1);
+                assert.deepEqual(options, { cancel: true });
+            }
+        },
         staging: {
             clear: () => stagingClearCount++,
             close: () => stagingCloseCount++
@@ -64,6 +74,8 @@ test('clears only the selected account across messages, journal, acquiring, stag
     assert.equal(state.imageDownloads.size, 0);
     assert.equal(stagingClearCount, 1);
     assert.equal(stagingCloseCount, 1);
+    assert.equal(persistenceCloseCount, 1);
+    assert.equal(state.persistence, null);
     assert.deepEqual(fs.readdirSync(account), ['active-recall-cache.bin']);
     assert.equal(fs.statSync(cachePath).size, 0);
     assert.equal(fs.readFileSync(path.join(sibling, 'keep.bin'), 'utf8'), 'keep');

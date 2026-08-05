@@ -24,12 +24,15 @@ async function clearRecallAccountCache({
     }
 
     state.generation = Math.max(0, Number(state.generation) || 0) + 1;
+    state.clearing = true;
+    state.staging?.close();
+    await state.persistence?.close({ cancel: true });
+    state.persistence = null;
     state.liveMessages?.clear();
     state.recalledMessages?.clear();
     state.persistedIds?.clear();
     state.imageDownloads?.clear();
     await state.staging?.clear();
-    state.staging?.close();
 
     await fs.rm(account, { recursive: true, force: true });
     await fs.mkdir(account, { recursive: true });

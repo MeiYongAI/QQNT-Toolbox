@@ -475,6 +475,571 @@ test('recovers staged candidates and accounts actual bytes after restart', async
     assert.equal(recovered[0].record.elements[0].picElement.filePath.endsWith('.png'), true);
 });
 
+test('deferred restore returns immediately and reports disk candidates in background batches', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-restore-'));
+    const journal = createFileCandidateJournal(path.join(root, 'candidates'));
+    const candidate = {
+        key: '12345:deferred',
+        msgId: 'deferred',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('deferred'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                elementIndex: 0,
+                elementId: 'image-1',
+                fileName: 'sample.png',
+                state: 'observed'
+            }
+        }
+    };
+    journal.write(candidate);
+    const restored = [];
+    const completions = [];
+    let capacityNotifications = 0;
+    let restoreYields = 0;
+    const manager = createManager(root, {
+        journal,
+        deferredRestore: true,
+        restoreBatchSize: 1,
+        onRestore: value => restored.push(value.key),
+        onRestoreComplete: status => completions.push(status),
+        onCapacityAvailable: () => capacityNotifications++,
+        restoreYield: callback => {
+            restoreYields += 1;
+            setImmediate(callback);
+        }
+    });
+
+    assert.deepEqual(manager.initialize(), []);
+    assert.equal(manager.getStatus().restoring, true);
+    assert.equal(manager.isRestoring(), true);
+    manager.getStatus = () => {
+        throw new Error('restore completion must not synchronously scan every candidate');
+    };
+    const ready = await manager.whenReady();
+
+    assert.deepEqual(restored, [candidate.key]);
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0].restoring, false);
+    assert.equal(completions[0].assetCount, 1);
+    assert.equal(manager.isRestoring(), false);
+    assert.equal(ready.length, 1);
+    assert.equal(ready[0].key, candidate.key);
+    assert.equal(capacityNotifications, 0);
+    assert.equal(restoreYields > 0, true);
+    manager.close();
+});
+
+test('foreground lookup loads one deferred journal entry without duplicate background recovery', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-lookup-'));
+    const journal = createFileCandidateJournal(path.join(root, 'candidates'));
+    const key = '12345:foreground';
+    journal.write({
+        key,
+        msgId: 'foreground',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('foreground'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                elementIndex: 0,
+                elementId: 'image-1',
+                fileName: 'sample.png',
+                state: 'observed'
+            }
+        }
+    });
+    const manager = createManager(root, { journal, deferredRestore: true });
+    manager.initialize();
+
+    const promoted = manager.promoteCandidateSync(key);
+    assert.equal(promoted.candidate.recalled, true);
+    assert.deepEqual(promoted.pendingAssetIds, ['image-1']);
+    const ready = await manager.whenReady();
+    assert.equal(ready.length, 1);
+    assert.equal(ready[0].recalled, true);
+    manager.close();
+});
+
+test('runtime asset registration does not reread its journal during active restore', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-runtime-read-'));
+    let releaseRestore;
+    const restoreGate = new Promise(resolve => {
+        releaseRestore = resolve;
+    });
+    let loadOneCount = 0;
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                await restoreGate;
+            },
+            loadOne: () => {
+                loadOneCount += 1;
+                return null;
+            },
+            write: () => {},
+            remove: () => {},
+            clear: () => {}
+        }
+    });
+    manager.initialize();
+    manager.observeCandidate({
+        key: '12345:runtime',
+        msgId: 'runtime',
+        receivedAt: Date.now(),
+        record: createRecord('runtime')
+    });
+    manager.registerAsset('12345:runtime', {
+        id: 'image-1',
+        kind: 'image',
+        elementIndex: 0,
+        elementId: 'image-1',
+        fileName: 'sample.png'
+    });
+    assert.equal(loadOneCount, 1);
+    releaseRestore();
+    await manager.whenReady();
+    manager.close();
+});
+
+test('transient asynchronous journal reads preserve the file for foreground recovery', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-read-error-'));
+    const journalDirectory = path.join(root, 'candidates');
+    const journal = createFileCandidateJournal(journalDirectory);
+    const key = '12345:read-error';
+    journal.write({
+        key,
+        msgId: 'read-error',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('read-error'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                elementIndex: 0,
+                elementId: 'image-1',
+                fileName: 'sample.png',
+                state: 'observed'
+            }
+        }
+    });
+    const journalFiles = fs.readdirSync(journalDirectory)
+        .filter(name => name.endsWith('.bin'));
+    assert.equal(journalFiles.length, 1);
+
+    const originalReadFile = fs.promises.readFile;
+    let injected = false;
+    fs.promises.readFile = async (filePath, ...args) => {
+        if (!injected && path.dirname(String(filePath)) === journalDirectory) {
+            injected = true;
+            const error = new Error('transient read failure');
+            error.code = 'EIO';
+            throw error;
+        }
+        return await originalReadFile.call(fs.promises, filePath, ...args);
+    };
+    const completions = [];
+    const manager = createManager(root, {
+        journal,
+        deferredRestore: true,
+        onRestoreComplete: status => completions.push(status)
+    });
+    try {
+        manager.initialize();
+        await assert.rejects(manager.whenReady(), /transient read failure/);
+    } finally {
+        fs.promises.readFile = originalReadFile;
+    }
+
+    assert.equal(injected, true);
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0].incomplete, true);
+    assert.equal(fs.existsSync(path.join(journalDirectory, journalFiles[0])), true);
+    assert.equal(manager.hasCandidate(key, true), true);
+    manager.close();
+});
+
+test('partial deferred restore reports completion and lazily recovers unscanned candidates', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-partial-'));
+    const first = {
+        key: '12345:first',
+        msgId: 'first',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('first'),
+        assets: {
+            'image-1': { id: 'image-1', kind: 'image', state: 'observed' }
+        }
+    };
+    const unscanned = {
+        key: '12345:unscanned',
+        msgId: 'unscanned',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('unscanned'),
+        assets: {
+            'image-1': { id: 'image-1', kind: 'image', state: 'observed' }
+        }
+    };
+    const restored = [];
+    const completions = [];
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                yield [first];
+                throw new Error('iterator failed');
+            },
+            loadOne: key => key === unscanned.key ? structuredClone(unscanned) : null,
+            write: () => {},
+            remove: () => {},
+            clear: () => {}
+        },
+        onRestore: candidate => restored.push(candidate.key),
+        onRestoreComplete: status => completions.push(status)
+    });
+    manager.initialize();
+
+    await assert.rejects(manager.whenReady(), /iterator failed/);
+    assert.deepEqual(restored, [first.key]);
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0].candidateCount, 1);
+    assert.equal(completions[0].incomplete, true);
+    assert.notEqual(manager.timer, null);
+    assert.equal(manager.hasCandidate(unscanned.key), false);
+    assert.equal(manager.hasCandidate(unscanned.key, true), true);
+    assert.equal(manager.getCandidate(unscanned.key).msgId, unscanned.msgId);
+    manager.close();
+});
+
+test('one candidate restore failure keeps that key available for lazy recovery', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-candidate-error-'));
+    const fallback = {
+        key: '12345:retry-candidate',
+        msgId: 'retry-candidate',
+        receivedAt: Date.now(),
+        record: createRecord('retry-candidate'),
+        assets: {
+            'image-1': { id: 'image-1', kind: 'image', state: 'observed' }
+        }
+    };
+    const failedSource = { ...fallback };
+    Object.defineProperty(failedSource, 'assets', {
+        get() {
+            throw new Error('candidate normalization failed');
+        }
+    });
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                yield [failedSource];
+            },
+            loadOne: key => key === fallback.key ? structuredClone(fallback) : null,
+            write: () => {},
+            remove: () => {},
+            clear: () => {}
+        }
+    });
+    manager.initialize();
+    await assert.rejects(manager.whenReady(), /candidate normalization failed/);
+    assert.equal(manager.restoreScanIncomplete, true);
+    assert.equal(manager.hasCandidate(fallback.key, true), true);
+    manager.close();
+});
+
+test('lazy recovery after an interrupted scan schedules candidate expiry', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-lazy-expiry-'));
+    const candidate = {
+        key: '12345:lazy-expiry',
+        msgId: 'lazy-expiry',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('lazy-expiry'),
+        assets: {
+            'image-1': { id: 'image-1', kind: 'image', state: 'observed' }
+        }
+    };
+    const timers = [];
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                throw new Error('scan stopped');
+            },
+            loadOne: key => key === candidate.key ? structuredClone(candidate) : null,
+            write: () => {},
+            remove: () => {},
+            clear: () => {}
+        },
+        setTimer: (callback, delay) => {
+            const timer = { callback, delay, unref() {} };
+            timers.push(timer);
+            return timer;
+        },
+        clearTimer: () => {}
+    });
+    manager.initialize();
+    await assert.rejects(manager.whenReady(), /scan stopped/);
+    assert.equal(timers.length, 0);
+
+    assert.equal(manager.hasCandidate(candidate.key, true), true);
+    assert.equal(timers.length, 1);
+    assert.equal(manager.timerDueAt, candidate.receivedAt + 1000);
+    manager.close();
+});
+
+test('a completed scan with only a reconciliation write error does not probe every miss', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-write-error-'));
+    const candidate = {
+        key: '12345:write-error',
+        msgId: 'write-error',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('write-error'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                state: 'staged',
+                stagingPath: path.join(root, 'staging', 'missing.png')
+            }
+        }
+    };
+    let loadOneCalls = 0;
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                yield [candidate];
+            },
+            loadOne: () => {
+                loadOneCalls += 1;
+                return null;
+            },
+            write: () => {
+                throw new Error('reconciliation write failed');
+            },
+            remove: () => {},
+            clear: () => {}
+        }
+    });
+    manager.initialize();
+    await assert.rejects(manager.whenReady(), /reconciliation write failed/);
+
+    assert.equal(manager.hasCandidate('12345:missing', true), false);
+    assert.equal(loadOneCalls, 0);
+    manager.close();
+});
+
+test('deferred restore merges staged assets into a newer runtime snapshot with the same key', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-merge-'));
+    const key = '12345:merge';
+    let releaseRestore;
+    const restoreGate = new Promise(resolve => {
+        releaseRestore = resolve;
+    });
+    const writes = [];
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => {
+                throw new Error('synchronous restore must not run');
+            },
+            async *loadBatches() {
+                await restoreGate;
+                yield [diskCandidate];
+            },
+            loadOne: () => null,
+            write: value => writes.push(structuredClone(value)),
+            remove: () => {},
+            clear: () => {}
+        }
+    });
+    const diskCandidate = {
+        key,
+        msgId: 'merge',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        generation: 1,
+        recalled: false,
+        record: createRecord('merge'),
+        assets: {
+            'image-1': {
+                id: 'image-1',
+                kind: 'image',
+                elementIndex: 0,
+                elementId: 'image-1',
+                fileName: 'sample.png',
+                expectedBytes: 7,
+                actualBytes: 7,
+                state: 'staged',
+                acquisitionPath: '',
+                stagingPath: '',
+                archivePath: '',
+                sourcePath: path.join(root, 'source.png'),
+                failureReason: ''
+            }
+        }
+    };
+    diskCandidate.assets['image-1'].stagingPath = manager.getAssetPath(
+        diskCandidate,
+        diskCandidate.assets['image-1'],
+        false,
+        diskCandidate.assets['image-1'].sourcePath
+    );
+    fs.mkdirSync(path.dirname(diskCandidate.assets['image-1'].stagingPath), { recursive: true });
+    fs.writeFileSync(diskCandidate.assets['image-1'].stagingPath, Buffer.alloc(7, 4));
+    manager.initialize();
+    const liveRecord = createRecord('merge');
+    liveRecord.msgSeq = 'newer-runtime-record';
+    manager.observeCandidate({
+        key,
+        msgId: 'merge',
+        peerUid: '10086',
+        receivedAt: Date.now(),
+        record: liveRecord
+    });
+    manager.registerAsset(key, {
+        id: 'image-1',
+        kind: 'image',
+        elementIndex: 0,
+        elementId: 'image-1',
+        fileName: 'sample.png'
+    });
+
+    releaseRestore();
+    await manager.whenReady();
+    const merged = manager.getCandidate(key);
+    assert.equal(merged.record.msgSeq, 'newer-runtime-record');
+    assert.equal(merged.assets['image-1'].state, 'staged');
+    assert.equal(merged.assets['image-1'].stagingPath, diskCandidate.assets['image-1'].stagingPath);
+    assert.equal(manager.getStatus().usedBytes, 7);
+    assert.equal(writes.at(-1).record.msgSeq, 'newer-runtime-record');
+    const replacement = createRecord('merge');
+    replacement.msgSeq = 'latest-main-cache-record';
+    assert.equal(manager.updateCandidateRecord(key, replacement), true);
+    const updated = manager.getCandidate(key);
+    assert.equal(updated.record.msgSeq, 'latest-main-cache-record');
+    assert.equal(updated.record.elements[0].picElement.filePath,
+        diskCandidate.assets['image-1'].stagingPath);
+    manager.close();
+});
+
+test('close suppresses deferred restore callbacks and candidate resurrection', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-close-'));
+    let releaseRestore;
+    const restoreGate = new Promise(resolve => {
+        releaseRestore = resolve;
+    });
+    const restored = [];
+    let completed = 0;
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                await restoreGate;
+                yield [{
+                    key: '12345:closed',
+                    msgId: 'closed',
+                    receivedAt: Date.now(),
+                    record: createRecord('closed'),
+                    assets: {
+                        'image-1': { id: 'image-1', kind: 'image', state: 'observed' }
+                    }
+                }];
+            },
+            loadOne: () => null,
+            write: () => {},
+            remove: () => {},
+            clear: () => {}
+        },
+        onRestore: candidate => restored.push(candidate.key),
+        onRestoreComplete: () => completed++
+    });
+    manager.initialize();
+    manager.close();
+    assert.equal(manager.observeCandidate({
+        key: '12345:late',
+        msgId: 'late',
+        receivedAt: Date.now(),
+        record: createRecord('late')
+    }), null);
+    releaseRestore();
+
+    assert.deepEqual(await manager.whenReady(), []);
+    assert.deepEqual(restored, []);
+    assert.equal(completed, 0);
+});
+
+test('clear waits for deferred restore cancellation before clearing its journal', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-deferred-clear-'));
+    let releaseRestore;
+    const restoreGate = new Promise(resolve => {
+        releaseRestore = resolve;
+    });
+    const events = [];
+    const manager = createManager(root, {
+        deferredRestore: true,
+        journal: {
+            load: () => [],
+            async *loadBatches() {
+                await restoreGate;
+                events.push('batch');
+                yield [{
+                    key: '12345:cleared',
+                    msgId: 'cleared',
+                    receivedAt: Date.now(),
+                    record: createRecord('cleared'),
+                    assets: {
+                        'image-1': { id: 'image-1', kind: 'image', state: 'observed' }
+                    }
+                }];
+            },
+            loadOne: () => null,
+            write: () => events.push('write'),
+            remove: () => events.push('remove'),
+            clear: () => events.push('clear')
+        },
+        onRestore: () => events.push('restore'),
+        onRestoreComplete: () => events.push('complete')
+    });
+    manager.initialize();
+    const clearTask = manager.clear();
+    releaseRestore();
+    await clearTask;
+
+    assert.deepEqual(events, ['batch', 'clear']);
+    assert.deepEqual(manager.listCandidates(), []);
+});
+
 test('startup rejects external managed paths and rewrites the recovered journal state', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-journal-paths-'));
     const externalStaging = path.join(root, 'outside-staging.png');

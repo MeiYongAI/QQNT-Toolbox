@@ -8,6 +8,7 @@ const { deserialize, serialize } = require('node:v8');
 
 const JOURNAL_VERSION = 1;
 const DEFAULT_EXPIRY_BATCH_SIZE = 64;
+const DEFAULT_RESTORE_BATCH_SIZE = 32;
 
 function normalizeText(value) {
     return String(value ?? '').trim();
@@ -58,6 +59,53 @@ function createFileCandidateJournal(directory) {
         return path.join(root, `${hash(key)}.bin`);
     }
 
+    function readCandidateSync(filePath, expectedKey = '') {
+        let data;
+        try {
+            data = fs.readFileSync(filePath);
+        } catch {
+            return null;
+        }
+        try {
+            const envelope = deserialize(data);
+            if (envelope?.version === JOURNAL_VERSION && envelope.candidate?.key &&
+                (!expectedKey || normalizeText(envelope.candidate.key) === expectedKey)) {
+                return envelope.candidate;
+            }
+        } catch {
+        }
+        try {
+            fs.rmSync(filePath, { force: true });
+        } catch {
+        }
+        return null;
+    }
+
+    async function readCandidate(filePath) {
+        let data;
+        try {
+            data = await fsp.readFile(filePath);
+        } catch (error) {
+            return {
+                candidate: null,
+                error: error?.code === 'ENOENT' ? null : error
+            };
+        }
+        try {
+            const envelope = deserialize(data);
+            if (envelope?.version === JOURNAL_VERSION && envelope.candidate?.key) {
+                return { candidate: envelope.candidate, error: null };
+            }
+        } catch {
+        }
+        // Do not unlink from an asynchronous read path. A transient I/O failure or
+        // a concurrent atomic replacement must never delete a newer valid journal.
+        return {
+            candidate: null,
+            error: new Error(`Invalid anti-recall candidate journal: ${path.basename(filePath)}`)
+        };
+    }
+
     return {
         load() {
             fs.mkdirSync(root, { recursive: true });
@@ -71,18 +119,60 @@ function createFileCandidateJournal(directory) {
                 if (!entry.isFile() || !entry.name.endsWith('.bin')) {
                     continue;
                 }
-                try {
-                    const envelope = deserialize(fs.readFileSync(filePath));
-                    if (envelope?.version === JOURNAL_VERSION && envelope.candidate?.key) {
-                        candidates.push(envelope.candidate);
-                    } else {
-                        fs.rmSync(filePath, { force: true });
-                    }
-                } catch {
-                    fs.rmSync(filePath, { force: true });
+                const candidate = readCandidateSync(filePath);
+                if (candidate) {
+                    candidates.push(candidate);
                 }
             }
             return candidates;
+        },
+        async *loadBatches(batchSize = DEFAULT_RESTORE_BATCH_SIZE) {
+            await fsp.mkdir(root, { recursive: true });
+            const size = Math.max(1, Number(batchSize) || DEFAULT_RESTORE_BATCH_SIZE);
+            let pending = [];
+            let firstError = null;
+            const readBatch = async filePaths => {
+                const results = await Promise.all(filePaths.map(readCandidate));
+                for (const result of results) {
+                    firstError ||= result.error;
+                }
+                return results.map(result => result.candidate).filter(Boolean);
+            };
+            for await (const entry of await fsp.opendir(root)) {
+                const filePath = path.join(root, entry.name);
+                if (entry.isFile() && entry.name.includes('.tmp-')) {
+                    await fsp.rm(filePath, { force: true }).catch(() => {});
+                    continue;
+                }
+                if (!entry.isFile() || !entry.name.endsWith('.bin')) {
+                    continue;
+                }
+                pending.push(filePath);
+                if (pending.length < size) {
+                    continue;
+                }
+                const candidates = await readBatch(pending);
+                pending = [];
+                if (candidates.length) {
+                    yield candidates;
+                }
+            }
+            if (pending.length) {
+                const candidates = await readBatch(pending);
+                if (candidates.length) {
+                    yield candidates;
+                }
+            }
+            if (firstError) {
+                throw firstError;
+            }
+        },
+        loadOne(key) {
+            const normalizedKey = normalizeText(key);
+            if (!normalizedKey) {
+                return null;
+            }
+            return readCandidateSync(getPath(normalizedKey), normalizedKey);
         },
         write(candidate) {
             fs.mkdirSync(root, { recursive: true });
@@ -231,7 +321,16 @@ class AntiRecallStaging {
         this.clearTimer = options.clearTimer || clearTimeout;
         this.defer = options.defer || setImmediate;
         this.batchSize = Math.max(1, Number(options.batchSize) || DEFAULT_EXPIRY_BATCH_SIZE);
+        this.restoreBatchSize = Math.max(1, Number(options.restoreBatchSize) || DEFAULT_RESTORE_BATCH_SIZE);
+        this.deferredRestore = options.deferredRestore === true;
+        this.restoreYield = typeof options.restoreYield === 'function'
+            ? options.restoreYield
+            : callback => setImmediate(callback);
         this.onExpire = typeof options.onExpire === 'function' ? options.onExpire : () => {};
+        this.onRestore = typeof options.onRestore === 'function' ? options.onRestore : null;
+        this.onRestoreComplete = typeof options.onRestoreComplete === 'function'
+            ? options.onRestoreComplete
+            : null;
         this.onStatus = typeof options.onStatus === 'function' ? options.onStatus : null;
         this.onCapacityAvailable = typeof options.onCapacityAvailable === 'function'
             ? options.onCapacityAvailable
@@ -247,6 +346,14 @@ class AntiRecallStaging {
         this.statusScheduled = false;
         this.initialized = false;
         this.closed = false;
+        this.restoring = false;
+        this.restoreTask = null;
+        this.restoreError = null;
+        this.restoreScanIncomplete = false;
+        this.restoreSkipKeys = new Set();
+        this.runtimeCandidateKeys = new Set();
+        this.restoreStartedAt = 0;
+        this.restoreAssetCount = 0;
     }
 
     initialize() {
@@ -258,36 +365,251 @@ class AntiRecallStaging {
         fs.mkdirSync(this.acquisitionDir, { recursive: true });
         fs.mkdirSync(this.archiveDirs.image, { recursive: true });
         fs.mkdirSync(this.archiveDirs.file, { recursive: true });
+        if (this.deferredRestore && typeof this.journal.loadBatches === 'function') {
+            this.restoring = true;
+            this.restoreStartedAt = Date.now();
+            this.restoreTask = this.restoreFromJournal();
+            this.emitStatus();
+            return this.listCandidates();
+        }
+        this.restoreSynchronously();
+        return this.listCandidates();
+    }
+
+    restoreSynchronously() {
         const now = this.now();
         for (const source of this.journal.load()) {
-            const candidate = this.normalizeCandidate(source);
-            if (!candidate) {
-                continue;
-            }
-            if (!Object.keys(candidate.assets).length) {
-                this.journal.remove(candidate.key);
-                continue;
-            }
-            const reconciled = this.reconcileCandidateFiles(candidate);
-            if (!candidate.recalled && candidate.receivedAt + this.windowMs <= now) {
-                this.deleteCandidateFiles(candidate);
-                this.journal.remove(candidate.key);
-                continue;
-            }
-            this.candidates.set(candidate.key, candidate);
-            if (reconciled) {
-                this.journal.write(candidate);
-            }
-            if (!candidate.recalled) {
-                this.queueExpiry(candidate);
-            }
+            this.restoreCandidateSource(source, now);
         }
         this.sweepOrphanStagingFiles();
         this.sweepOrphanAcquisitionFiles();
         this.sweepTemporaryArchiveFiles();
         this.scheduleNext();
         this.emitStatus();
+    }
+
+    restoreCandidateSource(source, now = this.now(), foreground = false, notify = false) {
+        const candidate = this.normalizeCandidate(source);
+        if (!candidate || (!foreground && this.restoreSkipKeys.has(candidate.key))) {
+            return null;
+        }
+        const existing = this.candidates.get(candidate.key);
+        if (existing) {
+            if (this.runtimeCandidateKeys.has(candidate.key)) {
+                this.mergeRestoredCandidate(existing, candidate);
+                this.runtimeCandidateKeys.delete(candidate.key);
+            }
+            return existing;
+        }
+        if (!Object.keys(candidate.assets).length) {
+            this.journal.remove(candidate.key);
+            return null;
+        }
+        const reconciled = this.reconcileCandidateFiles(candidate);
+        if (!candidate.recalled && candidate.receivedAt + this.windowMs <= now) {
+            this.deleteCandidateFiles(candidate);
+            this.journal.remove(candidate.key);
+            return null;
+        }
+        this.candidates.set(candidate.key, candidate);
+        if (this.restoring) {
+            this.restoreAssetCount += Object.keys(candidate.assets).length;
+        }
+        if (reconciled) {
+            try {
+                this.journal.write(candidate);
+            } catch (error) {
+                if (!notify) {
+                    throw error;
+                }
+                this.restoreError ||= error;
+            }
+        }
+        if (!candidate.recalled) {
+            this.queueExpiry(candidate);
+        }
+        if (notify) {
+            this.notifyRestoredCandidate(candidate);
+        }
+        return candidate;
+    }
+
+    mergeRestoredCandidate(target, source) {
+        let changed = false;
+        for (const [assetId, sourceAsset] of Object.entries(source.assets)) {
+            const targetAsset = target.assets[assetId];
+            if (!targetAsset) {
+                this.reconcileCandidateAsset(target, sourceAsset);
+                target.assets[assetId] = sourceAsset;
+                if (this.restoring) {
+                    this.restoreAssetCount += 1;
+                }
+                changed = true;
+                continue;
+            }
+            // Keep the live record/metadata, but retain a valid staged/promoted file
+            // found in the startup snapshot if the foreground event has not replaced it.
+            if (['observed', 'failed', 'blocked-capacity'].includes(targetAsset.state) &&
+                ['staged', 'promoted'].includes(sourceAsset.state)) {
+                this.reconcileCandidateAsset(target, sourceAsset);
+                if (['staged', 'promoted'].includes(sourceAsset.state)) {
+                    Object.assign(targetAsset, sourceAsset);
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            this.journal.write(target);
+        }
+    }
+
+    async restoreFromJournal() {
+        let scanCompleted = false;
+        try {
+            for await (const sources of this.journal.loadBatches(this.restoreBatchSize)) {
+                if (this.closed) {
+                    break;
+                }
+                const now = this.now();
+                for (const source of sources) {
+                    if (this.closed) {
+                        break;
+                    }
+                    try {
+                        this.restoreCandidateSource(source, now, false, true);
+                    } catch (error) {
+                        this.restoreError ||= error;
+                        const sourceKey = normalizeText(source?.key);
+                        if (!sourceKey || !this.candidates.has(sourceKey)) {
+                            this.restoreScanIncomplete = true;
+                        }
+                    }
+                }
+                if (!this.closed) {
+                    await new Promise(resolve => this.restoreYield(resolve));
+                }
+            }
+            scanCompleted = true;
+            if (!this.closed) {
+                await this.sweepOrphanFilesInBackground();
+            }
+        } catch (error) {
+            this.restoreError ||= error;
+            this.restoreScanIncomplete ||= !scanCompleted;
+        } finally {
+            this.restoring = false;
+            this.restoreSkipKeys.clear();
+            if (!this.restoreScanIncomplete) {
+                this.runtimeCandidateKeys.clear();
+            }
+            if (!this.closed) {
+                this.scheduleNext();
+                try {
+                    this.onRestoreComplete?.({
+                        accountUin: this.accountUin,
+                        candidateCount: this.candidates.size,
+                        assetCount: this.restoreAssetCount,
+                        usedBytes: this.usedBytes,
+                        capacityBytes: this.capacityBytes,
+                        restoring: false,
+                        incomplete: Boolean(this.restoreError)
+                    });
+                } catch {
+                }
+            }
+            this.emitStatus();
+        }
+    }
+
+    async whenReady() {
+        await this.restoreTask;
+        if (this.restoreError) {
+            throw this.restoreError;
+        }
         return this.listCandidates();
+    }
+
+    notifyRestoredCandidate(candidate) {
+        if (!this.onRestore) {
+            return;
+        }
+        try {
+            this.onRestore(cloneRecord(candidate));
+        } catch {
+            // A renderer/window may disappear while startup restoration is running.
+        }
+    }
+
+    async sweepOrphanFilesInBackground() {
+        const removeOldFile = async filePath => {
+            try {
+                const stat = await fsp.lstat(filePath);
+                if (stat.isFile() && !stat.isSymbolicLink() && stat.mtimeMs < this.restoreStartedAt) {
+                    await fsp.rm(filePath, { force: true });
+                }
+            } catch {
+            }
+        };
+        const yieldBatch = () => new Promise(resolve => this.restoreYield(resolve));
+        const ownedStaging = new Set();
+        let candidateIndex = 0;
+        for (const candidate of this.candidates.values()) {
+            for (const asset of Object.values(candidate.assets)) {
+                if (asset.stagingPath) {
+                    ownedStaging.add(path.resolve(asset.stagingPath));
+                }
+            }
+            candidateIndex += 1;
+            if (candidateIndex % this.restoreBatchSize === 0) {
+                await yieldBatch();
+                if (this.closed) {
+                    return;
+                }
+            }
+        }
+        const stagingEntries = await fsp.readdir(this.stagingDir, { withFileTypes: true }).catch(() => []);
+        for (let index = 0; index < stagingEntries.length; index += this.restoreBatchSize) {
+            if (this.closed) {
+                return;
+            }
+            const batch = stagingEntries.slice(index, index + this.restoreBatchSize);
+            await Promise.all(batch.filter(entry => entry.isFile()).map(entry => {
+                const filePath = path.resolve(this.stagingDir, entry.name);
+                if (!ownedStaging.has(filePath)) {
+                    return removeOldFile(filePath);
+                }
+                return null;
+            }));
+            if (index + this.restoreBatchSize < stagingEntries.length) {
+                await yieldBatch();
+            }
+        }
+        const acquisitionEntries = await fsp.readdir(this.acquisitionDir, { withFileTypes: true }).catch(() => []);
+        for (let index = 0; index < acquisitionEntries.length; index += this.restoreBatchSize) {
+            if (this.closed) {
+                return;
+            }
+            await Promise.all(acquisitionEntries.slice(index, index + this.restoreBatchSize)
+                .filter(entry => entry.isFile())
+                .map(entry => removeOldFile(path.join(this.acquisitionDir, entry.name))));
+            if (index + this.restoreBatchSize < acquisitionEntries.length) {
+                await yieldBatch();
+            }
+        }
+        for (const directory of Object.values(this.archiveDirs)) {
+            const entries = await fsp.readdir(directory, { withFileTypes: true }).catch(() => []);
+            for (let index = 0; index < entries.length; index += this.restoreBatchSize) {
+                if (this.closed) {
+                    return;
+                }
+                await Promise.all(entries.slice(index, index + this.restoreBatchSize)
+                    .filter(entry => entry.isFile() && /\.tmp-\d+-[0-9a-f]{8}$/i.test(entry.name))
+                    .map(entry => removeOldFile(path.join(directory, entry.name))));
+                if (index + this.restoreBatchSize < entries.length) {
+                    await yieldBatch();
+                }
+            }
+        }
     }
 
     normalizeCandidate(source) {
@@ -334,61 +656,69 @@ class AntiRecallStaging {
     reconcileCandidateFiles(candidate) {
         let changed = false;
         for (const asset of Object.values(candidate.assets)) {
-            if (asset.acquisitionPath) {
-                const expectedPath = this.getAcquisitionPathForAsset(candidate, asset);
-                if (isSamePath(asset.acquisitionPath, expectedPath) && getRegularFileStat(asset.acquisitionPath)) {
-                    this.removeOwnedAcquisitionFile(asset.acquisitionPath);
-                }
-                asset.acquisitionPath = '';
+            if (this.reconcileCandidateAsset(candidate, asset)) {
                 changed = true;
-                if (asset.state === 'acquiring') {
-                    asset.state = 'observed';
-                    asset.failureReason = '';
-                }
             }
-            if (asset.state === 'staged') {
-                if (asset.archivePath) {
-                    asset.archivePath = '';
-                    changed = true;
-                }
-                const stat = this.getOwnedStagingFileStat(candidate, asset, asset.stagingPath);
-                if (stat) {
-                    changed ||= asset.actualBytes !== stat.size;
-                    asset.actualBytes = stat.size;
-                    this.usedBytes += stat.size;
-                    applyAssetPath(candidate.record, asset, asset.stagingPath);
-                    continue;
-                }
-                changed = true;
+        }
+        return changed;
+    }
+
+    reconcileCandidateAsset(candidate, asset) {
+        let changed = false;
+        if (asset.acquisitionPath) {
+            const expectedPath = this.getAcquisitionPathForAsset(candidate, asset);
+            if (isSamePath(asset.acquisitionPath, expectedPath) && getRegularFileStat(asset.acquisitionPath)) {
+                this.removeOwnedAcquisitionFile(asset.acquisitionPath);
+            }
+            asset.acquisitionPath = '';
+            changed = true;
+            if (asset.state === 'acquiring') {
                 asset.state = 'observed';
-                asset.stagingPath = '';
-                asset.actualBytes = 0;
                 asset.failureReason = '';
-            } else if (asset.state === 'promoted') {
-                if (asset.stagingPath) {
-                    asset.stagingPath = '';
-                    changed = true;
-                }
-                const stat = this.getOwnedArchiveFileStat(candidate, asset, asset.archivePath);
-                if (stat) {
-                    changed ||= asset.actualBytes !== stat.size;
-                    asset.actualBytes = stat.size;
-                    applyAssetPath(candidate.record, asset, asset.archivePath);
-                    continue;
-                }
-                changed = true;
-                asset.state = 'observed';
+            }
+        }
+        if (asset.state === 'staged') {
+            if (asset.archivePath) {
                 asset.archivePath = '';
-                asset.actualBytes = 0;
-                asset.failureReason = '';
-            } else {
-                if (asset.stagingPath || asset.archivePath) {
-                    asset.stagingPath = '';
-                    asset.archivePath = '';
-                    asset.actualBytes = 0;
-                    changed = true;
-                }
+                changed = true;
             }
+            const stat = this.getOwnedStagingFileStat(candidate, asset, asset.stagingPath);
+            if (stat) {
+                changed ||= asset.actualBytes !== stat.size;
+                asset.actualBytes = stat.size;
+                this.usedBytes += stat.size;
+                applyAssetPath(candidate.record, asset, asset.stagingPath);
+                return changed;
+            }
+            asset.state = 'observed';
+            asset.stagingPath = '';
+            asset.actualBytes = 0;
+            asset.failureReason = '';
+            return true;
+        }
+        if (asset.state === 'promoted') {
+            if (asset.stagingPath) {
+                asset.stagingPath = '';
+                changed = true;
+            }
+            const stat = this.getOwnedArchiveFileStat(candidate, asset, asset.archivePath);
+            if (stat) {
+                changed ||= asset.actualBytes !== stat.size;
+                asset.actualBytes = stat.size;
+                applyAssetPath(candidate.record, asset, asset.archivePath);
+                return changed;
+            }
+            asset.state = 'observed';
+            asset.archivePath = '';
+            asset.actualBytes = 0;
+            asset.failureReason = '';
+            return true;
+        }
+        if (asset.stagingPath || asset.archivePath) {
+            asset.stagingPath = '';
+            asset.archivePath = '';
+            asset.actualBytes = 0;
+            return true;
         }
         return changed;
     }
@@ -439,22 +769,108 @@ class AntiRecallStaging {
         return Array.from(this.candidates.values()).map(cloneRecord);
     }
 
+    hasCandidate(key, loadFromJournal = false) {
+        const normalizedKey = normalizeText(key);
+        if (!normalizedKey) {
+            return false;
+        }
+        return Boolean(loadFromJournal
+            ? this.ensureCandidateLoaded(normalizedKey)
+            : this.candidates.get(normalizedKey));
+    }
+
+    isRestoring() {
+        return this.restoring;
+    }
+
+    listPendingAssets() {
+        return Array.from(this.iteratePendingAssets());
+    }
+
+    *iteratePendingAssets() {
+        let remainingCandidates = this.candidates.size;
+        for (const candidate of this.candidates.values()) {
+            if (this.closed || remainingCandidates <= 0) {
+                return;
+            }
+            remainingCandidates -= 1;
+            for (const asset of Object.values(candidate.assets)) {
+                if (this.closed) {
+                    return;
+                }
+                if (!['staged', 'promoted'].includes(asset.state) &&
+                    (asset.state !== 'failed' || candidate.recalled)) {
+                    yield {
+                        candidateKey: candidate.key,
+                        assetId: asset.id
+                    };
+                }
+            }
+        }
+    }
+
+    ensureCandidateLoaded(key) {
+        const normalizedKey = normalizeText(key);
+        const existing = this.candidates.get(normalizedKey) || null;
+        if (this.closed) {
+            return existing;
+        }
+        const mayNeedDiskCandidate = this.restoring || this.restoreScanIncomplete;
+        const needsRuntimeMerge = !this.restoring && this.restoreScanIncomplete &&
+            this.runtimeCandidateKeys.has(normalizedKey);
+        if (!normalizedKey || !mayNeedDiskCandidate ||
+            typeof this.journal.loadOne !== 'function' ||
+            (existing && !needsRuntimeMerge)) {
+            return existing;
+        }
+        // A foreground message event has priority over a not-yet-read startup snapshot.
+        // Loading one deterministic journal entry is bounded and keeps recall handling
+        // correct while the rest of the directory is restored in the background.
+        const source = this.journal.loadOne(normalizedKey);
+        if (!source) {
+            if (!this.restoring) {
+                this.runtimeCandidateKeys.delete(normalizedKey);
+            }
+            return existing;
+        }
+        const candidate = this.restoreCandidateSource(source, this.now(), true);
+        if (!candidate) {
+            this.restoreSkipKeys.add(normalizedKey);
+        }
+        if (!this.restoring) {
+            this.scheduleNext();
+        }
+        return candidate;
+    }
+
     getCandidate(key) {
-        const candidate = this.candidates.get(normalizeText(key));
+        const candidate = this.ensureCandidateLoaded(key);
         return candidate ? cloneRecord(candidate) : null;
     }
 
     updateCandidateRecord(key, record) {
-        const candidate = this.candidates.get(normalizeText(key));
+        if (this.closed) {
+            return false;
+        }
+        const candidate = this.ensureCandidateLoaded(key);
         if (!candidate || !record) {
             return false;
         }
         candidate.record = cloneRecord(record);
+        for (const asset of Object.values(candidate.assets)) {
+            const ownedPath = asset.archivePath || asset.stagingPath;
+            if (ownedPath) {
+                applyAssetPath(candidate.record, asset, ownedPath);
+            }
+        }
         this.journal.write(candidate);
         return true;
     }
 
     observeCandidate(value) {
+        if (this.closed) {
+            return null;
+        }
         if (!this.initialized) {
             this.initialize();
         }
@@ -462,6 +878,10 @@ class AntiRecallStaging {
         const msgId = normalizeText(value?.msgId || value?.record?.msgId);
         if (!key || !msgId || !value?.record) {
             return null;
+        }
+        this.ensureCandidateLoaded(key);
+        if (this.restoring) {
+            this.runtimeCandidateKeys.add(key);
         }
         let candidate = this.candidates.get(key);
         let needsExpiry = false;
@@ -497,7 +917,10 @@ class AntiRecallStaging {
     }
 
     registerAsset(key, value) {
-        const candidate = this.candidates.get(normalizeText(key));
+        if (this.closed) {
+            return null;
+        }
+        const candidate = this.ensureCandidateLoaded(key);
         const id = normalizeText(value?.id);
         if (!candidate || !id || !['image', 'file'].includes(value?.kind)) {
             return null;
@@ -530,6 +953,9 @@ class AntiRecallStaging {
             failureReason: ''
         };
         candidate.assets[id] = asset;
+        if (this.restoring) {
+            this.restoreAssetCount += 1;
+        }
         this.journal.write(candidate);
         return cloneRecord(asset);
     }
@@ -550,7 +976,7 @@ class AntiRecallStaging {
     getAcquisitionPath(key, assetId) {
         const normalizedKey = normalizeText(key);
         const normalizedAssetId = normalizeText(assetId);
-        const candidate = this.candidates.get(normalizedKey);
+        const candidate = this.ensureCandidateLoaded(normalizedKey);
         const asset = candidate?.assets?.[normalizedAssetId];
         if (!candidate || !asset) {
             return '';
@@ -637,7 +1063,7 @@ class AntiRecallStaging {
         }
         const normalizedKey = normalizeText(key);
         const normalizedAssetId = normalizeText(assetId);
-        const candidate = this.candidates.get(normalizedKey);
+        const candidate = this.ensureCandidateLoaded(normalizedKey);
         const asset = candidate?.assets?.[normalizedAssetId];
         const assetKey = `${normalizedKey}:${normalizedAssetId}`;
         if (!candidate || !asset) {
@@ -698,9 +1124,12 @@ class AntiRecallStaging {
     }
 
     failAssetAcquisition(key, assetId, reason = 'acquisition-failed') {
+        if (this.closed) {
+            return false;
+        }
         const normalizedKey = normalizeText(key);
         const normalizedAssetId = normalizeText(assetId);
-        const candidate = this.candidates.get(normalizedKey);
+        const candidate = this.ensureCandidateLoaded(normalizedKey);
         const asset = candidate?.assets?.[normalizedAssetId];
         this.releaseReservation(`${normalizedKey}:${normalizedAssetId}`);
         if (asset?.acquisitionPath) {
@@ -721,9 +1150,12 @@ class AntiRecallStaging {
     }
 
     discardAsset(key, assetId) {
+        if (this.closed) {
+            return false;
+        }
         const normalizedKey = normalizeText(key);
         const normalizedAssetId = normalizeText(assetId);
-        const candidate = this.candidates.get(normalizedKey);
+        const candidate = this.ensureCandidateLoaded(normalizedKey);
         const asset = candidate?.assets?.[normalizedAssetId];
         if (!candidate || !asset || ['staged', 'promoted'].includes(asset.state)) {
             return false;
@@ -734,6 +1166,9 @@ class AntiRecallStaging {
             asset.acquisitionPath = '';
         }
         delete candidate.assets[normalizedAssetId];
+        if (this.restoring) {
+            this.restoreAssetCount = Math.max(0, this.restoreAssetCount - 1);
+        }
         this.journal.write(candidate);
         this.notifyCapacityAvailable();
         this.emitStatus();
@@ -749,6 +1184,7 @@ class AntiRecallStaging {
         }
         const normalizedKey = normalizeText(key);
         const normalizedAssetId = normalizeText(assetId);
+        this.ensureCandidateLoaded(normalizedKey);
         if (this.isOwnedAcquisitionPath(sourcePath)) {
             return await this.adoptOwnedAcquisition(normalizedKey, normalizedAssetId, sourcePath);
         }
@@ -876,6 +1312,7 @@ class AntiRecallStaging {
         }
         const normalizedKey = normalizeText(key);
         const normalizedAssetId = normalizeText(assetId);
+        this.ensureCandidateLoaded(normalizedKey);
         const assetKey = `${normalizedKey}:${normalizedAssetId}`;
         if (this.inFlight.has(assetKey)) {
             return await this.inFlight.get(assetKey);
@@ -1055,10 +1492,13 @@ class AntiRecallStaging {
     }
 
     promoteCandidateSync(key) {
+        if (this.closed) {
+            return null;
+        }
         if (!this.initialized) {
             this.initialize();
         }
-        const candidate = this.candidates.get(normalizeText(key));
+        const candidate = this.ensureCandidateLoaded(key);
         if (!candidate) {
             return null;
         }
@@ -1093,8 +1533,11 @@ class AntiRecallStaging {
     }
 
     completeCandidate(key) {
+        if (this.closed) {
+            return false;
+        }
         const normalized = normalizeText(key);
-        const candidate = this.candidates.get(normalized);
+        const candidate = this.ensureCandidateLoaded(normalized);
         if (!candidate?.recalled) {
             return false;
         }
@@ -1102,6 +1545,11 @@ class AntiRecallStaging {
         if (pending) {
             return false;
         }
+        if (this.restoring) {
+            this.restoreAssetCount = Math.max(0,
+                this.restoreAssetCount - Object.keys(candidate.assets).length);
+        }
+        this.restoreSkipKeys.add(normalized);
         this.candidates.delete(normalized);
         this.journal.remove(normalized);
         this.emitStatus();
@@ -1193,6 +1641,11 @@ class AntiRecallStaging {
 
     expireCandidate(candidate) {
         this.deleteCandidateFiles(candidate);
+        if (this.restoring) {
+            this.restoreAssetCount = Math.max(0,
+                this.restoreAssetCount - Object.keys(candidate.assets).length);
+        }
+        this.restoreSkipKeys.add(candidate.key);
         this.candidates.delete(candidate.key);
         this.journal.remove(candidate.key);
         this.onExpire(cloneRecord(candidate));
@@ -1220,6 +1673,9 @@ class AntiRecallStaging {
     }
 
     updateConfig(options = {}) {
+        if (this.closed) {
+            return;
+        }
         if (Number.isFinite(options.windowMs) && options.windowMs > 0) {
             this.windowMs = options.windowMs;
         }
@@ -1295,7 +1751,8 @@ class AntiRecallStaging {
             reservedBytes: this.getReservedBytes(),
             capacityBytes: this.capacityBytes,
             nextExpiryAt,
-            paused: blockedCount > 0
+            paused: blockedCount > 0,
+            restoring: this.restoring
         };
     }
 
@@ -1314,6 +1771,7 @@ class AntiRecallStaging {
 
     async clear() {
         this.close();
+        await this.restoreTask;
         await Promise.allSettled(Array.from(this.inFlight.values()));
         for (const candidate of this.candidates.values()) {
             this.deleteCandidateFiles(candidate);
@@ -1321,6 +1779,9 @@ class AntiRecallStaging {
         this.candidates.clear();
         this.heap = [];
         this.reservations.clear();
+        this.restoreAssetCount = 0;
+        this.restoreScanIncomplete = false;
+        this.runtimeCandidateKeys.clear();
         this.journal.clear();
         this.sweepOrphanAcquisitionFiles();
         this.emitStatus();
