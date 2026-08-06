@@ -36,6 +36,11 @@ test('movable Toolbox panels keep pointer capture for their own drag lifecycle',
     assert.match(renderer, /titlebar\.addEventListener\('pointermove'/);
     assert.match(voicePanel, /header\.setPointerCapture\?\.\(event\.pointerId\)/);
     assert.match(voicePanel, /header\.addEventListener\('pointermove'/);
+    assert.match(voicePanel, /requestAnimationFrame\(applyDragPosition\)/);
+    assert.match(voicePanel, /translate3d\(/);
+    assert.match(voicePanel, /shell\.style\.transform = ''/);
+    assert.match(voicePanel, /state\.dragging = true/);
+    assert.match(voicePanel, /state\.dragging = false;[\s\S]*?schedulePendingLibraryFlush\(\)/);
 });
 
 test('close-button dialogs ignore backdrop clicks and support Escape', () => {
@@ -61,6 +66,29 @@ test('the floating Toolbox closes with Escape after higher modals handle it', ()
     assert.match(renderer, /element\.getClientRects\(\)\.length > 0/);
     assert.match(renderer, /window\.addEventListener\('keydown', handleFloatingPanelEscape, true\)/);
     assert.doesNotMatch(renderer, /function handleFloatingPanelEscape[\s\S]*?event\.defaultPrevented[\s\S]*?function installPanelEvents/);
+});
+
+test('Escape passes through when no rendered Toolbox surface handles it', () => {
+    const renderer = readSource('src/renderer.js');
+    const fakeForward = readSource('src/fake-forward-editor.js');
+    const localStickers = readSource('src/local-sticker-panel.js');
+    const voicePanel = readSource('src/voice/library-panel.js');
+    const voiceController = readSource('src/voice/renderer-controller.js');
+    const mediaViewer = readSource('src/media-viewer.js');
+
+    assert.match(renderer, /panel\.getClientRects\(\)\.length === 0/);
+    assert.match(renderer, /event\.key === 'Escape' \|\| activeShortcutCapture/);
+    assert.match(fakeForward, /state\.root\.getClientRects\(\)\.length > 0/);
+    assert.match(localStickers, /root\.getClientRects\(\)\.length > 0/);
+    assert.match(voicePanel, /isOpen: \(\) => Boolean\([\s\S]*?getClientRects\(\)\.length > 0/);
+    assert.match(
+        voiceController,
+        /if \(!libraryPanel\.handleEscape\(\)\) \{\s*return;\s*\}[\s\S]*?event\.preventDefault\(\)/
+    );
+    assert.match(
+        mediaViewer,
+        /if \(event\.key === 'Escape'\) \{\s*if \(viewer\.classList\.contains\('is-concealed'\)\) \{\s*return;/
+    );
 });
 
 test('chat toolbar hover blocking targets only the three native expandable entries', () => {

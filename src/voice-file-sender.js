@@ -271,7 +271,40 @@ function getBufferMd5(data) {
 }
 
 async function ensureLibraryDirs() {
-    await fs.mkdir(getLibraryVoiceDir(), { recursive: true });
+    const trustedBasePath = path.resolve(path.dirname(getPluginDataDir()));
+    await fs.mkdir(trustedBasePath, { recursive: true });
+    let parentPath = trustedBasePath;
+    let realParentPath = await fs.realpath(trustedBasePath);
+
+    for (const directoryPath of [getPluginDataDir(), getLibraryDir(), getLibraryVoiceDir()]) {
+        const absolutePath = path.resolve(directoryPath);
+        if (normalizeComparablePath(path.dirname(absolutePath)) !== normalizeComparablePath(parentPath)) {
+            throw new Error('The voice library directory structure is invalid.');
+        }
+        try {
+            await fs.mkdir(absolutePath);
+        } catch (error) {
+            if (error?.code !== 'EEXIST') {
+                throw error;
+            }
+        }
+        const [itemLstat, itemStat, realPath] = await Promise.all([
+            fs.lstat(absolutePath),
+            fs.stat(absolutePath),
+            fs.realpath(absolutePath)
+        ]);
+        if (itemLstat.isSymbolicLink() || !itemStat.isDirectory() ||
+            !isSameOrDescendantAbsolutePath(realPath, realParentPath)) {
+            throw new Error('The voice library root is invalid.');
+        }
+        parentPath = absolutePath;
+        realParentPath = realPath;
+    }
+
+    return {
+        rootPath: parentPath,
+        realRootPath: realParentPath
+    };
 }
 
 function normalizeStoredPath(filePath) {
@@ -283,6 +316,23 @@ function normalizeFieldText(value) {
     return text && text !== 'undefined' && text !== 'null' && text !== '0' ? text : '';
 }
 
+function sanitizeLibraryEntryName(value) {
+    const requested = normalizeFieldText(value);
+    if (!requested) {
+        return '';
+    }
+    const name = requested
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[. ]+$/g, '')
+        .slice(0, 80);
+    if (!name || name === '.' || name === '..' || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+        return '';
+    }
+    return name;
+}
+
 function normalizeLibraryRelativePath(relativePath = '') {
     const normalized = String(relativePath || '')
         .replace(/\\/g, '/')
@@ -292,20 +342,98 @@ function normalizeLibraryRelativePath(relativePath = '') {
     return normalized;
 }
 
+function validateLibraryRelativePath(relativePath = '', allowRoot = true) {
+    const portablePath = String(relativePath ?? '').replace(/\\/g, '/');
+    if (!portablePath) {
+        if (allowRoot) {
+            return '';
+        }
+        throw new Error('The library root cannot be used as an item.');
+    }
+    if (portablePath.includes('\x00') || path.posix.isAbsolute(portablePath) ||
+        path.win32.isAbsolute(portablePath) || /^[a-z]:/i.test(portablePath)) {
+        throw new Error('The library path is invalid.');
+    }
+    const parts = portablePath.split('/');
+    if (parts.some(part =>
+        !part || part === '.' || part === '..' ||
+        /[<>:"|?*\x00-\x1F]/.test(part) || /[. ]$/.test(part) ||
+        /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
+    )) {
+        throw new Error('The library path is invalid.');
+    }
+    return parts.join('/');
+}
+
 function getLibraryAbsolutePath(relativePath = '') {
     return path.join(getLibraryVoiceDir(), ...normalizeLibraryRelativePath(relativePath).split('/').filter(Boolean));
 }
 
 function getLibraryRelativePath(filePath) {
     const relativePath = path.relative(getLibraryVoiceDir(), normalizeStoredPath(filePath));
-    if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    if (!relativePath || relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
         return '';
     }
     return relativePath.replace(/\\/g, '/');
 }
 
+function isSameOrDescendantAbsolutePath(candidatePath, ancestorPath) {
+    const candidate = normalizeComparablePath(path.resolve(candidatePath));
+    const ancestor = normalizeComparablePath(path.resolve(ancestorPath));
+    const ancestorPrefix = normalizeComparablePath(`${path.resolve(ancestorPath)}${path.sep}`);
+    return candidate === ancestor || candidate.startsWith(ancestorPrefix);
+}
+
+async function getLibraryPathContext() {
+    return await ensureLibraryDirs();
+}
+
+async function resolveExistingLibraryPath(candidatePath, options = {}) {
+    const context = options.context || await getLibraryPathContext();
+    const absolutePath = path.resolve(normalizeStoredPath(candidatePath));
+    if (!isSameOrDescendantAbsolutePath(absolutePath, context.rootPath) ||
+        (!options.allowRoot && normalizeComparablePath(absolutePath) === normalizeComparablePath(context.rootPath))) {
+        throw new Error('The library path is outside the voice library.');
+    }
+
+    let itemLstat;
+    let itemStat;
+    let realPath;
+    try {
+        [itemLstat, itemStat, realPath] = await Promise.all([
+            fs.lstat(absolutePath),
+            fs.stat(absolutePath),
+            fs.realpath(absolutePath)
+        ]);
+    } catch {
+        throw new Error('The library item was not found.');
+    }
+    if (itemLstat.isSymbolicLink() || !isSameOrDescendantAbsolutePath(realPath, context.realRootPath)) {
+        throw new Error('The library path points outside the voice library.');
+    }
+    if (options.kind === 'folder' && !itemStat.isDirectory()) {
+        throw new Error('The target folder was not found.');
+    }
+    if (options.kind === 'file' && !itemStat.isFile()) {
+        throw new Error('The source file was not found.');
+    }
+    return {
+        ...context,
+        path: absolutePath,
+        realPath,
+        lstat: itemLstat,
+        stat: itemStat,
+        relativePath: getLibraryRelativePath(absolutePath)
+    };
+}
+
+async function resolveExistingLibraryRelativePath(relativePath = '', options = {}) {
+    const normalizedPath = validateLibraryRelativePath(relativePath, options.allowRoot !== false);
+    return await resolveExistingLibraryPath(getLibraryAbsolutePath(normalizedPath), options);
+}
+
 function encodeLibraryItemId(kind, relativePath) {
-    return `${kind}:${Buffer.from(normalizeLibraryRelativePath(relativePath), 'utf8').toString('base64url')}`;
+    return `${kind}:${Buffer.from(validateLibraryRelativePath(relativePath, false), 'utf8').toString('base64url')}`;
 }
 
 function decodeLibraryItemId(itemId) {
@@ -314,9 +442,10 @@ function decodeLibraryItemId(itemId) {
         return null;
     }
     try {
+        const decodedPath = Buffer.from(match[2], 'base64url').toString('utf8');
         return {
             kind: match[1],
-            relativePath: normalizeLibraryRelativePath(Buffer.from(match[2], 'base64url').toString('utf8'))
+            relativePath: validateLibraryRelativePath(decodedPath, false)
         };
     } catch {
         return null;
@@ -327,6 +456,47 @@ function getLibraryParentFolder(relativePath = '') {
     const normalized = normalizeLibraryRelativePath(relativePath);
     const parent = path.posix.dirname(normalized);
     return parent === '.' ? '' : parent;
+}
+
+async function getLibraryFolders() {
+    const context = await getLibraryPathContext();
+    const folders = [''];
+    const visitedPaths = new Set([normalizeComparablePath(context.realRootPath)]);
+
+    async function visit(relativeFolder, folderPath) {
+        let entries = [];
+        try {
+            entries = await fs.readdir(folderPath, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        const childFolders = entries
+            .filter(entry => entry.isDirectory() && !entry.isSymbolicLink?.())
+            .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+        for (const entry of childFolders) {
+            const childFolder = validateLibraryRelativePath(relativeFolder ? `${relativeFolder}/${entry.name}` : entry.name, false);
+            let child;
+            try {
+                child = await resolveExistingLibraryRelativePath(childFolder, {
+                    allowRoot: false,
+                    context,
+                    kind: 'folder'
+                });
+            } catch {
+                continue;
+            }
+            const realPathKey = normalizeComparablePath(child.realPath);
+            if (visitedPaths.has(realPathKey)) {
+                continue;
+            }
+            visitedPaths.add(realPathKey);
+            folders.push(childFolder);
+            await visit(childFolder, child.path);
+        }
+    }
+
+    await visit('', context.rootPath);
+    return folders;
 }
 
 function getLibraryFileKind(filePath) {
@@ -362,10 +532,18 @@ async function readLibraryIndex() {
 
 async function writeLibraryIndex(index) {
     await ensureLibraryDirs();
-    await fs.writeFile(getLibraryIndexPath(), JSON.stringify({
+    const indexPath = getLibraryIndexPath();
+    const temporaryPath = `${indexPath}.${process.pid}-${crypto.randomUUID()}.tmp`;
+    const contents = JSON.stringify({
         version: 1,
         items: index.items || []
-    }, null, 2), 'utf8');
+    }, null, 2);
+    await fs.writeFile(temporaryPath, contents, 'utf8');
+    try {
+        await fs.rename(temporaryPath, indexPath);
+    } finally {
+        await fs.unlink(temporaryPath).catch(() => {});
+    }
 }
 
 function createLibraryIndexLookup(index) {
@@ -397,21 +575,27 @@ function hasConvertedVoiceForSource(convertedVoiceCandidates, sourcePath) {
     );
 }
 
-function countSupportedLibraryEntries(dirPath) {
-    let count = 0;
+async function countSupportedLibraryEntries(dirPath, itemsByPath = new Map()) {
     let entries = [];
     try {
-        entries = fsSync.readdirSync(dirPath, { withFileTypes: true });
+        entries = await fs.readdir(dirPath, { withFileTypes: true });
     } catch {
         return 0;
     }
+    let count = 0;
     for (const entry of entries) {
-        const entryPath = path.join(dirPath, entry.name);
-        if (entry.isDirectory()) {
+        if (entry.isDirectory() && !entry.isSymbolicLink?.()) {
             count += 1;
             continue;
         }
-        if (entry.isFile() && getLibraryFileKind(entryPath)) {
+        if (!entry.isFile()) {
+            continue;
+        }
+        const entryPath = path.join(dirPath, entry.name);
+        const indexedKind = itemsByPath.get(normalizeComparablePath(entryPath))?.kind;
+        const extension = path.extname(entry.name).toLowerCase();
+        if (indexedKind === 'ptt' || indexedKind === 'media' ||
+            MEDIA_EXTENSION_SET.has(extension) || !extension) {
             count += 1;
         }
     }
@@ -472,11 +656,17 @@ function upsertIndexedLibraryItem(index, item) {
 
 async function getLibraryItems(relativeFolder = '', missingDurationItems = []) {
     await ensureLibraryDirs();
-    const folder = normalizeLibraryRelativePath(relativeFolder);
-    const folderPath = getLibraryAbsolutePath(folder);
-    if (!fsSync.existsSync(folderPath)) {
+    const folder = validateLibraryRelativePath(relativeFolder, true);
+    let folderInfo;
+    try {
+        folderInfo = await resolveExistingLibraryRelativePath(folder, {
+            allowRoot: true,
+            kind: 'folder'
+        });
+    } catch {
         return [];
     }
+    const folderPath = folderInfo.path;
     const index = await readLibraryIndex();
     const { itemsByPath, convertedVoiceCandidates } = createLibraryIndexLookup(index);
     let indexDirty = false;
@@ -487,23 +677,33 @@ async function getLibraryItems(relativeFolder = '', missingDurationItems = []) {
     } catch {
         return [];
     }
-    for (const entry of entries) {
-        const entryPath = path.join(folderPath, entry.name);
-        const relativePath = getLibraryRelativePath(entryPath);
-        if (!relativePath) {
-            continue;
-        }
-        if (entry.isDirectory()) {
-            items.push({
+    const folderItems = await Promise.all(entries
+        .filter(entry => entry.isDirectory() && !entry.isSymbolicLink?.())
+        .map(async entry => {
+            const entryPath = path.join(folderPath, entry.name);
+            const relativePath = getLibraryRelativePath(entryPath);
+            if (!relativePath) {
+                return null;
+            }
+            return {
                 id: encodeLibraryItemId('folder', relativePath),
                 kind: 'folder',
                 title: entry.name,
                 path: entryPath,
                 relativePath,
                 parentPath: getLibraryParentFolder(relativePath),
-                count: countSupportedLibraryEntries(entryPath),
+                count: await countSupportedLibraryEntries(entryPath, itemsByPath),
                 createdAt: ''
-            });
+            };
+        }));
+    items.push(...folderItems.filter(Boolean));
+    for (const entry of entries) {
+        if (entry.isDirectory()) {
+            continue;
+        }
+        const entryPath = path.join(folderPath, entry.name);
+        const relativePath = getLibraryRelativePath(entryPath);
+        if (!relativePath) {
             continue;
         }
         if (!entry.isFile()) {
@@ -561,16 +761,19 @@ async function getLibraryItems(relativeFolder = '', missingDurationItems = []) {
 }
 
 function toLibraryViewItems(items) {
-    return items.map(item => ({
-        id: item.id,
-        title: item.title || path.basename(item.path),
-        kind: item.kind || 'ptt',
-        duration: Number(item.duration) || 0,
-        count: Number(item.count) || 0,
-        relativePath: item.relativePath || '',
-        parentPath: item.parentPath || '',
-        createdAt: item.createdAt || ''
-    }));
+    return items.map(item => {
+        const relativePath = item.relativePath || getLibraryRelativePath(item.path);
+        return {
+            id: item.id,
+            title: item.title || path.basename(item.path),
+            kind: item.kind || 'ptt',
+            duration: Number(item.duration) || 0,
+            count: Number(item.count) || 0,
+            relativePath,
+            parentPath: item.parentPath ?? getLibraryParentFolder(relativePath),
+            createdAt: item.createdAt || ''
+        };
+    });
 }
 
 async function detectMissingLibraryDurations(items) {
@@ -784,8 +987,10 @@ async function addMediaFileToLibrary(filePath, targetFolder = '') {
         return existing;
     }
 
-    const targetDir = getLibraryAbsolutePath(targetFolder);
-    await fs.mkdir(targetDir, { recursive: true });
+    const target = await resolveExistingLibraryRelativePath(targetFolder, {
+        allowRoot: true,
+        kind: 'folder'
+    });
     const silkResult = await encodeMediaFileToSilk(filePath);
     return await addVoiceDataToLibrary(silkResult.data, {
         title,
@@ -793,7 +998,7 @@ async function addMediaFileToLibrary(filePath, targetFolder = '') {
         sourcePath: filePath,
         sourceMd5,
         duration: getSilkDurationSeconds(silkResult),
-        targetDir
+        targetDir: target.path
     });
 }
 
@@ -805,41 +1010,259 @@ async function addMediaFilesToLibrary(filePaths, targetFolder = '') {
     return items;
 }
 
+async function resolveLibraryActionItem(index, itemId, context = null) {
+    const decoded = decodeLibraryItemId(itemId);
+    const indexedItem = (index.items || []).find(entry => entry.id === itemId) || null;
+    if (!indexedItem && !decoded) {
+        throw new Error(`Voice library item was not found: ${itemId}`);
+    }
+    const candidatePath = indexedItem?.path || getLibraryAbsolutePath(decoded.relativePath);
+    const resolved = await resolveExistingLibraryPath(candidatePath, {
+        allowRoot: false,
+        context: context || await getLibraryPathContext()
+    });
+    const isFolder = resolved.stat.isDirectory();
+    if (decoded && (decoded.kind === 'folder') !== isFolder) {
+        throw new Error('The library item type is invalid.');
+    }
+    const fileKind = isFolder ? '' : getLibraryFileKind(resolved.path);
+    const kind = isFolder ? 'folder' : (indexedItem?.kind || fileKind);
+    if (!isFolder && !fileKind && kind !== 'ptt' && kind !== 'media') {
+        throw new Error('The library file type is unsupported.');
+    }
+    const item = indexedItem || {
+        id: itemId,
+        kind,
+        path: resolved.path,
+        title: isFolder ? path.basename(resolved.path) : path.basename(resolved.path, path.extname(resolved.path)),
+        originalName: path.basename(resolved.path)
+    };
+    return {
+        item,
+        indexed: Boolean(indexedItem),
+        decoded,
+        kind,
+        isFolder,
+        ...resolved
+    };
+}
+
+function storedPathMatchesSource(value, sourcePath, sourceIsDirectory) {
+    const storedPath = normalizeStoredPath(value);
+    if (!storedPath) {
+        return false;
+    }
+    const storedComparable = normalizeComparablePath(storedPath);
+    const sourceComparable = normalizeComparablePath(sourcePath);
+    if (storedComparable === sourceComparable) {
+        return true;
+    }
+    return sourceIsDirectory && storedComparable.startsWith(normalizeComparablePath(`${sourcePath}${path.sep}`));
+}
+
+function relocateStoredPath(value, sourcePath, targetPath, sourceIsDirectory) {
+    if (!storedPathMatchesSource(value, sourcePath, sourceIsDirectory)) {
+        return value;
+    }
+    return path.join(targetPath, path.relative(sourcePath, normalizeStoredPath(value)));
+}
+
+function removeIndexedItemsAtPath(index, itemId, itemPath, isFolder) {
+    const previousLength = (index.items || []).length;
+    index.items = (index.items || []).filter(entry =>
+        entry.id !== itemId && !storedPathMatchesSource(entry.path, itemPath, isFolder)
+    );
+    return index.items.length !== previousLength;
+}
+
+function rewriteLibraryIndexPaths(index, sourcePath, targetPath, sourceIsDirectory) {
+    let changed = false;
+    for (const entry of index.items || []) {
+        const nextItemPath = relocateStoredPath(entry.path, sourcePath, targetPath, sourceIsDirectory);
+        if (nextItemPath !== entry.path) {
+            entry.path = nextItemPath;
+            changed = true;
+        }
+        if (entry.sourcePath) {
+            const nextSourcePath = relocateStoredPath(entry.sourcePath, sourcePath, targetPath, sourceIsDirectory);
+            if (nextSourcePath !== entry.sourcePath) {
+                entry.sourcePath = nextSourcePath;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+async function rollbackLibraryRename(currentPath, previousPath, originalError, action) {
+    try {
+        await fs.rename(currentPath, previousPath);
+    } catch (rollbackError) {
+        recordDiagnostic('error', 'voice.library-rollback-failed', {
+            action,
+            currentPath,
+            previousPath,
+            error: rollbackError
+        });
+        originalError.rollbackError = rollbackError;
+    }
+}
+
+async function createLibraryDeletionStagePath() {
+    await ensureLibraryDirs();
+    const libraryPath = path.resolve(getLibraryDir());
+    const realLibraryPath = await fs.realpath(libraryPath);
+    const trashPath = path.join(libraryPath, '.trash');
+    await fs.mkdir(trashPath, { recursive: true });
+    const [trashLstat, realTrashPath] = await Promise.all([
+        fs.lstat(trashPath),
+        fs.realpath(trashPath)
+    ]);
+    if (trashLstat.isSymbolicLink() || !isSameOrDescendantAbsolutePath(realTrashPath, realLibraryPath)) {
+        throw new Error('The voice library trash path is invalid.');
+    }
+    return path.join(trashPath, crypto.randomUUID());
+}
+
 async function deleteLibraryItem(itemId) {
     const index = await readLibraryIndex();
     const decoded = decodeLibraryItemId(itemId);
-    const item = index.items.find(entry => entry.id === itemId) || (decoded ? {
-        id: itemId,
-        kind: decoded.kind,
-        path: getLibraryAbsolutePath(decoded.relativePath)
-    } : null);
-    if (!item) {
+    const indexedItem = (index.items || []).find(entry => entry.id === itemId) || null;
+    if (!indexedItem && !decoded) {
         return false;
     }
-    const itemPath = normalizeStoredPath(item.path);
-    const relativePath = getLibraryRelativePath(itemPath);
-    if (relativePath && fsSync.existsSync(itemPath)) {
-        const stat = await fs.stat(itemPath);
-        if (stat.isDirectory()) {
-            const folderPrefix = normalizeComparablePath(itemPath + path.sep);
-            index.items = index.items.filter(entry => {
-                const entryPath = normalizeComparablePath(normalizeStoredPath(entry.path));
-                return entry.id !== itemId && entryPath !== normalizeComparablePath(itemPath) && !entryPath.startsWith(folderPrefix);
-            });
-        } else {
-            index.items = index.items.filter(entry => entry.id !== itemId && normalizeComparablePath(normalizeStoredPath(entry.path)) !== normalizeComparablePath(itemPath));
+
+    const itemPath = path.resolve(normalizeStoredPath(indexedItem?.path || getLibraryAbsolutePath(decoded.relativePath)));
+    if (!fsSync.existsSync(itemPath)) {
+        const rootPath = path.resolve(getLibraryVoiceDir());
+        const canCleanByPath = normalizeComparablePath(itemPath) !== normalizeComparablePath(rootPath) &&
+            isSameOrDescendantAbsolutePath(itemPath, rootPath);
+        const isFolder = decoded?.kind === 'folder' || indexedItem?.kind === 'folder';
+        const changed = canCleanByPath
+            ? removeIndexedItemsAtPath(index, itemId, itemPath, isFolder)
+            : removeIndexedItemsAtPath(index, itemId, '', false);
+        if (changed) {
+            await writeLibraryIndex(index);
         }
-        await writeLibraryIndex(index);
-        if (stat.isDirectory()) {
-            await fs.rm(itemPath, { recursive: true, force: true });
-        } else {
-            await fs.unlink(itemPath).catch(() => {});
-        }
-    } else {
-        index.items = index.items.filter(entry => entry.id !== itemId);
-        await writeLibraryIndex(index);
+        return true;
     }
+
+    const context = await getLibraryPathContext();
+    const resolved = await resolveLibraryActionItem(index, itemId, context);
+    const stagedPath = await createLibraryDeletionStagePath();
+    await fs.rename(resolved.path, stagedPath);
+    const changed = removeIndexedItemsAtPath(index, itemId, resolved.path, resolved.isFolder);
+    try {
+        if (changed) {
+            await writeLibraryIndex(index);
+        }
+    } catch (error) {
+        await rollbackLibraryRename(stagedPath, resolved.path, error, 'delete');
+        throw error;
+    }
+    await fs.rm(stagedPath, { recursive: resolved.isFolder, force: true }).catch(error => {
+        recordDiagnostic('warn', 'voice.library-trash-cleanup-failed', {
+            path: stagedPath,
+            error
+        });
+    });
     return true;
+}
+
+async function createLibraryFolder(relativeFolder = '', title = '') {
+    const folderName = sanitizeLibraryEntryName(title);
+    if (!folderName) {
+        throw new Error('The folder name is invalid.');
+    }
+    const parentFolder = validateLibraryRelativePath(relativeFolder, true);
+    const parent = await resolveExistingLibraryRelativePath(parentFolder, {
+        allowRoot: true,
+        kind: 'folder'
+    });
+    const folderPath = path.join(parent.path, folderName);
+    if (fsSync.existsSync(folderPath)) {
+        throw new Error('A folder with the same name already exists.');
+    }
+    await fs.mkdir(folderPath);
+    let created;
+    try {
+        created = await resolveExistingLibraryPath(folderPath, {
+            allowRoot: false,
+            context: parent,
+            kind: 'folder'
+        });
+    } catch (error) {
+        await fs.rmdir(folderPath).catch(() => {});
+        throw error;
+    }
+    const createdFolder = created.relativePath;
+    return {
+        id: encodeLibraryItemId('folder', createdFolder),
+        kind: 'folder',
+        title: folderName,
+        path: created.path,
+        relativePath: createdFolder,
+        parentPath: parentFolder,
+        count: 0,
+        createdAt: ''
+    };
+}
+
+async function moveLibraryItem(itemId, targetFolder = '') {
+    const index = await readLibraryIndex();
+    const context = await getLibraryPathContext();
+    const source = await resolveLibraryActionItem(index, itemId, context);
+    const normalizedTargetFolder = validateLibraryRelativePath(targetFolder, true);
+    const target = await resolveExistingLibraryRelativePath(normalizedTargetFolder, {
+        allowRoot: true,
+        context,
+        kind: 'folder'
+    });
+    if (source.isFolder && (
+        isSameOrDescendantAbsolutePath(target.path, source.path) ||
+        isSameOrDescendantAbsolutePath(target.realPath, source.realPath)
+    )) {
+        throw new Error('A folder cannot be moved into itself.');
+    }
+    const sourceParentPath = path.dirname(source.path);
+    if (normalizeComparablePath(sourceParentPath) === normalizeComparablePath(target.path) ||
+        normalizeComparablePath(path.dirname(source.realPath)) === normalizeComparablePath(target.realPath)) {
+        return {
+            ...source.item,
+            relativePath: source.relativePath,
+            parentPath: normalizedTargetFolder
+        };
+    }
+
+    const nextPath = path.join(target.path, path.basename(source.path));
+    if (fsSync.existsSync(nextPath)) {
+        throw new Error('An item with the same name already exists in the target folder.');
+    }
+    await fs.rename(source.path, nextPath);
+    try {
+        let changed = removeIndexedItemsAtPath(index, '', nextPath, source.isFolder);
+        changed = rewriteLibraryIndexPaths(index, source.path, nextPath, source.isFolder) || changed;
+        const movedItem = {
+            ...source.item,
+            id: source.isFolder ? encodeLibraryItemId('folder', getLibraryRelativePath(nextPath)) : source.item.id,
+            path: nextPath,
+            relativePath: getLibraryRelativePath(nextPath),
+            parentPath: normalizedTargetFolder
+        };
+        if (!source.isFolder && !source.indexed && source.kind) {
+            movedItem.createdAt = new Date().toISOString();
+            movedItem.md5 = await getFileMd5(nextPath);
+            index.items.unshift(movedItem);
+            changed = true;
+        }
+        if (changed) {
+            await writeLibraryIndex(index);
+        }
+        return movedItem;
+    } catch (error) {
+        await rollbackLibraryRename(nextPath, source.path, error, 'move');
+        throw error;
+    }
 }
 
 async function makeUniqueLibraryPath(filePath) {
@@ -854,103 +1277,109 @@ async function makeUniqueLibraryPath(filePath) {
 }
 
 async function renameLibraryItem(itemId, title) {
-    const nextTitle = safeFileStem(title);
+    const nextTitle = sanitizeLibraryEntryName(title);
     if (!nextTitle) {
-        throw new Error('The new name is empty.');
+        throw new Error('The new name is invalid.');
     }
-    const decoded = decodeLibraryItemId(itemId);
     const index = await readLibraryIndex();
-    const item = index.items.find(entry => entry.id === itemId) || (decoded ? {
-        id: itemId,
-        kind: decoded.kind === 'folder' ? 'folder' : getLibraryFileKind(getLibraryAbsolutePath(decoded.relativePath)),
-        path: getLibraryAbsolutePath(decoded.relativePath),
-        title: path.basename(decoded.relativePath, path.extname(decoded.relativePath)),
-        originalName: path.basename(decoded.relativePath)
-    } : null);
-    if (!item) {
-        throw new Error(`Voice library item was not found: ${itemId}`);
+    const context = await getLibraryPathContext();
+    const source = await resolveLibraryActionItem(index, itemId, context);
+    const extension = source.isFolder
+        ? ''
+        : (path.extname(source.path) || path.extname(source.item.originalName || '') || '.dat');
+    const preferredPath = path.join(path.dirname(source.path), `${nextTitle}${extension}`);
+    let nextPath = source.path;
+    let fileSystemRenamed = false;
+    const pathsDiffer = path.resolve(preferredPath) !== path.resolve(source.path);
+    const isCaseOnlyRename = pathsDiffer &&
+        normalizeComparablePath(preferredPath) === normalizeComparablePath(source.path);
+    if (pathsDiffer) {
+        nextPath = isCaseOnlyRename ? preferredPath : await makeUniqueLibraryPath(preferredPath);
+        if (!isSameOrDescendantAbsolutePath(nextPath, context.rootPath) ||
+            normalizeComparablePath(path.dirname(nextPath)) !== normalizeComparablePath(path.dirname(source.path))) {
+            throw new Error('The new library path is invalid.');
+        }
+        if (isCaseOnlyRename) {
+            const temporaryPath = await makeUniqueLibraryPath(path.join(
+                path.dirname(source.path),
+                `.qqnt-toolbox-rename-${crypto.randomUUID()}`
+            ));
+            await fs.rename(source.path, temporaryPath);
+            try {
+                await fs.rename(temporaryPath, nextPath);
+            } catch (error) {
+                await rollbackLibraryRename(temporaryPath, source.path, error, 'rename-case');
+                throw error;
+            }
+        } else {
+            await fs.rename(source.path, nextPath);
+        }
+        fileSystemRenamed = true;
     }
 
-    const oldPath = normalizeStoredPath(item.path);
-    const oldStat = oldPath && fsSync.existsSync(oldPath) ? await fs.stat(oldPath) : null;
-    const oldExt = oldStat?.isDirectory() ? '' : (path.extname(oldPath) || path.extname(item.originalName || '') || '.dat');
-    let nextPath = oldPath;
-    if (oldPath && fsSync.existsSync(oldPath)) {
-        const preferredPath = path.join(path.dirname(oldPath), `${nextTitle}${oldExt}`);
-        if (normalizeComparablePath(preferredPath) !== normalizeComparablePath(oldPath)) {
-            nextPath = await makeUniqueLibraryPath(preferredPath);
-            await fs.rename(oldPath, nextPath);
+    try {
+        let changed = false;
+        if (fileSystemRenamed) {
+            changed = isCaseOnlyRename
+                ? false
+                : removeIndexedItemsAtPath(index, '', nextPath, source.isFolder);
+            changed = rewriteLibraryIndexPaths(index, source.path, nextPath, source.isFolder) || changed;
         }
-    }
-
-    item.title = nextTitle;
-    item.path = nextPath;
-    if (oldStat?.isDirectory()) {
-        const oldPrefix = normalizeComparablePath(oldPath + path.sep);
-        for (const entry of index.items) {
-            const entryPath = normalizeStoredPath(entry.path);
-            const comparableEntryPath = normalizeComparablePath(entryPath);
-            if (comparableEntryPath === normalizeComparablePath(oldPath) || comparableEntryPath.startsWith(oldPrefix)) {
-                entry.path = path.join(nextPath, path.relative(oldPath, entryPath));
+        const renamedItem = {
+            ...source.item,
+            id: source.isFolder ? encodeLibraryItemId('folder', getLibraryRelativePath(nextPath)) : source.item.id,
+            title: nextTitle,
+            path: nextPath,
+            relativePath: getLibraryRelativePath(nextPath),
+            parentPath: getLibraryParentFolder(getLibraryRelativePath(nextPath))
+        };
+        if (source.indexed) {
+            if (source.item.title !== nextTitle) {
+                source.item.title = nextTitle;
+                changed = true;
             }
-            const sourcePath = normalizeStoredPath(entry.sourcePath);
-            const comparableSourcePath = normalizeComparablePath(sourcePath);
-            if (comparableSourcePath === normalizeComparablePath(oldPath) || comparableSourcePath.startsWith(oldPrefix)) {
-                entry.sourcePath = path.join(nextPath, path.relative(oldPath, sourcePath));
-            }
+            source.item.path = nextPath;
+        } else if (!source.isFolder && source.kind) {
+            renamedItem.createdAt = new Date().toISOString();
+            renamedItem.md5 = await getFileMd5(nextPath);
+            index.items.unshift({
+                ...renamedItem,
+                relativePath: undefined,
+                parentPath: undefined
+            });
+            changed = true;
         }
+        if (changed) {
+            await writeLibraryIndex(index);
+        }
+        return renamedItem;
+    } catch (error) {
+        if (fileSystemRenamed) {
+            await rollbackLibraryRename(nextPath, source.path, error, 'rename');
+        }
+        throw error;
     }
-    if (item.kind !== 'folder' && !index.items.some(entry => entry.id === item.id) && item.kind) {
-        item.createdAt = new Date().toISOString();
-        item.md5 = fsSync.existsSync(nextPath) ? await getFileMd5(nextPath) : '';
-        index.items.unshift(item);
-    }
-    await writeLibraryIndex(index);
-    return item;
 }
 
 async function getLibraryItem(itemId) {
     return await withLibraryIndexMutation(async () => {
         const index = await readLibraryIndex();
-        const indexed = index.items.find(item => item.id === itemId && fsSync.existsSync(normalizeStoredPath(item.path)));
-        if (indexed) {
-            return {
-                ...indexed,
-                path: normalizeStoredPath(indexed.path),
-                relativePath: getLibraryRelativePath(indexed.path)
-            };
-        }
-        const decoded = decodeLibraryItemId(itemId);
-        if (!decoded) {
+        let resolved;
+        try {
+            resolved = await resolveLibraryActionItem(index, itemId);
+        } catch {
             return null;
         }
-        const itemPath = getLibraryAbsolutePath(decoded.relativePath);
-        if (!fsSync.existsSync(itemPath)) {
-            return null;
-        }
-        const stat = await fs.stat(itemPath);
-        if (stat.isDirectory()) {
-            return {
-                id: itemId,
-                kind: 'folder',
-                title: path.basename(itemPath),
-                path: itemPath,
-                relativePath: decoded.relativePath,
-                count: countSupportedLibraryEntries(itemPath)
-            };
-        }
-        const kind = getLibraryFileKind(itemPath);
-        if (!kind) {
-            return null;
-        }
+        const { itemsByPath } = createLibraryIndexLookup(index);
         return {
-            id: itemId,
-            kind,
-            title: path.basename(itemPath, path.extname(itemPath)),
-            path: itemPath,
-            relativePath: decoded.relativePath,
-            duration: 0,
-            originalName: path.basename(itemPath)
+            ...resolved.item,
+            kind: resolved.kind,
+            path: resolved.path,
+            relativePath: resolved.relativePath,
+            parentPath: getLibraryParentFolder(resolved.relativePath),
+            count: resolved.isFolder
+                ? await countSupportedLibraryEntries(resolved.path, itemsByPath)
+                : 0
         };
     });
 }
@@ -1038,16 +1467,22 @@ async function setInjectedStatus(browserWindow, label, options = {}) {
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
 }
 
-async function setInjectedLibrary(browserWindow, folder = '') {
+async function setInjectedLibrary(browserWindow, folder = '', extraPayload = {}) {
     if (browserWindow.isDestroyed()) {
         return;
     }
-    const normalizedFolder = normalizeLibraryRelativePath(folder);
+    const normalizedFolder = validateLibraryRelativePath(folder, true);
     const missingDurationItems = [];
+    const [items, folders] = await Promise.all([
+        withLibraryIndexMutation(() => getLibraryItems(normalizedFolder, missingDurationItems)),
+        getLibraryFolders()
+    ]);
     const payload = {
         folder: normalizedFolder,
         parent: getLibraryParentFolder(normalizedFolder),
-        items: toLibraryViewItems(await withLibraryIndexMutation(() => getLibraryItems(normalizedFolder, missingDurationItems)))
+        items: toLibraryViewItems(items),
+        folders,
+        ...extraPayload
     };
     const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify(payload)});`;
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
@@ -1089,7 +1524,7 @@ function queueLibraryDurationRefresh(browserWindow, folder, items) {
     if (!browserWindow || browserWindow.isDestroyed() || !Array.isArray(items) || items.length === 0) {
         return;
     }
-    const normalizedFolder = normalizeLibraryRelativePath(folder);
+    const normalizedFolder = validateLibraryRelativePath(folder, true);
     let refresh = libraryDurationRefreshes.get(normalizedFolder);
     if (!refresh) {
         refresh = {
@@ -1493,8 +1928,8 @@ async function sendPttInfoAsPtt(browserWindow, peer, ptt) {
     );
 }
 
-async function refreshInjectedLibrary(browserWindow, message = '', folder = '') {
-    await setInjectedLibrary(browserWindow, folder);
+async function refreshInjectedLibrary(browserWindow, message = '', folder = '', extraPayload = {}) {
+    await setInjectedLibrary(browserWindow, folder, extraPayload);
     await setInjectedStatus(browserWindow, message, {
         disabled: false,
         resetAfterMs: message ? 1800 : undefined
@@ -1542,15 +1977,36 @@ async function handleInjectedAction(browserWindow, action) {
         await refreshInjectedLibrary(browserWindow, '已删除', action.folder || '');
         return;
     }
+    if (action.type === 'createLibraryFolder') {
+        await withLibraryIndexMutation(() => createLibraryFolder(action.folder || '', action.title));
+        await refreshInjectedLibrary(browserWindow, '已新建文件夹', action.folder || '');
+        return;
+    }
+    if (action.type === 'moveLibrary') {
+        await withLibraryIndexMutation(() => moveLibraryItem(action.id, action.targetFolder || ''));
+        const selectedItem = action.selectedItemId
+            ? await getLibraryItem(action.selectedItemId)
+            : null;
+        await refreshInjectedLibrary(browserWindow, '已移动', action.folder || '', {
+            selectedItem: selectedItem ? toLibraryViewItems([selectedItem])[0] : null
+        });
+        return;
+    }
     if (action.type === 'renameLibrary') {
         await withLibraryIndexMutation(() => renameLibraryItem(action.id, action.title));
-        await refreshInjectedLibrary(browserWindow, '已重命名', action.folder || '');
+        const selectedItem = action.selectedItemId
+            ? await getLibraryItem(action.selectedItemId)
+            : null;
+        await refreshInjectedLibrary(browserWindow, '已重命名', action.folder || '', {
+            selectedItem: selectedItem ? toLibraryViewItems([selectedItem])[0] : null
+        });
         return;
     }
     if (action.type === 'previewLibrary') {
         const previewItem = await createLibraryPreviewItem(action.id);
         const previewData = await fs.readFile(previewItem.previewPath);
         await setInjectedPreview(browserWindow, {
+            id: previewItem.id,
             previewUrl: `data:audio/wav;base64,${previewData.toString('base64')}`,
             previewTitle: previewItem.title || '语音'
         });

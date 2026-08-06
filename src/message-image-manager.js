@@ -196,7 +196,10 @@ export function createMessageImageManager(options = {}) {
         addCategoryButton.title = '新建分类';
         addCategoryButton.setAttribute('aria-label', '新建分类');
         categoryHeader.append(createElement('div', 'qmim-sidebar-title', '分类'), addCategoryButton);
-        const categoryList = createElement('div', 'qmim-category-list');
+        const categoryList = createElement(
+            'div',
+            'qmim-category-list qqnt-toolbox-scrollable'
+        );
         categoryList.setAttribute('role', 'listbox');
         categoryList.setAttribute('aria-label', '图片分类');
         const categoryControls = createElement('div', 'qmim-category-controls');
@@ -219,7 +222,10 @@ export function createMessageImageManager(options = {}) {
         const renameButton = createElement('button', 'qmim-button', '重命名');
         const categoryAction = createElement('div', 'qmim-category-action');
         const assignButton = createElement('button', 'qmim-button', '移动到分类');
-        const categoryMenu = createElement('div', 'qmim-category-menu');
+        const categoryMenu = createElement(
+            'div',
+            'qmim-category-menu qqnt-toolbox-scrollable'
+        );
         assignButton.type = 'button';
         categoryMenu.hidden = true;
         categoryAction.append(assignButton, categoryMenu);
@@ -229,7 +235,7 @@ export function createMessageImageManager(options = {}) {
         }
         toolbarActions.append(viewButton, copyButton, renameButton, categoryAction, deleteButton);
         toolbar.append(selectionSummary, toolbarActions);
-        const grid = createElement('div', 'qmim-grid');
+        const grid = createElement('div', 'qmim-grid qqnt-toolbox-scrollable');
         grid.setAttribute('role', 'listbox');
         grid.setAttribute('aria-multiselectable', 'true');
         grid.setAttribute('aria-label', '消息图片');

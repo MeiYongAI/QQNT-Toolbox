@@ -31,6 +31,7 @@ import {
     installReplyAtInsertGuard
 } from './reply-at-control.js';
 import './qr-result-dialog.js';
+import './toolbox-scrollbars.js';
 
 let initializeToolboxSettings = async () => {};
 let handleToolboxVueComponentMount = () => {};
@@ -1035,30 +1036,7 @@ let handleToolboxVueComponentMount = () => {};
     min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
-    overflow-y: overlay;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
-    scrollbar-color: transparent transparent;
-}
-#${PANEL_ID} .qqnt-toolbox-body::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-}
-#${PANEL_ID} .qqnt-toolbox-body::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: transparent;
-}
-#${PANEL_ID} .qqnt-toolbox-body::-webkit-scrollbar-track {
-    background: transparent;
-}
-#${PANEL_ID}:hover .qqnt-toolbox-body {
-    scrollbar-color: var(--fill_standard_secondary, rgba(127, 127, 127, .30)) transparent;
-}
-#${PANEL_ID}:hover .qqnt-toolbox-body::-webkit-scrollbar-thumb {
-    background: var(--fill_standard_secondary, rgba(127, 127, 127, .30));
-}
-#${PANEL_ID} .qqnt-toolbox-body::-webkit-scrollbar-thumb:hover {
-    background: var(--fill_standard_primary, rgba(127, 127, 127, .42));
 }
 #${PANEL_ID} .qqnt-toolbox-category-title {
     flex: none;
@@ -2385,7 +2363,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         close.setAttribute('aria-label', text('\u5173\u95ed'));
         titlebar.append(close);
 
-        const body = createElement('div', 'qqnt-toolbox-body');
+        const body = createElement('div', 'qqnt-toolbox-body qqnt-toolbox-scrollable');
         body.append(
             createCategoryTitle(text('功能')),
             createSection('interface', text('界面调整'), [
@@ -3740,7 +3718,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             return;
         }
         const panel = document.getElementById(PANEL_ID);
-        if (!panel || panel.hidden) {
+        if (!panel || panel.hidden || !panel.isConnected || panel.getClientRects().length === 0) {
             return;
         }
         const upperLayer = Array.from(document.querySelectorAll([
@@ -7969,7 +7947,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     document.addEventListener('scroll', handleChatScroll, true);
 
     document.addEventListener('keydown', event => {
-        if (activeShortcutCapture || !configReady || !isPanelShortcut(event) || event.repeat) {
+        if (event.key === 'Escape' || activeShortcutCapture || !configReady ||
+            !isPanelShortcut(event) || event.repeat) {
             return;
         }
         event.preventDefault();
@@ -7979,7 +7958,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
     window.addEventListener('keydown', handleFloatingPanelEscape, true);
 
     document.addEventListener('keyup', event => {
-        if (!configReady || !isPanelShortcut(event)) {
+        if (event.key === 'Escape' || !configReady || !isPanelShortcut(event)) {
             return;
         }
         event.stopPropagation();

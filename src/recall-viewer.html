@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>撤回消息查看</title>
+    <link rel="stylesheet" href="./toolbox-scrollbars.css">
     <style>
         :root {
             color-scheme: light dark;
-            --scrollbar-thumb: #0000001a;
             --sidebar-active-bg: #0099ff;
             --sidebar-active-text: #fff;
             --sidebar-bg: #fff;
@@ -27,7 +27,6 @@
         }
         @media (prefers-color-scheme: dark) {
             :root {
-                --scrollbar-thumb: #ffffff3d;
                 --sidebar-active-bg: #0d6ecf;
                 --sidebar-active-text: #ffffffe6;
                 --sidebar-bg: #171717;
@@ -49,17 +48,6 @@
         * {
             box-sizing: border-box;
             letter-spacing: 0;
-        }
-        *::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
-        }
-        *::-webkit-scrollbar-thumb {
-            border-radius: 10px;
-            background: transparent;
-        }
-        *:hover::-webkit-scrollbar-thumb {
-            background: var(--scrollbar-thumb);
         }
         html,
         body {
@@ -755,10 +743,11 @@
             <div class="sidebar-toolbar">
                 <input id="chat-search" class="chat-search" type="search" placeholder="搜索群名、QQ号或文件名" autocomplete="off">
             </div>
-            <div id="chat-list" class="chat-list"><div class="empty-state">加载数据中...</div></div>
+            <div id="chat-list" class="chat-list qqnt-toolbox-scrollable"><div class="empty-state">加载数据中...</div></div>
         </aside>
-        <main id="message-list" class="messages"><div class="empty-state">请选择左侧会话</div></main>
+        <main id="message-list" class="messages qqnt-toolbox-scrollable"><div class="empty-state">请选择左侧会话</div></main>
     </div>
+    <script type="module" src="./toolbox-scrollbars.js"></script>
     <script src="./recall-viewer.js"></script>
 </body>
 </html>

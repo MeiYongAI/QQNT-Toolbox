@@ -163,20 +163,6 @@
     padding: 0 2px 0 0;
     overflow: auto;
     list-style: none;
-    scrollbar-gutter: stable;
-}
-
-.qff-list::-webkit-scrollbar,
-.qff-form::-webkit-scrollbar,
-.qff-composer::-webkit-scrollbar {
-    width: 6px;
-}
-
-.qff-list::-webkit-scrollbar-thumb,
-.qff-form::-webkit-scrollbar-thumb,
-.qff-composer::-webkit-scrollbar-thumb {
-    border-radius: 3px;
-    background: rgba(127, 127, 127, 0.32);
 }
 
 .qff-empty {

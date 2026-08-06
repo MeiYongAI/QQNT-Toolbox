@@ -1,0 +1,81 @@
+.qqnt-toolbox-scrollable {
+    overflow-anchor: none;
+    scrollbar-gutter: auto !important;
+    scrollbar-width: none !important;
+}
+
+.qqnt-toolbox-scrollable::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+}
+
+.qqnt-toolbox-scrollbar-overlay.v-scrollbar-track {
+    position: fixed !important;
+    z-index: 2147483647 !important;
+    top: var(--qqnt-toolbox-scrollbar-top, 0) !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: var(--qqnt-toolbox-scrollbar-left, 0) !important;
+    display: block !important;
+    width: 9px !important;
+    min-width: 9px !important;
+    height: var(--qqnt-toolbox-scrollbar-height, 0) !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-sizing: border-box !important;
+    opacity: 0;
+    visibility: visible !important;
+    background: transparent !important;
+    pointer-events: none;
+    touch-action: none;
+    transform: none !important;
+    transition: opacity 120ms ease;
+    -webkit-app-region: no-drag;
+}
+
+.qqnt-toolbox-scrollbar-overlay.v-scrollbar-track[data-visible="true"] {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.qqnt-toolbox-scrollbar-thumb.v-scrollbar-thumb {
+    position: absolute !important;
+    top: var(--qqnt-toolbox-scrollbar-thumb-top, 0) !important;
+    right: 1px !important;
+    bottom: auto !important;
+    left: auto !important;
+    display: block !important;
+    width: 6px !important;
+    min-width: 6px !important;
+    height: var(--qqnt-toolbox-scrollbar-thumb-height, 24px) !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 1px solid transparent !important;
+    border-radius: 4px !important;
+    box-sizing: border-box !important;
+    background: var(--icon_secondary, var(--fill_standard_secondary, rgba(127, 127, 127, .46))) !important;
+    background-clip: padding-box !important;
+    box-shadow: none !important;
+    pointer-events: auto;
+    transform: none !important;
+    transition: background-color 120ms ease;
+}
+
+.qqnt-toolbox-scrollbar-overlay:hover .qqnt-toolbox-scrollbar-thumb,
+.qqnt-toolbox-scrollbar-overlay[data-dragging="true"] .qqnt-toolbox-scrollbar-thumb {
+    background: var(--icon_primary, var(--fill_standard_primary, rgba(127, 127, 127, .62))) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .qqnt-toolbox-scrollbar-overlay.v-scrollbar-track,
+    .qqnt-toolbox-scrollbar-thumb.v-scrollbar-thumb {
+        transition: none;
+    }
+}

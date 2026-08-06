@@ -986,13 +986,13 @@ export function createFakeForwardEditor(options = {}) {
         const closeButton = createButton('qff-close', '×', '关闭');
         header.append(title, closeButton);
 
-        const body = createElement('div', 'qff-body');
+        const body = createElement('div', 'qff-body qqnt-toolbox-scrollable');
         const listPane = createElement('section', 'qff-list-pane');
         const listHeader = createElement('div', 'qff-list-header');
         const listHeading = createElement('div', 'qff-list-heading');
         state.count = createElement('span', 'qff-count');
         listHeading.append(createElement('span', 'qff-list-title', '消息'), state.count);
-        state.list = createElement('ol', 'qff-list');
+        state.list = createElement('ol', 'qff-list qqnt-toolbox-scrollable');
         const listActions = createElement('div', 'qff-list-actions');
         state.fields.moveUp = createButton('qff-list-action', '上移');
         state.fields.moveDown = createButton('qff-list-action', '下移');
@@ -1001,7 +1001,7 @@ export function createFakeForwardEditor(options = {}) {
         listHeader.append(listHeading, listActions);
         listPane.append(listHeader, state.list);
 
-        const form = createElement('form', 'qff-form');
+        const form = createElement('form', 'qff-form qqnt-toolbox-scrollable');
         const fieldRow = createElement('div', 'qff-field-row');
         state.fields.senderUin = createElement('input', 'qff-input');
         state.fields.senderUin.type = 'text';
@@ -1027,7 +1027,10 @@ export function createFakeForwardEditor(options = {}) {
         dateField.classList.add('qff-date-field');
         clockField.classList.add('qff-clock-field');
         timeRow.append(dateField, clockField);
-        state.fields.composer = createElement('div', 'qff-composer');
+        state.fields.composer = createElement(
+            'div',
+            'qff-composer qqnt-toolbox-scrollable'
+        );
         state.fields.composer.contentEditable = 'true';
         state.fields.composer.spellcheck = false;
         state.fields.composer.setAttribute('role', 'textbox');
@@ -1184,7 +1187,8 @@ export function createFakeForwardEditor(options = {}) {
     }
 
     function handleKeydown(event) {
-        if (event.key === 'Escape' && state.root && !state.root.hidden) {
+        if (event.key === 'Escape' && state.root && !state.root.hidden &&
+            state.root.isConnected && state.root.getClientRects().length > 0) {
             event.preventDefault();
             event.stopPropagation();
             close();

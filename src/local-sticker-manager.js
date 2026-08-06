@@ -210,7 +210,7 @@ export function createLocalStickerManager(options = {}) {
             createElement('div', 'qlsm-pane-title', '贴纸集排序'),
             createElement('div', 'qlsm-pane-meta', '拖动手柄调整面板底部的贴纸集顺序')
         );
-        const packList = createElement('div', 'qlsm-pack-list');
+        const packList = createElement('div', 'qlsm-pack-list qqnt-toolbox-scrollable');
         packList.setAttribute('role', 'list');
         const packFooter = createElement('footer', 'qlsm-pane-footer');
         const packStatus = createElement('div', 'qlsm-status');
@@ -223,7 +223,10 @@ export function createLocalStickerManager(options = {}) {
         const panelPane = createElement('section', 'qlsm-pane qlsm-panel-pane');
         panelPane.dataset.pane = 'panel';
         panelPane.setAttribute('role', 'tabpanel');
-        const panelForm = createElement('form', 'qlsm-form qlsm-panel-form');
+        const panelForm = createElement(
+            'form',
+            'qlsm-form qlsm-panel-form qqnt-toolbox-scrollable'
+        );
         const layoutSection = createElement('section', 'qlsm-form-section');
         layoutSection.append(createElement('div', 'qlsm-form-title', '面板布局'));
         const perRow = createNumberControl('每行贴纸', 3, 10, '个');
@@ -287,7 +290,7 @@ export function createLocalStickerManager(options = {}) {
         const telegramPane = createElement('section', 'qlsm-pane qlsm-telegram-pane');
         telegramPane.dataset.pane = 'telegram';
         telegramPane.setAttribute('role', 'tabpanel');
-        const form = createElement('form', 'qlsm-form');
+        const form = createElement('form', 'qlsm-form qqnt-toolbox-scrollable');
         const downloadSection = createElement('section', 'qlsm-form-section');
         downloadSection.append(
             createElement('div', 'qlsm-form-title', '下载贴纸包'),

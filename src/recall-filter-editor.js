@@ -192,8 +192,6 @@ function injectStyle() {
     padding: 0 16px;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    scrollbar-width: thin;
 }
 #${EDITOR_ID} .qqnt-toolbox-recall-filter-row {
     display: grid;
@@ -413,7 +411,10 @@ export function createRecallFilterEditor(options = {}) {
                 : mode === 'whitelist'
                     ? '仅所选群和好友启用防撤回'
                     : '当前为全部生效，名单将在切换模式后使用'));
-        const list = createElement('div', 'qqnt-toolbox-recall-filter-list');
+        const list = createElement(
+            'div',
+            'qqnt-toolbox-recall-filter-list qqnt-toolbox-scrollable'
+        );
         const footer = createElement('div', 'qqnt-toolbox-recall-filter-footer');
         const count = createElement('div', 'qqnt-toolbox-recall-filter-count');
         const actions = createElement('div', 'qqnt-toolbox-recall-filter-actions');

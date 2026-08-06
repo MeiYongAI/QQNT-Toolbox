@@ -255,7 +255,7 @@
         header.append(title, closeButton);
 
         const body = document.createElement('div');
-        body.className = 'qr-result-body';
+        body.className = 'qr-result-body qqnt-toolbox-scrollable';
         const summary = document.createElement('p');
         summary.className = 'qr-result-summary';
         summary.textContent = infos.length

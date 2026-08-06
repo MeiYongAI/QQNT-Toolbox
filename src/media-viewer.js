@@ -1558,6 +1558,9 @@
             return;
         }
         if (event.key === 'Escape') {
+            if (viewer.classList.contains('is-concealed')) {
+                return;
+            }
             event.preventDefault();
             if (settingsMenuOpen) {
                 closePlayerSettings();

@@ -160,8 +160,6 @@ function injectStyle() {
     padding: 0 16px 12px;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    scrollbar-width: thin;
 }
 #${EDITOR_ID} .qqnt-toolbox-auto-reaction-item {
     position: relative;
@@ -332,7 +330,10 @@ export function createAutoReactionEditor(options = {}) {
             tabs.append(tab);
         }
         toolbar.append(search, tabs);
-        const grid = createElement('div', 'qqnt-toolbox-auto-reaction-grid');
+        const grid = createElement(
+            'div',
+            'qqnt-toolbox-auto-reaction-grid qqnt-toolbox-scrollable'
+        );
         const footer = createElement('div', 'qqnt-toolbox-auto-reaction-footer');
         const count = createElement('div', 'qqnt-toolbox-auto-reaction-count');
         const actions = createElement('div', 'qqnt-toolbox-auto-reaction-actions');

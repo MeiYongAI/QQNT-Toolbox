@@ -525,9 +525,6 @@ function injectStyle() {
     padding: 6px 12px;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    scrollbar-width: thin;
-    scrollbar-color: var(--fill_standard_secondary, rgba(127, 127, 127, .30)) transparent;
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-empty {
     display: grid;
@@ -537,13 +534,6 @@ function injectStyle() {
     box-sizing: border-box;
     color: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
     text-align: center;
-}
-#${EDITOR_ID} .qqnt-toolbox-menu-order-list::-webkit-scrollbar {
-    width: 6px;
-}
-#${EDITOR_ID} .qqnt-toolbox-menu-order-list::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: var(--fill_standard_secondary, rgba(127, 127, 127, .30));
 }
 #${EDITOR_ID} .qqnt-toolbox-menu-order-row {
     display: grid;
@@ -1377,7 +1367,10 @@ export function createContextMenuOrderController(options) {
 
         const tabs = createElement('div', 'qqnt-toolbox-menu-order-tabs');
         tabs.setAttribute('role', 'tablist');
-        const list = createElement('div', 'qqnt-toolbox-menu-order-list');
+        const list = createElement(
+            'div',
+            'qqnt-toolbox-menu-order-list qqnt-toolbox-scrollable'
+        );
         list.id = `${EDITOR_ID}-list`;
         list.setAttribute('role', 'list');
         const footer = createElement('div', 'qqnt-toolbox-menu-order-footer');

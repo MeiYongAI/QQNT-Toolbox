@@ -757,7 +757,7 @@ export function createLocalStickerController(options = {}) {
         const header = createElement('header', 'qls-header');
         headerTitle = createElement('div', 'qls-title', '\u672c\u5730\u8d34\u7eb8');
         header.append(headerTitle);
-        content = createElement('div', 'qls-content');
+        content = createElement('div', 'qls-content qqnt-toolbox-scrollable');
         packBar = createElement('footer', 'qls-bar');
         packBar.append(createElement('div', 'qls-pack-list'));
         const actions = createElement('div', 'qls-actions');
@@ -955,7 +955,8 @@ export function createLocalStickerController(options = {}) {
     }
 
     function handleKeyDown(event) {
-        if (event.key === 'Escape' && !root?.hidden) {
+        if (event.key === 'Escape' && root && !root.hidden && root.isConnected &&
+            root.getClientRects().length > 0) {
             consumeEvent(event);
             close();
             return;

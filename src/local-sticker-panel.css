@@ -78,29 +78,6 @@
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
-    scrollbar-color: transparent transparent;
-}
-
-#qqnt-toolbox-local-sticker-panel:hover .qls-content {
-    scrollbar-color: var(--fill_standard_secondary, rgba(127, 127, 127, 0.3)) transparent;
-}
-
-.qls-content::-webkit-scrollbar {
-    width: 6px;
-}
-
-.qls-content::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.qls-content::-webkit-scrollbar-thumb {
-    border-radius: 999px;
-    background: transparent;
-}
-
-#qqnt-toolbox-local-sticker-panel:hover .qls-content::-webkit-scrollbar-thumb {
-    background: var(--fill_standard_secondary, rgba(127, 127, 127, 0.3));
 }
 
 .qls-grid {

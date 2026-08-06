@@ -182,7 +182,6 @@
     padding: 7px;
     overflow-x: hidden;
     overflow-y: auto;
-    scrollbar-width: thin;
 }
 
 #qqnt-toolbox-message-image-manager .qmim-category-row {
@@ -276,7 +275,6 @@
     border-radius: 6px;
     background: var(--qmim-surface);
     box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
-    scrollbar-width: thin;
 }
 
 #qqnt-toolbox-message-image-manager .qmim-category-menu[hidden] {
@@ -306,8 +304,6 @@
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-gutter: stable;
-    scrollbar-width: thin;
 }
 
 #qqnt-toolbox-message-image-manager .qmim-grid[data-busy="true"] {

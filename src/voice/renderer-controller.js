@@ -423,10 +423,12 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
             return;
         }
         if (event.type === 'keydown' && event.key === 'Escape') {
+            if (!libraryPanel.handleEscape()) {
+                return;
+            }
             event.preventDefault();
             event.stopPropagation();
             event.stopImmediatePropagation?.();
-            libraryPanel.handleEscape();
             return;
         }
         if (libraryPanel.contains(event.target)) {
