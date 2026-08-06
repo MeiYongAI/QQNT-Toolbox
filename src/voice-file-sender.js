@@ -267,7 +267,7 @@ async function getFileMd5(filePath) {
 }
 
 function getBufferMd5(data) {
-    return crypto.createHash('md5').update(Buffer.from(data)).digest('hex');
+    return crypto.createHash('sha256').update(Buffer.from(data)).digest('hex');
 }
 
 async function ensureLibraryDirs() {
