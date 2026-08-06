@@ -651,6 +651,29 @@ test('uses Telegram-style custom video controls in the standalone viewer', () =>
     assert.doesNotMatch(rendererSource, /qqnt-toolbox-inline-media-preview|qqnt-toolbox-media-stage/);
 });
 
+test('copies the current decoded video frame from both shared media menu entry points', () => {
+    const viewerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.js'), 'utf8');
+    const viewerHtml = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.html'), 'utf8');
+    const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+    const copyFrameSource = mainSource.slice(
+        mainSource.indexOf('function copyMediaViewerFrame'),
+        mainSource.indexOf('async function jumpToMediaViewerMessage')
+    );
+
+    assert.match(viewerHtml, /id="copy-frame"[\s\S]*<span>复制当前帧<\/span>/);
+    assert.match(viewerSource, /copyFrame\.hidden = item\?\.type !== 'video'/);
+    assert.match(viewerSource, /isLocalCaptureSource\(source\) \|\| item\.needsResolve === true/);
+    assert.match(viewerSource, /media\.crossOrigin = 'anonymous'/);
+    assert.match(viewerSource, /canvas\.width = rotated \? sourceHeight : sourceWidth/);
+    assert.match(viewerSource, /context\.rotate\(rotation \* Math\.PI \/ 180\)/);
+    assert.match(viewerSource, /context\.drawImage\(video, -sourceWidth \/ 2, -sourceHeight \/ 2, sourceWidth, sourceHeight\)/);
+    assert.match(viewerSource, /runAction\('copy-frame', \{[\s\S]*frameData/);
+    assert.match(copyFrameSource, /selection\.item\.type !== 'video'/);
+    assert.match(copyFrameSource, /nativeImage\.createFromBuffer\(frameData\)/);
+    assert.match(copyFrameSource, /clipboard\.writeImage\(image\)/);
+    assert.match(mainSource, /type === 'copy-frame'[\s\S]*copyMediaViewerFrame\(selection, payload\)/);
+});
+
 test('does not show native hover tooltips on media viewer controls', () => {
     const viewerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.js'), 'utf8');
     const viewerHtml = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.html'), 'utf8');

@@ -3,6 +3,7 @@ const ROOT_ID = 'qqnt-toolbox-message-to-image-render-root';
 const TOAST_ID = 'qqnt-toolbox-message-image-toast';
 const TOOLBAR_BUTTON_CLASS = 'qqnt-toolbox-message-to-image-toolbar-button';
 const MESSAGE_ONLY_CLASS = 'qqnt-toolbox-message-image-only-message';
+const SNAPSHOT_ATTRIBUTE = 'data-qqnt-toolbox-message-image-snapshot';
 const MESSAGE_ADDON_SELECTOR = [
     '[class*="reaction" i]',
     '.emoji-like',
@@ -138,6 +139,33 @@ export function sortMessageImageElements(elements) {
             const rightRect = right.getBoundingClientRect();
             return leftRect.top - rightRect.top || leftRect.left - rightRect.left;
         });
+}
+
+function compareMessageImageOrderValue(left, right) {
+    const leftValue = String(left ?? '').trim();
+    const rightValue = String(right ?? '').trim();
+    if (!leftValue || !rightValue || leftValue === '0' || rightValue === '0') {
+        return 0;
+    }
+    if (/^-?\d+$/.test(leftValue) && /^-?\d+$/.test(rightValue)) {
+        try {
+            const leftNumber = BigInt(leftValue);
+            const rightNumber = BigInt(rightValue);
+            return leftNumber < rightNumber ? -1 : leftNumber > rightNumber ? 1 : 0;
+        } catch {
+        }
+    }
+    return leftValue.localeCompare(rightValue);
+}
+
+export function compareMessageImageRecords(left = {}, right = {}) {
+    for (const field of ['msgTime', 'msgSeq']) {
+        const result = compareMessageImageOrderValue(left?.[field], right?.[field]);
+        if (result) {
+            return result;
+        }
+    }
+    return 0;
 }
 
 export function getMessageImageContentElement(message) {
@@ -933,7 +961,12 @@ export function createMessageImageController(options = {}) {
     const save = typeof options.save === 'function' ? options.save : async () => ({ ok: false });
     const onError = typeof options.onError === 'function' ? options.onError : () => {};
     const onDiagnostic = typeof options.onDiagnostic === 'function' ? options.onDiagnostic : () => {};
+    const sourceRecords = new WeakMap();
+    const sourceOrders = new WeakMap();
+    const selectionSnapshots = new Map();
     let observer = null;
+    let selectionObserver = null;
+    let selectionObserverTarget = null;
     let toolbarStateObserver = null;
     let toolbarVisibilityObserver = null;
     let toolbarVisibilityTargets = [];
@@ -943,6 +976,12 @@ export function createMessageImageController(options = {}) {
     let rendererPromise = null;
     let installTimer = 0;
     let toastTimer = 0;
+    let selectionCaptureTimer = 0;
+    let selectionClearTimer = 0;
+    let selectionOrder = 0;
+    let selectionScope = null;
+    let selectionToolbar = null;
+    let selectionTrackingInstalled = false;
 
     function showToast(message, error = false) {
         windowRef.clearTimeout(toastTimer);
@@ -985,17 +1024,97 @@ export function createMessageImageController(options = {}) {
         return rendererPromise;
     }
 
+    function getSourceRecord(message) {
+        return sourceRecords.get(message) || getMessageRecord(message);
+    }
+
+    function isMessageImageSource(value) {
+        return isRenderableElement(value) || Boolean(
+            value?.nodeType === 1 && value.getAttribute?.(SNAPSHOT_ATTRIBUTE) === 'true'
+        );
+    }
+
+    function sortMessageImageSources(elements) {
+        const unique = Array.from(new Set(Array.isArray(elements) ? elements : []))
+            .filter(isMessageImageSource);
+        return unique.sort((left, right) => {
+            const leftIsSnapshot = !isRenderableElement(left);
+            const rightIsSnapshot = !isRenderableElement(right);
+            if (leftIsSnapshot || rightIsSnapshot) {
+                const recordOrder = compareMessageImageRecords(
+                    getSourceRecord(left),
+                    getSourceRecord(right)
+                );
+                if (recordOrder) {
+                    return recordOrder;
+                }
+                const leftOrder = sourceOrders.get(left) || 0;
+                const rightOrder = sourceOrders.get(right) || 0;
+                if (leftOrder !== rightOrder) {
+                    return leftOrder - rightOrder;
+                }
+            }
+            const leftRect = left.getBoundingClientRect?.() || { top: 0, left: 0 };
+            const rightRect = right.getBoundingClientRect?.() || { top: 0, left: 0 };
+            return leftRect.top - rightRect.top || leftRect.left - rightRect.left;
+        });
+    }
+
+    function getSelectionScope(toolbar) {
+        const candidate = getMessageScope(toolbar);
+        return candidate && candidate !== documentRef
+            ? candidate
+            : selectionScope || candidate || documentRef;
+    }
+
+    function createSelectionSnapshot(message, record, key, order = 0) {
+        const snapshot = message?.cloneNode?.(true);
+        if (!snapshot) {
+            return null;
+        }
+        try {
+            copyDynamicMedia(message, snapshot, documentRef);
+        } catch {
+        }
+        snapshot.setAttribute?.(SNAPSHOT_ATTRIBUTE, 'true');
+        sourceRecords.set(snapshot, record);
+        order = Number(order) || ++selectionOrder;
+        sourceOrders.set(snapshot, order);
+        return { key, element: snapshot, record, live: message, order };
+    }
+
+    function rememberSelectedMessage(message, record, key, scope, refresh = false) {
+        if (!message || !record || !key) {
+            return null;
+        }
+        let entry = selectionSnapshots.get(key);
+        if (!entry || entry.live !== message || refresh) {
+            const next = createSelectionSnapshot(message, record, key, entry?.order);
+            if (!next) {
+                return null;
+            }
+            entry = next;
+            selectionSnapshots.set(key, entry);
+        } else {
+            entry.record = record;
+            sourceRecords.set(entry.element, record);
+        }
+        entry.scope = scope;
+        entry.live = message;
+        return entry;
+    }
+
     function collectMessages(root) {
         const messages = [];
         const seenElements = new Set();
         const seenRecords = new Set();
-        root.querySelectorAll?.('.message, .ml-item').forEach(candidate => {
+        root?.querySelectorAll?.('.message, .ml-item').forEach(candidate => {
             const message = getMessageElement(candidate);
             if (!isRenderableElement(message) || seenElements.has(message)) {
                 return;
             }
             seenElements.add(message);
-            const record = getMessageRecord(message);
+            const record = getSourceRecord(message);
             const key = getRecordKey(record);
             if (!key || seenRecords.has(key)) {
                 return;
@@ -1006,32 +1125,216 @@ export function createMessageImageController(options = {}) {
         return sortMessageImageElements(messages);
     }
 
-    function collectSelectedMessages(toolbar, recordSelection = true) {
-        const scope = getMessageScope(toolbar) || documentRef;
+    function captureVisibleSelection(toolbar) {
+        const scope = getSelectionScope(toolbar);
+        if (scope && scope !== documentRef) {
+            selectionScope = scope;
+        }
         const messages = collectMessages(scope);
-        const selected = messages.filter(message => {
+        const selected = [];
+        for (const message of messages) {
             const row = message.closest?.('.ml-item') || message;
             const marker = findNativeSelectionMarker(row, message, windowRef);
-            return marker && isNativeSelectionMarkerChecked(marker, windowRef);
-        });
-        if (recordSelection) {
-            onDiagnostic('message-image.native-selection', {
-                selected: selected.length,
-                visible: messages.length
-            });
+            if (!marker) {
+                continue;
+            }
+            const record = getSourceRecord(message);
+            const key = getRecordKey(record);
+            if (!key) {
+                continue;
+            }
+            if (isNativeSelectionMarkerChecked(marker, windowRef)) {
+                const entry = rememberSelectedMessage(message, record, key, scope);
+                if (entry) {
+                    selected.push(message);
+                }
+            } else {
+                selectionSnapshots.delete(key);
+            }
         }
-        return selected;
+        return { scope, messages, selected };
     }
 
-    async function renderMessages(elements) {
+    function collectSelectedMessages(toolbar, recordSelection = true) {
+        const capture = captureVisibleSelection(toolbar);
+        const selected = new Map();
+        for (const [key, entry] of selectionSnapshots) {
+            selected.set(key, entry.element);
+        }
+        for (const message of capture.selected) {
+            const record = getSourceRecord(message);
+            const key = getRecordKey(record);
+            if (key) {
+                selected.set(key, message);
+            }
+        }
+        const result = sortMessageImageSources(Array.from(selected.values()));
+        if (recordSelection) {
+            onDiagnostic('message-image.native-selection', {
+                selected: result.length,
+                visible: capture.messages.length
+            });
+        }
+        return result;
+    }
+
+    function getMessageCandidatesFromNode(node) {
+        if (!node || node.nodeType !== 1) {
+            return [];
+        }
+        const candidates = [];
+        if (node.matches?.('.message, .ml-item')) {
+            candidates.push(node);
+        }
+        candidates.push(...Array.from(node.querySelectorAll?.('.message, .ml-item') || []));
+        return candidates;
+    }
+
+    function captureRemovedSelectedMessages(mutations) {
+        if (!selectionToolbar && !activeToolbar) {
+            return;
+        }
+        const scope = selectionScope || getSelectionScope(activeToolbar || selectionToolbar);
+        const seen = new Set();
+        for (const mutation of mutations) {
+            for (const node of Array.from(mutation.removedNodes || [])) {
+                for (const candidate of getMessageCandidatesFromNode(node)) {
+                    const message = getMessageElement(candidate);
+                    if (!message || seen.has(message)) {
+                        continue;
+                    }
+                    seen.add(message);
+                    const row = message.closest?.('.ml-item') || message;
+                    const marker = findNativeSelectionMarker(row, message, windowRef);
+                    if (!marker || !isNativeSelectionMarkerChecked(marker, windowRef)) {
+                        continue;
+                    }
+                    const record = getMessageRecord(message);
+                    const key = getRecordKey(record);
+                    rememberSelectedMessage(message, record, key, scope, true);
+                }
+            }
+        }
+    }
+
+    function mutationTouchesMessages(mutation) {
+        if (mutation.target?.closest?.('.message, .ml-item, .chat-msg-area, .message-panel')) {
+            return true;
+        }
+        return [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])]
+            .some(node => getMessageCandidatesFromNode(node).length > 0);
+    }
+
+    function scheduleSelectionCapture() {
+        if (selectionCaptureTimer || !activeToolbar?.isConnected) {
+            return;
+        }
+        selectionCaptureTimer = windowRef.setTimeout(() => {
+            selectionCaptureTimer = 0;
+            if (activeToolbar?.isConnected) {
+                captureVisibleSelection(activeToolbar);
+            }
+        }, 0);
+    }
+
+    function handleSelectionInteraction(event) {
+        if (!activeToolbar?.isConnected) {
+            return;
+        }
+        const target = event.target;
+        const messageInteraction = Boolean(target?.closest?.('.message, .ml-item'));
+        const initialPointerEvent = event.type === 'pointerdown' ||
+            (event.type === 'mousedown' && typeof windowRef.PointerEvent !== 'function');
+        if (messageInteraction && initialPointerEvent) {
+            captureVisibleSelection(activeToolbar);
+        }
+        if (event.type === 'scroll' || messageInteraction || activeToolbar.contains?.(target)) {
+            scheduleSelectionCapture();
+        }
+    }
+
+    function bindSelectionTracking() {
+        windowRef.clearTimeout(selectionClearTimer);
+        selectionClearTimer = 0;
+        if (!selectionTrackingInstalled && typeof documentRef.addEventListener === 'function') {
+            selectionTrackingInstalled = true;
+            for (const eventName of ['pointerdown', 'mousedown', 'pointerup', 'click', 'change', 'keyup', 'scroll']) {
+                documentRef.addEventListener(eventName, handleSelectionInteraction, true);
+            }
+        }
+        const target = selectionScope && selectionScope !== documentRef
+            ? selectionScope
+            : documentRef.body;
+        if (!target || selectionObserverTarget === target) {
+            return;
+        }
+        selectionObserver?.disconnect();
+        const Observer = windowRef.MutationObserver || MutationObserver;
+        selectionObserver = new Observer(mutations => {
+            captureRemovedSelectedMessages(mutations);
+            if (mutations.some(mutationTouchesMessages)) {
+                scheduleSelectionCapture();
+            }
+        });
+        selectionObserver.observe(target, {
+            attributes: true,
+            attributeFilter: ['aria-checked', 'aria-selected', 'class', 'data-checked', 'data-state', 'hidden', 'style'],
+            childList: true,
+            subtree: true
+        });
+        selectionObserverTarget = target;
+    }
+
+    function clearSelectionTracking(clearSnapshots = true) {
+        if (selectionTrackingInstalled && typeof documentRef.removeEventListener === 'function') {
+            for (const eventName of ['pointerdown', 'mousedown', 'pointerup', 'click', 'change', 'keyup', 'scroll']) {
+                documentRef.removeEventListener(eventName, handleSelectionInteraction, true);
+            }
+        }
+        selectionTrackingInstalled = false;
+        selectionObserver?.disconnect();
+        selectionObserver = null;
+        selectionObserverTarget = null;
+        windowRef.clearTimeout(selectionCaptureTimer);
+        selectionCaptureTimer = 0;
+        if (clearSnapshots) {
+            windowRef.clearTimeout(selectionClearTimer);
+            selectionClearTimer = 0;
+            selectionSnapshots.clear();
+            selectionScope = null;
+            selectionToolbar = null;
+            selectionOrder = 0;
+        }
+    }
+
+    function scheduleSelectionClear() {
+        if (selectionClearTimer) {
+            return;
+        }
+        selectionClearTimer = windowRef.setTimeout(() => {
+            selectionClearTimer = 0;
+            if (!isEnabled()) {
+                clearSelectionTracking();
+                return;
+            }
+            const info = findNativeMultiSelectToolbar(documentRef, windowRef);
+            if (info) {
+                sync();
+                return;
+            }
+            clearSelectionTracking();
+        }, 80);
+    }
+
+    async function renderMessages(elements, renderOptions = {}) {
         if (!isEnabled() || busy) {
             return { ok: false, reason: busy ? 'busy' : 'disabled' };
         }
-        const messages = sortMessageImageElements(elements).slice(0, MAX_RENDER_MESSAGES);
+        const messages = sortMessageImageSources(elements).slice(0, MAX_RENDER_MESSAGES);
         if (!messages.length) {
             return { ok: false, reason: 'no-message', message: '没有可转换的消息' };
         }
-        const records = messages.map(getMessageRecord);
+        const records = messages.map(getSourceRecord);
         const namingMetadata = resolveMessageImageNamingMetadata(
             messages.map((message, index) => ({
                 record: records[index],
@@ -1045,7 +1348,8 @@ export function createMessageImageController(options = {}) {
         const surface = documentRef.createElement('div');
         surface.id = ROOT_ID;
         surface.setAttribute('aria-hidden', 'true');
-        const scope = getMessageScope(messages[0]) || documentRef;
+        const liveMessage = messages.find(isRenderableElement);
+        const scope = renderOptions.scope || getMessageScope(liveMessage || messages[0]) || documentRef;
         const background = getMessageImageBackground(messages[0], scope, windowRef, documentRef);
         const withBackground = includeBackground();
         const withBackgroundWhitespace = withBackground && includeBackgroundWhitespace();
@@ -1203,7 +1507,7 @@ export function createMessageImageController(options = {}) {
             if (!selected.length) {
                 return;
             }
-            const rendering = renderMessages(selected);
+            const rendering = renderMessages(selected, { scope: selectionScope });
             markToolbarButtonBusy(button);
             Promise.resolve(rendering).catch(onError);
         }, true);
@@ -1320,6 +1624,7 @@ export function createMessageImageController(options = {}) {
         if (!isEnabled()) {
             clearToolbarState();
             clearToolbarVisibility();
+            clearSelectionTracking();
             documentRef.querySelectorAll(`.${TOOLBAR_BUTTON_CLASS}`).forEach(button => button.remove());
             activeToolbar = null;
             return;
@@ -1329,13 +1634,18 @@ export function createMessageImageController(options = {}) {
         if (activeToolbar && activeToolbar !== info?.toolbar) {
             activeToolbar.querySelector?.(`.${TOOLBAR_BUTTON_CLASS}`)?.remove();
             clearToolbarState();
+            clearSelectionTracking(false);
         }
         activeToolbar = info?.toolbar || null;
         if (info) {
+            selectionToolbar = info.toolbar;
+            captureVisibleSelection(info.toolbar);
+            bindSelectionTracking();
             const stateSourceChanged = bindToolbarState(info);
             refreshToolbarButton(info, stateSourceChanged);
         } else {
             clearToolbarState();
+            scheduleSelectionClear();
         }
     }
 
@@ -1353,15 +1663,21 @@ export function createMessageImageController(options = {}) {
         const Observer = windowRef.MutationObserver || MutationObserver;
         observer = new Observer(mutations => {
             if (activeToolbar && !activeToolbar.isConnected) {
+                captureRemovedSelectedMessages(mutations);
                 activeToolbar = null;
                 clearToolbarState();
+                clearSelectionTracking(false);
                 sync();
                 return;
             }
             if (activeToolbar?.isConnected) {
+                captureRemovedSelectedMessages(mutations);
                 if (mutations.some(mutation =>
                     mutation.target === activeToolbar || activeToolbar.contains?.(mutation.target))) {
                     sync();
+                }
+                if (mutations.some(mutationTouchesMessages)) {
+                    scheduleSelectionCapture();
                 }
                 return;
             }
@@ -1381,6 +1697,7 @@ export function createMessageImageController(options = {}) {
         observer = null;
         clearToolbarState();
         clearToolbarVisibility();
+        clearSelectionTracking();
         windowRef.clearTimeout(installTimer);
         installTimer = 0;
         windowRef.clearTimeout(toastTimer);

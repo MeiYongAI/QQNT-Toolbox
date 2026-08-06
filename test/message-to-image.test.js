@@ -26,6 +26,22 @@ test('sorts messages by their current visual position without duplicates', async
     );
 });
 
+test('orders virtual-list message snapshots by chat time and sequence', async () => {
+    const { compareMessageImageRecords } = await modulePromise;
+    assert.equal(compareMessageImageRecords(
+        { msgTime: '1786000000', msgSeq: '90071992547409930' },
+        { msgTime: '1786000001', msgSeq: '1' }
+    ), -1);
+    assert.equal(compareMessageImageRecords(
+        { msgTime: '1786000000', msgSeq: '90071992547409930' },
+        { msgTime: '1786000000', msgSeq: '90071992547409931' }
+    ), -1);
+    assert.equal(compareMessageImageRecords(
+        { msgTime: '', msgSeq: '102' },
+        { msgTime: '', msgSeq: '101' }
+    ), 1);
+});
+
 test('formats one concise save toast from the actual output filename', async () => {
     const { getMessageImageToastPresentation } = await modulePromise;
     assert.deepEqual(
@@ -417,6 +433,15 @@ test('renders cleaned DOM clones and has no custom multi-select overlay or windo
     assert.doesNotMatch(source, /includeReactions|INCLUDE_REACTIONS_CLASS/);
     assert.match(source, /findNativeMultiSelectToolbar/);
     assert.match(source, /qqnt-toolbox-message-to-image-toolbar-button/);
+    assert.match(source, /selectionSnapshots/);
+    assert.match(source, /captureRemovedSelectedMessages/);
+    assert.match(source, /for \(const message of capture\.selected\)[\s\S]*selected\.set\(key, message\)/);
+    assert.doesNotMatch(source, /key && !selected\.has\(key\)/);
+    assert.match(source, /rememberSelectedMessage\(message, record, key, scope, true\)/);
+    assert.match(source, /selectionObserver\.observe/);
+    assert.match(source, /clearSelectionTracking\(false\)/);
+    assert.match(source, /function scheduleSelectionClear\(\)[\s\S]*setTimeout\([\s\S]*findNativeMultiSelectToolbar/);
+    assert.match(source, /sortMessageImageSources/);
     assert.match(source, /\.message-container\s*\{[\s\S]*?background-color:\s*transparent\s*!important/);
     assert.match(source, /labels\.get\('合并转发'\)/);
     assert.match(source, /toolbarStateObserver\.observe\(stateSource/);

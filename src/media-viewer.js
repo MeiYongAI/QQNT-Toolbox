@@ -54,6 +54,7 @@
     const moreMenu = document.getElementById('more-menu');
     const menuSave = document.getElementById('menu-save');
     const copyImage = document.getElementById('copy-image');
+    const copyFrame = document.getElementById('copy-frame');
     const scanQr = document.getElementById('scan-qr');
     const showInFolder = document.getElementById('show-in-folder');
     const openExternal = document.getElementById('open-external');
@@ -97,6 +98,7 @@
     let latestPointer = null;
     let controlsPointerAnchor = null;
     let nativeFallbackKey = '';
+    let frameCopyPending = false;
     let savedVolume = readSavedVolume();
     let savedPlaybackRate = readSavedPlaybackRate();
     let lastPositiveVolume = savedVolume > 0 ? savedVolume : 1;
@@ -267,8 +269,19 @@
         return `${item.src}${separator}qqnt_toolbox_retry=${item.loadRevision}`;
     }
 
+    function isLocalCaptureSource(source) {
+        try {
+            const url = new URL(source);
+            return url.protocol === 'http:' &&
+                ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+        } catch {
+            return false;
+        }
+    }
+
     function loadMediaElement(item, index, galleryId, signal) {
         const isVideo = item.type === 'video';
+        const source = getMediaSource(item);
         const media = document.createElement(isVideo ? 'video' : 'img');
         media.className = 'media-content';
         media.draggable = false;
@@ -280,6 +293,10 @@
             media.playsInline = true;
             media.controls = false;
             media.disableRemotePlayback = true;
+            if (/^https?:/i.test(source) &&
+                (isLocalCaptureSource(source) || item.needsResolve === true)) {
+                media.crossOrigin = 'anonymous';
+            }
             if (item.previewSrc) {
                 media.poster = item.previewSrc;
             }
@@ -327,7 +344,7 @@
                 handleAbort();
                 return;
             }
-            media.src = getMediaSource(item);
+            media.src = source;
             media.load?.();
             if ((!isVideo && media.complete && media.naturalWidth > 0) ||
                 (isVideo && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA)) {
@@ -955,6 +972,7 @@
         showInFolder.hidden = !item;
         openExternal.hidden = !item;
         copyImage.hidden = item?.type !== 'image';
+        copyFrame.hidden = item?.type !== 'video';
         scanQr.hidden = item?.type !== 'image' || state.qrScanEnabled !== true;
         jumpToMessage.hidden = item?.canJump !== true;
     }
@@ -1168,6 +1186,66 @@
         }
     }
 
+    function canvasToPngBlob(canvas) {
+        return new Promise((resolve, reject) => {
+            try {
+                canvas.toBlob(blob => {
+                    if (blob?.size) {
+                        resolve(blob);
+                    } else {
+                        reject(new Error('Current frame encoding failed.'));
+                    }
+                }, 'image/png');
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    async function copyCurrentFrame() {
+        const video = activeMedia?.tagName === 'VIDEO' ? activeMedia : null;
+        const sourceWidth = Math.floor(Number(video?.videoWidth) || 0);
+        const sourceHeight = Math.floor(Number(video?.videoHeight) || 0);
+        if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+            sourceWidth <= 0 || sourceHeight <= 0) {
+            showToast('当前帧尚未就绪');
+            return;
+        }
+        if (frameCopyPending) {
+            return;
+        }
+        frameCopyPending = true;
+        copyFrame.setAttribute('aria-busy', 'true');
+        const galleryId = state.galleryId;
+        const index = state.index;
+        try {
+            const rotation = ((Math.round(mediaRotation / 90) * 90) % 360 + 360) % 360;
+            const rotated = rotation === 90 || rotation === 270;
+            const canvas = document.createElement('canvas');
+            canvas.width = rotated ? sourceHeight : sourceWidth;
+            canvas.height = rotated ? sourceWidth : sourceHeight;
+            const context = canvas.getContext('2d', { alpha: false });
+            if (!context) {
+                throw new Error('Current frame canvas is unavailable.');
+            }
+            context.translate(canvas.width / 2, canvas.height / 2);
+            context.rotate(rotation * Math.PI / 180);
+            context.drawImage(video, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
+            const blob = await canvasToPngBlob(canvas);
+            const frameData = new Uint8Array(await blob.arrayBuffer());
+            await runAction('copy-frame', {
+                galleryId,
+                index,
+                frameData
+            });
+        } catch {
+            showToast('当前帧复制失败');
+        } finally {
+            frameCopyPending = false;
+            copyFrame.removeAttribute('aria-busy');
+        }
+    }
+
     function applyState(payload) {
         if (payload?.hidden === true) {
             const presentationId = normalizeText(payload?.presentationId);
@@ -1356,6 +1434,11 @@
     more.addEventListener('click', event => {
         event.stopPropagation();
         toggleMoreMenu();
+    });
+    copyFrame.addEventListener('click', event => {
+        event.stopPropagation();
+        closeMoreMenu();
+        copyCurrentFrame();
     });
     for (const [button, action] of [
         [jumpToMessage, 'jump-to-message'],

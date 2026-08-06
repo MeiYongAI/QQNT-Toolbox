@@ -253,6 +253,7 @@ const OPEN_MEDIA_VIEWER_COMMAND = 'openMediaViewer';
 const WINDOWS_MEDIA_VIEWER_STAGING_OPACITY = 1 / 255;
 const WINDOWS_MEDIA_VIEWER_OPACITY = 254 / 255;
 const MEDIA_VIEWER_PRESENT_TIMEOUT_MS = 750;
+const MAX_MEDIA_VIEWER_FRAME_BYTES = 128 * 1024 * 1024;
 const SET_MESSAGE_REACTION_COMMAND = 'nodeIKernelMsgService/setMsgEmojiLikes';
 const FORWARD_RESOURCE_DOWNLOAD_TIMEOUT_MS = 60 * 1000;
 const MAX_INLINE_MEDIA_PEERS = 40;
@@ -4818,6 +4819,35 @@ async function copyMediaViewerImage(selection) {
     return { ok: true, message: '已复制' };
 }
 
+function getMediaViewerFrameBuffer(value) {
+    if (Buffer.isBuffer(value)) {
+        return value;
+    }
+    if (value instanceof ArrayBuffer) {
+        return Buffer.from(value);
+    }
+    if (ArrayBuffer.isView(value)) {
+        return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    }
+    return null;
+}
+
+function copyMediaViewerFrame(selection, payload) {
+    if (selection.item.type !== 'video') {
+        return { ok: false };
+    }
+    const frameData = getMediaViewerFrameBuffer(payload?.frameData);
+    if (!frameData?.length || frameData.length > MAX_MEDIA_VIEWER_FRAME_BYTES) {
+        return { ok: false, message: '当前帧数据无效' };
+    }
+    const image = nativeImage.createFromBuffer(frameData);
+    if (!image || image.isEmpty()) {
+        return { ok: false, message: '当前帧数据无效' };
+    }
+    clipboard.writeImage(image);
+    return { ok: true, message: '已复制当前帧' };
+}
+
 async function jumpToMediaViewerMessage(selection) {
     const identity = selection.item.identity || {};
     const peerUid = normalizeText(identity.peerUid);
@@ -5026,6 +5056,9 @@ async function handleMediaViewerAction(payload = {}) {
         }
         if (type === 'copy-image') {
             return await copyMediaViewerImage(selection);
+        }
+        if (type === 'copy-frame') {
+            return copyMediaViewerFrame(selection, payload);
         }
         if (type === 'scan-qr') {
             if (selection.item.type !== 'image') {
